@@ -26,19 +26,41 @@ func newRootCommand() *cobra.Command {
 }
 
 func newAPICommand() *cobra.Command {
-	return &cobra.Command{
+	var pullSecretPath string
+	cmd := &cobra.Command{
 		Use:   "api",
 		Short: "Run the OpenShift API control plane",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAPI(cmd.Context())
+			return runAPI(cmd.Context(), pullSecretPath)
 		},
 	}
+	cmd.Flags().StringVar(&pullSecretPath, "pull-secret", "", "path to a Red Hat pull secret with credentials for the release image registry (required)")
+	cmd.MarkFlagRequired("pull-secret")
+	return cmd
 }
 
-func runAPI(ctx context.Context) error {
-	client, err := image.NewClient([]byte(`{"auths":{"quay.io":{}}}`))
+func runAPI(ctx context.Context, pullSecretPath string) error {
+	pullSecret, err := os.ReadFile(pullSecretPath)
+	if err != nil {
+		return fmt.Errorf("read pull secret: %w", err)
+	}
+	client, err := image.NewClient(pullSecret)
 	if err != nil {
 		return fmt.Errorf("create image client: %w", err)
+	}
+
+	releaseFilesystem, err := os.MkdirTemp("", "coreshift-api-release-")
+	if err != nil {
+		return fmt.Errorf("create release image directory: %w", err)
+	}
+	defer os.RemoveAll(releaseFilesystem)
+	if err := client.PullAndUnpack(ctx, DefaultReleaseImage, releaseFilesystem); err != nil {
+		return fmt.Errorf("pull release image: %w", err)
+	}
+
+	etcdImage, err := image.ResolveComponentImage(releaseFilesystem, "etcd")
+	if err != nil {
+		return fmt.Errorf("resolve etcd image: %w", err)
 	}
 
 	filesystem, err := os.MkdirTemp("", "coreshift-api-image-")
@@ -46,8 +68,8 @@ func runAPI(ctx context.Context) error {
 		return fmt.Errorf("create image directory: %w", err)
 	}
 	defer os.RemoveAll(filesystem)
-	if err := client.PullAndUnpack(ctx, DefaultReleaseImage, filesystem); err != nil {
-		return err
+	if err := client.PullAndUnpack(ctx, etcdImage, filesystem); err != nil {
+		return fmt.Errorf("pull etcd image: %w", err)
 	}
 
 	binaries, err := os.MkdirTemp("", "coreshift-api-bin-")
