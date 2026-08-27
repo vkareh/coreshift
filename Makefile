@@ -4,6 +4,7 @@ GOLANGCI_LINT_VERSION ?= v1.64.8
 
 build:
 	go build ./...
+	go build -o coreshift ./cmd/coreshift
 
 lint:
 	@if command -v golangci-lint >/dev/null 2>&1; then \
