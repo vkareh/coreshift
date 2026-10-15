@@ -25,6 +25,8 @@ const (
 	AdminCertFilename       = "admin.crt"
 	AdminKeyFilename        = "admin.key"
 	AdminKubeconfigFilename = "admin.kubeconfig"
+	SAKeyFilename           = "sa.key"
+	SAPubFilename           = "sa.pub"
 )
 
 // GenerateAll generates every certificate and key needed to run a CoreShift
@@ -35,6 +37,7 @@ const (
 //	apiserver.crt, apiserver.key kube-apiserver serving certificate
 //	admin.crt, admin.key         cluster-admin client certificate
 //	admin.kubeconfig             kubeconfig for the admin client
+//	sa.key, sa.pub               service-account signing key pair
 //
 // The kubeconfig embeds the CA and admin certificate material, so it is
 // usable directly regardless of the output directory's location. outputDir
@@ -55,6 +58,10 @@ func GenerateAll(outputDir string, opts Options) error {
 	adminCertPEM, adminKeyPEM, err := GenerateClientCert(caCertPEM, caKeyPEM)
 	if err != nil {
 		return fmt.Errorf("generate admin client certificate: %w", err)
+	}
+	saKeyPEM, saPubPEM, err := GenerateServiceAccountKeyPair()
+	if err != nil {
+		return fmt.Errorf("generate service-account key pair: %w", err)
 	}
 
 	serverURL := opts.APIServerURL
@@ -78,6 +85,8 @@ func GenerateAll(outputDir string, opts Options) error {
 		{AdminCertFilename, adminCertPEM, 0o644},
 		{AdminKeyFilename, adminKeyPEM, 0o600},
 		{AdminKubeconfigFilename, kubeconfig, 0o600},
+		{SAKeyFilename, saKeyPEM, 0o600},
+		{SAPubFilename, saPubPEM, 0o644},
 	}
 	for _, f := range files {
 		path := filepath.Join(outputDir, f.name)

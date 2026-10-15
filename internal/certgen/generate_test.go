@@ -17,8 +17,8 @@ func TestGenerateAll(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	certs := []string{CACertFilename, APIServerCertFilename, AdminCertFilename}
-	keys := []string{CAKeyFilename, APIServerKeyFilename, AdminKeyFilename}
+	certs := []string{CACertFilename, APIServerCertFilename, AdminCertFilename, SAPubFilename}
+	keys := []string{CAKeyFilename, APIServerKeyFilename, AdminKeyFilename, SAKeyFilename}
 	for _, name := range append(append(certs, keys...), AdminKubeconfigFilename) {
 		if _, err := os.Stat(filepath.Join(outputDir, name)); err != nil {
 			t.Fatalf("expected %s to be written: %v", name, err)
@@ -87,7 +87,7 @@ func TestGenerateAllKeyPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{CAKeyFilename, APIServerKeyFilename, AdminKeyFilename, AdminKubeconfigFilename} {
+	for _, name := range []string{CAKeyFilename, APIServerKeyFilename, AdminKeyFilename, AdminKubeconfigFilename, SAKeyFilename} {
 		info, err := os.Stat(filepath.Join(outputDir, name))
 		if err != nil {
 			t.Fatal(err)
