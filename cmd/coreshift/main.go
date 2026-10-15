@@ -13,7 +13,7 @@ import (
 
 var version = "dev"
 
-const DefaultReleaseImage = "quay.io/openshift-release-dev/ocp-release:4.18.0-x86_64"
+const DefaultReleaseImage = "quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64"
 
 func newRootCommand() *cobra.Command {
 	root := &cobra.Command{
