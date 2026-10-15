@@ -61,10 +61,13 @@ func GenerateAdminKubeconfig(caCertPEM, caKeyPEM []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate client certificate: %w", err)
 	}
+	return generateKubeconfig(defaultAPIServerURL, caCertPEM, clientCertPEM, clientKeyPEM)
+}
 
+func generateKubeconfig(serverURL string, caCertPEM, clientCertPEM, clientKeyPEM []byte) ([]byte, error) {
 	config := clientcmdapi.NewConfig()
 	config.Clusters["coreshift"] = &clientcmdapi.Cluster{
-		Server:                   "https://127.0.0.1:6443",
+		Server:                   serverURL,
 		CertificateAuthorityData: caCertPEM,
 	}
 	config.AuthInfos["admin"] = &clientcmdapi.AuthInfo{
