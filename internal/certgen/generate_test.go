@@ -19,7 +19,7 @@ func TestGenerateAll(t *testing.T) {
 
 	certs := []string{CACertFilename, APIServerCertFilename, AdminCertFilename, SAPubFilename}
 	keys := []string{CAKeyFilename, APIServerKeyFilename, AdminKeyFilename, SAKeyFilename}
-	for _, name := range append(append(certs, keys...), AdminKubeconfigFilename) {
+	for _, name := range append(append(certs, keys...), AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename) {
 		if _, err := os.Stat(filepath.Join(outputDir, name)); err != nil {
 			t.Fatalf("expected %s to be written: %v", name, err)
 		}
@@ -67,6 +67,16 @@ func TestGenerateAllCustomAPIServerURL(t *testing.T) {
 	if cluster := config.Clusters["coreshift"]; cluster == nil || cluster.Server != "https://coreshift.example.com:6443" {
 		t.Fatalf("unexpected cluster config: %#v", cluster)
 	}
+
+	for _, name := range []string{ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename} {
+		config, err := clientcmd.Load(readFile(t, outputDir, name))
+		if err != nil {
+			t.Fatalf("load %s: %v", name, err)
+		}
+		if cluster := config.Clusters["coreshift"]; cluster == nil || cluster.Server != "https://coreshift.example.com:6443" {
+			t.Fatalf("unexpected cluster config in %s: %#v", name, cluster)
+		}
+	}
 }
 
 func TestGenerateAllCreatesNestedOutputDir(t *testing.T) {
@@ -87,7 +97,7 @@ func TestGenerateAllKeyPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{CAKeyFilename, APIServerKeyFilename, AdminKeyFilename, AdminKubeconfigFilename, SAKeyFilename} {
+	for _, name := range []string{CAKeyFilename, APIServerKeyFilename, AdminKeyFilename, AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, SAKeyFilename} {
 		info, err := os.Stat(filepath.Join(outputDir, name))
 		if err != nil {
 			t.Fatal(err)

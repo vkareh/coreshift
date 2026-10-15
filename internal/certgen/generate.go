@@ -18,29 +18,33 @@ const defaultAPIServerURL = "https://127.0.0.1:6443"
 
 // Artifacts written by GenerateAll into the output directory.
 const (
-	CACertFilename          = "ca.crt"
-	CAKeyFilename           = "ca.key"
-	APIServerCertFilename   = "apiserver.crt"
-	APIServerKeyFilename    = "apiserver.key"
-	AdminCertFilename       = "admin.crt"
-	AdminKeyFilename        = "admin.key"
-	AdminKubeconfigFilename = "admin.kubeconfig"
-	SAKeyFilename           = "sa.key"
-	SAPubFilename           = "sa.pub"
+	CACertFilename                      = "ca.crt"
+	CAKeyFilename                       = "ca.key"
+	APIServerCertFilename               = "apiserver.crt"
+	APIServerKeyFilename                = "apiserver.key"
+	AdminCertFilename                   = "admin.crt"
+	AdminKeyFilename                    = "admin.key"
+	AdminKubeconfigFilename             = "admin.kubeconfig"
+	ControllerManagerKubeconfigFilename = "kube-controller-manager.kubeconfig"
+	SchedulerKubeconfigFilename         = "kube-scheduler.kubeconfig"
+	SAKeyFilename                       = "sa.key"
+	SAPubFilename                       = "sa.pub"
 )
 
 // GenerateAll generates every certificate and key needed to run a CoreShift
-// control plane, plus an admin kubeconfig, writing all of them to outputDir.
+// control plane, plus client kubeconfigs, writing all of them to outputDir.
 // The on-disk layout is:
 //
-//	ca.crt, ca.key               self-signed certificate authority
-//	apiserver.crt, apiserver.key kube-apiserver serving certificate
-//	admin.crt, admin.key         cluster-admin client certificate
-//	admin.kubeconfig             kubeconfig for the admin client
-//	sa.key, sa.pub               service-account signing key pair
+//	ca.crt, ca.key                     self-signed certificate authority
+//	apiserver.crt, apiserver.key       kube-apiserver serving certificate
+//	admin.crt, admin.key               cluster-admin client certificate
+//	admin.kubeconfig                   kubeconfig for the admin client
+//	kube-controller-manager.kubeconfig kubeconfig for kube-controller-manager
+//	kube-scheduler.kubeconfig          kubeconfig for kube-scheduler
+//	sa.key, sa.pub                     service-account signing key pair
 //
-// The kubeconfig embeds the CA and admin certificate material, so it is
-// usable directly regardless of the output directory's location. outputDir
+// Each kubeconfig embeds the CA and its client's certificate material, so it
+// is usable directly regardless of the output directory's location. outputDir
 // is created if it does not exist.
 func GenerateAll(outputDir string, opts Options) error {
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
@@ -68,9 +72,17 @@ func GenerateAll(outputDir string, opts Options) error {
 	if serverURL == "" {
 		serverURL = defaultAPIServerURL
 	}
-	kubeconfig, err := generateKubeconfig(serverURL, caCertPEM, adminCertPEM, adminKeyPEM)
+	kubeconfig, err := generateKubeconfig(serverURL, "admin", caCertPEM, adminCertPEM, adminKeyPEM)
 	if err != nil {
 		return fmt.Errorf("generate admin kubeconfig: %w", err)
+	}
+	controllerManagerKubeconfig, err := generateComponentKubeconfig("system:kube-controller-manager", serverURL, caCertPEM, caKeyPEM)
+	if err != nil {
+		return fmt.Errorf("generate kube-controller-manager kubeconfig: %w", err)
+	}
+	schedulerKubeconfig, err := generateComponentKubeconfig("system:kube-scheduler", serverURL, caCertPEM, caKeyPEM)
+	if err != nil {
+		return fmt.Errorf("generate kube-scheduler kubeconfig: %w", err)
 	}
 
 	files := []struct {
@@ -85,6 +97,8 @@ func GenerateAll(outputDir string, opts Options) error {
 		{AdminCertFilename, adminCertPEM, 0o644},
 		{AdminKeyFilename, adminKeyPEM, 0o600},
 		{AdminKubeconfigFilename, kubeconfig, 0o600},
+		{ControllerManagerKubeconfigFilename, controllerManagerKubeconfig, 0o600},
+		{SchedulerKubeconfigFilename, schedulerKubeconfig, 0o600},
 		{SAKeyFilename, saKeyPEM, 0o600},
 		{SAPubFilename, saPubPEM, 0o644},
 	}

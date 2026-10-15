@@ -17,6 +17,15 @@ import (
 // GenerateClientCert creates a cluster-admin client certificate signed by the
 // CA certificate and key, both PEM encoded.
 func GenerateClientCert(caCertPEM, caKeyPEM []byte) (certPEM, keyPEM []byte, err error) {
+	return generateClientCert(caCertPEM, caKeyPEM, pkix.Name{
+		CommonName:   "admin",
+		Organization: []string{"system:masters"},
+	})
+}
+
+// generateClientCert creates a client certificate with the given subject
+// signed by the CA certificate and key, both PEM encoded.
+func generateClientCert(caCertPEM, caKeyPEM []byte, subject pkix.Name) (certPEM, keyPEM []byte, err error) {
 	caCert, caKey, err := parseCA(caCertPEM, caKeyPEM)
 	if err != nil {
 		return nil, nil, err
@@ -32,14 +41,11 @@ func GenerateClientCert(caCertPEM, caKeyPEM []byte) (certPEM, keyPEM []byte, err
 	}
 	template := &x509.Certificate{
 		SerialNumber: serial,
-		Subject: pkix.Name{
-			CommonName:   "admin",
-			Organization: []string{"system:masters"},
-		},
-		NotBefore:   time.Now(),
-		NotAfter:    time.Now().Add(1 * 365 * 24 * time.Hour),
-		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		Subject:      subject,
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(1 * 365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
 	if err != nil {
@@ -61,24 +67,37 @@ func GenerateAdminKubeconfig(caCertPEM, caKeyPEM []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate client certificate: %w", err)
 	}
-	return generateKubeconfig(defaultAPIServerURL, caCertPEM, clientCertPEM, clientKeyPEM)
+	return generateKubeconfig(defaultAPIServerURL, "admin", caCertPEM, clientCertPEM, clientKeyPEM)
 }
 
-func generateKubeconfig(serverURL string, caCertPEM, clientCertPEM, clientKeyPEM []byte) ([]byte, error) {
+// generateComponentKubeconfig creates a directly usable kubeconfig for a
+// control-plane component client identified by commonName. The embedded
+// client certificate carries no organization, unlike the admin client: these
+// identities get their permissions from kube-apiserver's built-in bootstrap
+// RBAC, so a privileged group would be unnecessary over-privilege.
+func generateComponentKubeconfig(commonName, serverURL string, caCertPEM, caKeyPEM []byte) ([]byte, error) {
+	clientCertPEM, clientKeyPEM, err := generateClientCert(caCertPEM, caKeyPEM, pkix.Name{CommonName: commonName})
+	if err != nil {
+		return nil, fmt.Errorf("generate client certificate: %w", err)
+	}
+	return generateKubeconfig(serverURL, commonName, caCertPEM, clientCertPEM, clientKeyPEM)
+}
+
+func generateKubeconfig(serverURL, user string, caCertPEM, clientCertPEM, clientKeyPEM []byte) ([]byte, error) {
 	config := clientcmdapi.NewConfig()
 	config.Clusters["coreshift"] = &clientcmdapi.Cluster{
 		Server:                   serverURL,
 		CertificateAuthorityData: caCertPEM,
 	}
-	config.AuthInfos["admin"] = &clientcmdapi.AuthInfo{
+	config.AuthInfos[user] = &clientcmdapi.AuthInfo{
 		ClientCertificateData: clientCertPEM,
 		ClientKeyData:         clientKeyPEM,
 	}
-	config.Contexts["admin@coreshift"] = &clientcmdapi.Context{
+	config.Contexts[user+"@coreshift"] = &clientcmdapi.Context{
 		Cluster:  "coreshift",
-		AuthInfo: "admin",
+		AuthInfo: user,
 	}
-	config.CurrentContext = "admin@coreshift"
+	config.CurrentContext = user + "@coreshift"
 
 	return clientcmd.Write(*config)
 }
