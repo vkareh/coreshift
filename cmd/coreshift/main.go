@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/vkareh/coreshift/internal/aggregation"
 	"github.com/vkareh/coreshift/internal/certgen"
 	"github.com/vkareh/coreshift/internal/supervisor"
 	"github.com/vkareh/coreshift/pkg/image"
@@ -15,6 +18,31 @@ import (
 var version = "dev"
 
 const DefaultReleaseImage = "quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64"
+
+// Local ports of the aggregated API servers. kube-apiserver reaches them
+// through the aggregation layer; the ports appear both in the server flags
+// and in the endpoints the aggregation wiring registers.
+const (
+	openShiftAPIServerPort = 8443
+	oauthAPIServerPort     = 8444
+)
+
+// aggregatedServers lists the aggregated API servers and the API groups
+// each one serves, without the openshift.io suffix. kube-apiserver proxies
+// these groups to the server named in each entry. The addresses are filled
+// in at startup; see runAPI.
+var aggregatedServers = []aggregation.Server{
+	{
+		Name:   "openshift-apiserver",
+		Port:   openShiftAPIServerPort,
+		Groups: []string{"apps", "authorization", "build", "image", "quota", "route", "security", "template", "project"},
+	},
+	{
+		Name:   "openshift-oauth-apiserver",
+		Port:   oauthAPIServerPort,
+		Groups: []string{"oauth", "user"},
+	},
+}
 
 func newRootCommand() *cobra.Command {
 	root := &cobra.Command{
@@ -80,8 +108,28 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 	if err != nil {
 		return fmt.Errorf("extract kube components: %w", err)
 	}
+	openShiftBinaries, err := client.ExtractOpenShiftComponents(ctx, releaseFilesystem, binaries, "openshift-apiserver", "oauth-apiserver")
+	if err != nil {
+		return fmt.Errorf("extract openshift components: %w", err)
+	}
 
 	schedulerConfig, err := writeSchedulerConfig(stateDir)
+	if err != nil {
+		return err
+	}
+
+	// Kubernetes validation rejects loopback endpoint addresses, so the
+	// aggregated servers must listen on the host's routable address, the
+	// same one kube-apiserver advertises for the kubernetes service.
+	advertiseAddress, err := defaultRouteAddress()
+	if err != nil {
+		return err
+	}
+	for i := range aggregatedServers {
+		aggregatedServers[i].Address = advertiseAddress
+	}
+
+	openShiftAPIServerConfig, err := writeOpenShiftAPIServerConfig(stateDir, advertiseAddress)
 	if err != nil {
 		return err
 	}
@@ -116,6 +164,28 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 				// OpenShift's service CIDR.
 				"--service-cluster-ip-range=172.30.0.0/16",
 				"--authorization-mode=RBAC",
+				// Delegated authentication for the aggregation layer: the
+				// requestheader flags publish how proxied requests carry user
+				// identity, and the proxy client flags identify kube-apiserver
+				// when forwarding to aggregated servers. Aggregator routing
+				// sends proxied traffic to endpoints instead of cluster IPs.
+				"--requestheader-client-ca-file=" + filepath.Join(stateDir, certgen.FrontProxyCACertFilename),
+				"--requestheader-allowed-names=kube-apiserver-proxy,system:kube-apiserver-proxy,system:openshift-aggregator",
+				"--requestheader-username-headers=X-Remote-User",
+				"--requestheader-group-headers=X-Remote-Group",
+				"--requestheader-extra-headers-prefix=X-Remote-Extra-",
+				"--proxy-client-cert-file=" + filepath.Join(stateDir, certgen.FrontProxyClientCertFilename),
+				"--proxy-client-key-file=" + filepath.Join(stateDir, certgen.FrontProxyClientKeyFilename),
+				"--enable-aggregator-routing=true",
+			},
+			AfterStart: func(ctx context.Context) error {
+				// The aggregated servers need kube-apiserver up for delegated
+				// auth, and the aggregation wiring needs it to accept writes.
+				// Bound the wait so a broken kube-apiserver fails the run
+				// instead of blocking startup forever.
+				ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				defer cancel()
+				return aggregation.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), aggregatedServers, filepath.Join(stateDir, certgen.CACertFilename))
 			},
 		},
 		{
@@ -136,6 +206,50 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 			Path: kubeBinaries["kube-scheduler"],
 			Args: []string{
 				"--config=" + schedulerConfig,
+			},
+		},
+		{
+			Name: "openshift-apiserver",
+			Path: openShiftBinaries["openshift-apiserver"],
+			Args: []string{
+				"start",
+				"--config=" + openShiftAPIServerConfig,
+				"--authentication-kubeconfig=" + filepath.Join(stateDir, certgen.OpenShiftAPIServerKubeconfigFilename),
+				"--authorization-kubeconfig=" + filepath.Join(stateDir, certgen.OpenShiftAPIServerKubeconfigFilename),
+				// The requestheader flags mirror kube-apiserver's, so
+				// proxied requests are authenticated by their front-proxy
+				// client certificate and headers.
+				"--requestheader-client-ca-file=" + filepath.Join(stateDir, certgen.FrontProxyCACertFilename),
+				"--requestheader-allowed-names=kube-apiserver-proxy,system:kube-apiserver-proxy,system:openshift-aggregator",
+				"--requestheader-username-headers=X-Remote-User",
+				"--requestheader-group-headers=X-Remote-Group",
+				"--requestheader-extra-headers-prefix=X-Remote-Extra-",
+				"--client-ca-file=" + filepath.Join(stateDir, certgen.CACertFilename),
+				// No oauth-server runs here for the apiserver to hand
+				// oauth flows to.
+				"--internal-oauth-disabled=true",
+			},
+		},
+		{
+			Name: "openshift-oauth-apiserver",
+			Path: openShiftBinaries["oauth-apiserver"],
+			Args: []string{
+				"start",
+				"--secure-port=" + fmt.Sprint(oauthAPIServerPort),
+				"--bind-address=" + advertiseAddress,
+				"--kubeconfig=" + filepath.Join(stateDir, certgen.OAuthAPIServerKubeconfigFilename),
+				"--authentication-kubeconfig=" + filepath.Join(stateDir, certgen.OAuthAPIServerKubeconfigFilename),
+				"--authorization-kubeconfig=" + filepath.Join(stateDir, certgen.OAuthAPIServerKubeconfigFilename),
+				"--etcd-servers=http://127.0.0.1:2379",
+				"--api-audiences=https://kubernetes.default.svc.cluster.local",
+				"--tls-cert-file=" + filepath.Join(stateDir, certgen.ServiceServingCertFilename),
+				"--tls-private-key-file=" + filepath.Join(stateDir, certgen.ServiceServingKeyFilename),
+				"--requestheader-client-ca-file=" + filepath.Join(stateDir, certgen.FrontProxyCACertFilename),
+				"--requestheader-allowed-names=kube-apiserver-proxy,system:kube-apiserver-proxy,system:openshift-aggregator",
+				"--requestheader-username-headers=X-Remote-User",
+				"--requestheader-group-headers=X-Remote-Group",
+				"--requestheader-extra-headers-prefix=X-Remote-Extra-",
+				"--client-ca-file=" + filepath.Join(stateDir, certgen.CACertFilename),
 			},
 		},
 	}
@@ -171,6 +285,8 @@ func ensureCertificates(stateDir string) error {
 		certgen.AdminKubeconfigFilename,
 		certgen.ControllerManagerKubeconfigFilename,
 		certgen.SchedulerKubeconfigFilename,
+		certgen.OpenShiftAPIServerKubeconfigFilename,
+		certgen.OAuthAPIServerKubeconfigFilename,
 		certgen.SAKeyFilename, certgen.SAPubFilename,
 	}
 	complete := true
@@ -226,6 +342,56 @@ leaderElection:
 		return "", fmt.Errorf("write kube-scheduler config: %w", err)
 	}
 	return path, nil
+}
+
+// writeOpenShiftAPIServerConfig writes openshift-apiserver's component
+// configuration: serving on the advertise address with the shared
+// service-serving certificate, storing to the local etcd, and
+// authenticating as the generated admin identity. The empty etcd TLS flag
+// overrides clear the in-pod client certificate paths that OpenShift's
+// config defaults would otherwise fill in for plain-http etcd.
+func writeOpenShiftAPIServerConfig(stateDir, advertiseAddress string) (string, error) {
+	path := filepath.Join(stateDir, "openshift-apiserver-config.yaml")
+	config := fmt.Sprintf(`apiVersion: openshiftcontrolplane.config.openshift.io/v1
+kind: OpenShiftAPIServerConfig
+servingInfo:
+  bindAddress: %s:%d
+  certFile: %s
+  keyFile: %s
+  clientCA: %s
+apiServerArguments:
+  etcd-certfile:
+  - ""
+  etcd-keyfile:
+  - ""
+  etcd-cafile:
+  - ""
+storageConfig:
+  urls:
+  - http://127.0.0.1:2379
+kubeClientConfig:
+  kubeConfig: %s
+`, advertiseAddress, openShiftAPIServerPort,
+		filepath.Join(stateDir, certgen.ServiceServingCertFilename),
+		filepath.Join(stateDir, certgen.ServiceServingKeyFilename),
+		filepath.Join(stateDir, certgen.CACertFilename),
+		filepath.Join(stateDir, certgen.OpenShiftAPIServerKubeconfigFilename))
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		return "", fmt.Errorf("write openshift-apiserver config: %w", err)
+	}
+	return path, nil
+}
+
+// defaultRouteAddress returns the local address outbound traffic would
+// leave through, without sending anything. The aggregated API servers
+// listen on it because Kubernetes rejects loopback endpoint addresses.
+func defaultRouteAddress() (string, error) {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return "", fmt.Errorf("determine host address: %w", err)
+	}
+	defer conn.Close()
+	return conn.LocalAddr().(*net.UDPAddr).IP.String(), nil
 }
 
 func main() {
