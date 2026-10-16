@@ -164,6 +164,9 @@ func ensureCertificates(stateDir string) error {
 	artifacts := []string{
 		certgen.CACertFilename, certgen.CAKeyFilename,
 		certgen.APIServerCertFilename, certgen.APIServerKeyFilename,
+		certgen.FrontProxyCACertFilename, certgen.FrontProxyCAKeyFilename,
+		certgen.FrontProxyClientCertFilename, certgen.FrontProxyClientKeyFilename,
+		certgen.ServiceServingCertFilename, certgen.ServiceServingKeyFilename,
 		certgen.AdminCertFilename, certgen.AdminKeyFilename,
 		certgen.AdminKubeconfigFilename,
 		certgen.ControllerManagerKubeconfigFilename,
