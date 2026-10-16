@@ -3,8 +3,10 @@ package image
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
 // openshiftComponent describes one OpenShift API layer component. Unlike
@@ -40,13 +42,20 @@ var openshiftComponents = []openshiftComponent{
 	{component: "cluster-policy-controller", path: "/usr/bin/cluster-policy-controller"},
 }
 
-// ExtractOpenShiftComponents resolves each OpenShift API layer component's
-// image from an unpacked release image, pulls it, and extracts the
-// component binary into targetDirectory. It returns a map of component
-// name to local binary path.
-func (c *Client) ExtractOpenShiftComponents(ctx context.Context, releaseImageRoot, targetDirectory string) (map[string]string, error) {
-	binaries := make(map[string]string, len(openshiftComponents))
-	for _, component := range openshiftComponents {
+// ExtractOpenShiftComponents resolves each requested OpenShift API layer
+// component's image from an unpacked release image, pulls it, and extracts
+// the component binary into targetDirectory. It returns a map of component
+// name to local binary path. With no names, every known component is
+// extracted; otherwise only the named ones, so callers that run a subset do
+// not pay for the other component image pulls.
+func (c *Client) ExtractOpenShiftComponents(ctx context.Context, releaseImageRoot, targetDirectory string, names ...string) (map[string]string, error) {
+	selected, err := selectOpenShiftComponents(names...)
+	if err != nil {
+		return nil, err
+	}
+
+	binaries := make(map[string]string, len(selected))
+	for _, component := range selected {
 		path, err := c.extractOpenShiftComponent(ctx, releaseImageRoot, component, targetDirectory)
 		if err != nil {
 			return nil, err
@@ -54,6 +63,29 @@ func (c *Client) ExtractOpenShiftComponents(ctx context.Context, releaseImageRoo
 		binaries[component.component] = path
 	}
 	return binaries, nil
+}
+
+// selectOpenShiftComponents filters the extraction table to the named
+// components, in table order. With no names it returns the whole table.
+func selectOpenShiftComponents(names ...string) ([]openshiftComponent, error) {
+	if len(names) == 0 {
+		return openshiftComponents, nil
+	}
+	wanted := make(map[string]bool, len(names))
+	for _, name := range names {
+		wanted[name] = true
+	}
+	var selected []openshiftComponent
+	for _, component := range openshiftComponents {
+		if wanted[component.component] {
+			selected = append(selected, component)
+			delete(wanted, component.component)
+		}
+	}
+	if len(wanted) > 0 {
+		return nil, fmt.Errorf("unknown OpenShift components: %v", slices.Sorted(maps.Keys(wanted)))
+	}
+	return selected, nil
 }
 
 // extractOpenShiftComponent resolves one component's image from an

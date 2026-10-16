@@ -97,3 +97,28 @@ func TestExtractOpenShiftBinaryMissingBinary(t *testing.T) {
 		t.Fatalf("error = %v, want mention of openshift-apiserver", err)
 	}
 }
+
+func TestSelectOpenShiftComponents(t *testing.T) {
+	selected, err := selectOpenShiftComponents("openshift-apiserver", "oauth-apiserver")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != 2 || selected[0].component != "openshift-apiserver" || selected[1].component != "oauth-apiserver" {
+		t.Fatalf("selected = %v, want openshift-apiserver and oauth-apiserver in table order", selected)
+	}
+
+	if selected, err = selectOpenShiftComponents(); err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != len(openshiftComponents) {
+		t.Fatalf("selected %d components with no filter, want all %d", len(selected), len(openshiftComponents))
+	}
+
+	_, err = selectOpenShiftComponents("openshift-apiserver", "hyperkube")
+	if err == nil {
+		t.Fatal("expected error for unknown component")
+	}
+	if !strings.Contains(err.Error(), "hyperkube") {
+		t.Fatalf("error = %v, want mention of hyperkube", err)
+	}
+}
