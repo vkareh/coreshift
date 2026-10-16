@@ -28,6 +28,12 @@ type Process struct {
 	Path string
 	// Args are the arguments passed to the executable.
 	Args []string
+	// AfterStart, when set, runs after this process starts and must return
+	// before later processes start. It is how a process that other children
+	// depend on gates their startup, for example by waiting for the process
+	// to become ready and seeding anything the dependents need. Returning an
+	// error fails the run and tears the children down.
+	AfterStart func(ctx context.Context) error
 }
 
 // Supervisor runs a set of child processes until shutdown is requested.
@@ -72,6 +78,18 @@ func (s *Supervisor) Run(ctx context.Context, processes []Process) error {
 		}
 	}
 
+	// Exit reports are collected from the moment each child starts, so a
+	// shutdown partway through the startup loop can still wait for children
+	// that have already been started.
+	exits := make(chan *child, len(processes))
+	waitForExit := func(c *child) {
+		go func() {
+			c.err = c.cmd.Wait()
+			close(c.done)
+			exits <- c
+		}()
+	}
+
 	for i := range processes {
 		c, err := startChild(&processes[i], stdout, stderr, &mu)
 		if err != nil {
@@ -79,15 +97,19 @@ func (s *Supervisor) Run(ctx context.Context, processes []Process) error {
 			return fmt.Errorf("start %s: %w", processes[i].Name, err)
 		}
 		children = append(children, c)
-	}
-
-	exits := make(chan *child, len(children))
-	for _, c := range children {
-		go func() {
-			c.err = c.cmd.Wait()
-			close(c.done)
-			exits <- c
-		}()
+		waitForExit(c)
+		if hook := processes[i].AfterStart; hook != nil {
+			if err := hook(ctx); err != nil {
+				shutdown()
+				return fmt.Errorf("after start of %s: %w", processes[i].Name, err)
+			}
+			// A canceled context means shutdown was requested while the
+			// hook ran; report a clean shutdown, not a hook failure.
+			if ctx.Err() != nil {
+				shutdown()
+				return nil
+			}
+		}
 	}
 
 	select {

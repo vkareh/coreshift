@@ -254,3 +254,65 @@ func TestRunKillsChildThatIgnoresTermination(t *testing.T) {
 		t.Fatalf("Run returned an error after cancellation: %v", err)
 	}
 }
+
+func TestRunAfterStartGatesLaterChildren(t *testing.T) {
+	orderFile := filepath.Join(t.TempDir(), "order")
+	gated := filepath.Join(t.TempDir(), "gated")
+	out := &syncBuffer{}
+
+	// The gate file only appears once the AfterStart hook finishes, so the
+	// later child starting proves the hook ran to completion first.
+	first := stopper("first", orderFile)
+	first.AfterStart = func(ctx context.Context) error {
+		if _, err := os.Stat(filepath.Join(filepath.Dir(gated), "nowhere")); err == nil {
+			return fmt.Errorf("unexpected file")
+		}
+		return os.WriteFile(gated, []byte("ok"), 0o644)
+	}
+	second := Process{
+		Name: "second",
+		Path: "bash",
+		Args: []string{"-c", fmt.Sprintf(
+			"while [ ! -f %q ]; do sleep 0.05; done; echo started; while :; do sleep 0.1; done", gated)},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- (&Supervisor{Stdout: out, Stderr: out}).Run(context.Background(), []Process{first, second})
+	}()
+
+	waitForLine(t, out, "[second] started")
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForRun(t, done); err != nil {
+		t.Fatalf("Run returned an error after SIGINT: %v", err)
+	}
+}
+
+func TestRunAfterStartFailureFailsRun(t *testing.T) {
+	orderFile := filepath.Join(t.TempDir(), "order")
+	out := &syncBuffer{}
+	first := stopper("first", orderFile)
+	// The hook fails only after the child installed its signal handler, so
+	// the teardown check below can rely on a clean termination.
+	first.AfterStart = func(ctx context.Context) error {
+		waitForLine(t, out, "[first] started")
+		return fmt.Errorf("gate never opened")
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- (&Supervisor{Stdout: out, Stderr: out}).Run(context.Background(), []Process{first, stopper("second", orderFile)})
+	}()
+
+	err := waitForRun(t, done)
+	if err == nil || !strings.Contains(err.Error(), "after start of first") || !strings.Contains(err.Error(), "gate never opened") {
+		t.Fatalf("expected error from failed AfterStart hook, got: %v", err)
+	}
+	if got := readOrder(t, orderFile); !reflect.DeepEqual(got, []string{"first"}) {
+		t.Fatalf("children were not torn down, termination order: %v", got)
+	}
+	if strings.Contains(out.String(), "[second] started") {
+		t.Fatalf("later child started despite hook failure:\n%s", out.String())
+	}
+}
