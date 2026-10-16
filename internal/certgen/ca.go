@@ -14,6 +14,12 @@ import (
 // GenerateCA creates a self-signed RSA certificate authority and its private
 // key, both PEM encoded.
 func GenerateCA() (certPEM, keyPEM []byte, err error) {
+	return generateSelfSignedCA("coreshift-ca")
+}
+
+// generateSelfSignedCA creates a self-signed RSA certificate authority with
+// the given common name and its private key, both PEM encoded.
+func generateSelfSignedCA(commonName string) (certPEM, keyPEM []byte, err error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, nil, err
@@ -26,7 +32,7 @@ func GenerateCA() (certPEM, keyPEM []byte, err error) {
 	now := time.Now()
 	template := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "coreshift-ca"},
+		Subject:               pkix.Name{CommonName: commonName},
 		NotBefore:             now,
 		NotAfter:              now.Add(10 * 365 * 24 * time.Hour),
 		IsCA:                  true,

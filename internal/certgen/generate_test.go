@@ -17,8 +17,8 @@ func TestGenerateAll(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	certs := []string{CACertFilename, APIServerCertFilename, AdminCertFilename, SAPubFilename}
-	keys := []string{CAKeyFilename, APIServerKeyFilename, AdminKeyFilename, SAKeyFilename}
+	certs := []string{CACertFilename, APIServerCertFilename, FrontProxyCACertFilename, FrontProxyClientCertFilename, ServiceServingCertFilename, AdminCertFilename, SAPubFilename}
+	keys := []string{CAKeyFilename, APIServerKeyFilename, FrontProxyCAKeyFilename, FrontProxyClientKeyFilename, ServiceServingKeyFilename, AdminKeyFilename, SAKeyFilename}
 	for _, name := range append(append(certs, keys...), AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename) {
 		if _, err := os.Stat(filepath.Join(outputDir, name)); err != nil {
 			t.Fatalf("expected %s to be written: %v", name, err)
@@ -31,6 +31,15 @@ func TestGenerateAll(t *testing.T) {
 	adminCert := parseCertificate(t, readFile(t, outputDir, AdminCertFilename))
 	if err := adminCert.CheckSignatureFrom(caCert); err != nil {
 		t.Fatalf("admin certificate is not signed by CA: %v", err)
+	}
+	frontProxyCACert := parseCertificate(t, readFile(t, outputDir, FrontProxyCACertFilename))
+	frontProxyClientCert := parseCertificate(t, readFile(t, outputDir, FrontProxyClientCertFilename))
+	if err := frontProxyClientCert.CheckSignatureFrom(frontProxyCACert); err != nil {
+		t.Fatalf("front-proxy client certificate is not signed by front-proxy CA: %v", err)
+	}
+	serviceServingCert := parseCertificate(t, readFile(t, outputDir, ServiceServingCertFilename))
+	if err := serviceServingCert.CheckSignatureFrom(caCert); err != nil {
+		t.Fatalf("service-serving certificate is not signed by CA: %v", err)
 	}
 
 	config, err := clientcmd.Load(readFile(t, outputDir, AdminKubeconfigFilename))
@@ -97,7 +106,7 @@ func TestGenerateAllKeyPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{CAKeyFilename, APIServerKeyFilename, AdminKeyFilename, AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, SAKeyFilename} {
+	for _, name := range []string{CAKeyFilename, APIServerKeyFilename, FrontProxyCAKeyFilename, FrontProxyClientKeyFilename, ServiceServingKeyFilename, AdminKeyFilename, AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, SAKeyFilename} {
 		info, err := os.Stat(filepath.Join(outputDir, name))
 		if err != nil {
 			t.Fatal(err)

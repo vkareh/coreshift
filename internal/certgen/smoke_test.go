@@ -21,6 +21,9 @@ func TestGenerateAllSmoke(t *testing.T) {
 	artifacts := []string{
 		CACertFilename, CAKeyFilename,
 		APIServerCertFilename, APIServerKeyFilename,
+		FrontProxyCACertFilename, FrontProxyCAKeyFilename,
+		FrontProxyClientCertFilename, FrontProxyClientKeyFilename,
+		ServiceServingCertFilename, ServiceServingKeyFilename,
 		AdminCertFilename, AdminKeyFilename,
 		AdminKubeconfigFilename,
 		ControllerManagerKubeconfigFilename,
@@ -37,7 +40,7 @@ func TestGenerateAllSmoke(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{CACertFilename, APIServerCertFilename, AdminCertFilename} {
+	for _, name := range []string{CACertFilename, APIServerCertFilename, FrontProxyCACertFilename, FrontProxyClientCertFilename, ServiceServingCertFilename, AdminCertFilename} {
 		parseCertificate(t, readFile(t, outputDir, name))
 	}
 

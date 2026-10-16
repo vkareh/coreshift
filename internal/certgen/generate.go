@@ -22,6 +22,12 @@ const (
 	CAKeyFilename                       = "ca.key"
 	APIServerCertFilename               = "apiserver.crt"
 	APIServerKeyFilename                = "apiserver.key"
+	FrontProxyCACertFilename            = "front-proxy-ca.crt"
+	FrontProxyCAKeyFilename             = "front-proxy-ca.key"
+	FrontProxyClientCertFilename        = "front-proxy-client.crt"
+	FrontProxyClientKeyFilename         = "front-proxy-client.key"
+	ServiceServingCertFilename          = "service-serving.crt"
+	ServiceServingKeyFilename           = "service-serving.key"
 	AdminCertFilename                   = "admin.crt"
 	AdminKeyFilename                    = "admin.key"
 	AdminKubeconfigFilename             = "admin.kubeconfig"
@@ -35,13 +41,16 @@ const (
 // control plane, plus client kubeconfigs, writing all of them to outputDir.
 // The on-disk layout is:
 //
-//	ca.crt, ca.key                     self-signed certificate authority
-//	apiserver.crt, apiserver.key       kube-apiserver serving certificate
-//	admin.crt, admin.key               cluster-admin client certificate
-//	admin.kubeconfig                   kubeconfig for the admin client
-//	kube-controller-manager.kubeconfig kubeconfig for kube-controller-manager
-//	kube-scheduler.kubeconfig          kubeconfig for kube-scheduler
-//	sa.key, sa.pub                     service-account signing key pair
+//	ca.crt, ca.key                                  self-signed certificate authority
+//	apiserver.crt, apiserver.key                    kube-apiserver serving certificate
+//	front-proxy-ca.crt, front-proxy-ca.key          CA trusted by aggregated API servers
+//	front-proxy-client.crt, front-proxy-client.key  kube-apiserver certificate for aggregated API servers
+//	service-serving.crt, service-serving.key        serving certificate for the OpenShift API server and OAuth API server
+//	admin.crt, admin.key                            cluster-admin client certificate
+//	admin.kubeconfig                                kubeconfig for the admin client
+//	kube-controller-manager.kubeconfig              kubeconfig for kube-controller-manager
+//	kube-scheduler.kubeconfig                       kubeconfig for kube-scheduler
+//	sa.key, sa.pub                                  service-account signing key pair
 //
 // Each kubeconfig embeds the CA and its client's certificate material, so it
 // is usable directly regardless of the output directory's location. outputDir
@@ -58,6 +67,18 @@ func GenerateAll(outputDir string, opts Options) error {
 	apiserverCertPEM, apiserverKeyPEM, err := GenerateAPIServerCert(caCertPEM, caKeyPEM)
 	if err != nil {
 		return fmt.Errorf("generate API server certificate: %w", err)
+	}
+	frontProxyCACertPEM, frontProxyCAKeyPEM, err := GenerateFrontProxyCA()
+	if err != nil {
+		return fmt.Errorf("generate front-proxy CA: %w", err)
+	}
+	frontProxyClientCertPEM, frontProxyClientKeyPEM, err := GenerateFrontProxyClientCert(frontProxyCACertPEM, frontProxyCAKeyPEM)
+	if err != nil {
+		return fmt.Errorf("generate front-proxy client certificate: %w", err)
+	}
+	serviceServingCertPEM, serviceServingKeyPEM, err := GenerateServiceServingCert(caCertPEM, caKeyPEM)
+	if err != nil {
+		return fmt.Errorf("generate service-serving certificate: %w", err)
 	}
 	adminCertPEM, adminKeyPEM, err := GenerateClientCert(caCertPEM, caKeyPEM)
 	if err != nil {
@@ -94,6 +115,12 @@ func GenerateAll(outputDir string, opts Options) error {
 		{CAKeyFilename, caKeyPEM, 0o600},
 		{APIServerCertFilename, apiserverCertPEM, 0o644},
 		{APIServerKeyFilename, apiserverKeyPEM, 0o600},
+		{FrontProxyCACertFilename, frontProxyCACertPEM, 0o644},
+		{FrontProxyCAKeyFilename, frontProxyCAKeyPEM, 0o600},
+		{FrontProxyClientCertFilename, frontProxyClientCertPEM, 0o644},
+		{FrontProxyClientKeyFilename, frontProxyClientKeyPEM, 0o600},
+		{ServiceServingCertFilename, serviceServingCertPEM, 0o644},
+		{ServiceServingKeyFilename, serviceServingKeyPEM, 0o600},
 		{AdminCertFilename, adminCertPEM, 0o644},
 		{AdminKeyFilename, adminKeyPEM, 0o600},
 		{AdminKubeconfigFilename, kubeconfig, 0o600},
