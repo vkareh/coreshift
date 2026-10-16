@@ -28,6 +28,8 @@ func TestGenerateAllSmoke(t *testing.T) {
 		AdminKubeconfigFilename,
 		ControllerManagerKubeconfigFilename,
 		SchedulerKubeconfigFilename,
+		OpenShiftAPIServerKubeconfigFilename,
+		OAuthAPIServerKubeconfigFilename,
 		SAKeyFilename, SAPubFilename,
 	}
 	for _, name := range artifacts {
@@ -44,7 +46,7 @@ func TestGenerateAllSmoke(t *testing.T) {
 		parseCertificate(t, readFile(t, outputDir, name))
 	}
 
-	for _, name := range []string{AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename} {
+	for _, name := range []string{AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename} {
 		config, err := clientcmd.Load(readFile(t, outputDir, name))
 		if err != nil {
 			t.Fatalf("load %s: %v", name, err)

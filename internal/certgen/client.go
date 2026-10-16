@@ -83,6 +83,22 @@ func generateComponentKubeconfig(commonName, serverURL string, caCertPEM, caKeyP
 	return generateKubeconfig(serverURL, commonName, caCertPEM, clientCertPEM, clientKeyPEM)
 }
 
+// generateAggregatedKubeconfig creates a directly usable kubeconfig for an
+// aggregated API server's client. Following Hypershift's control-plane
+// operator, these servers run with the system:admin identity: their
+// delegated authentication and authorization calls and self-bootstrapped
+// RBAC then work without seeding any component-specific RBAC.
+func generateAggregatedKubeconfig(serverURL string, caCertPEM, caKeyPEM []byte) ([]byte, error) {
+	clientCertPEM, clientKeyPEM, err := generateClientCert(caCertPEM, caKeyPEM, pkix.Name{
+		CommonName:   "system:admin",
+		Organization: []string{"system:masters"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("generate client certificate: %w", err)
+	}
+	return generateKubeconfig(serverURL, "system:admin", caCertPEM, clientCertPEM, clientKeyPEM)
+}
+
 func generateKubeconfig(serverURL, user string, caCertPEM, clientCertPEM, clientKeyPEM []byte) ([]byte, error) {
 	config := clientcmdapi.NewConfig()
 	config.Clusters["coreshift"] = &clientcmdapi.Cluster{

@@ -19,7 +19,8 @@ func TestGenerateAll(t *testing.T) {
 
 	certs := []string{CACertFilename, APIServerCertFilename, FrontProxyCACertFilename, FrontProxyClientCertFilename, ServiceServingCertFilename, AdminCertFilename, SAPubFilename}
 	keys := []string{CAKeyFilename, APIServerKeyFilename, FrontProxyCAKeyFilename, FrontProxyClientKeyFilename, ServiceServingKeyFilename, AdminKeyFilename, SAKeyFilename}
-	for _, name := range append(append(certs, keys...), AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename) {
+	kubeconfigs := []string{AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename}
+	for _, name := range append(append(certs, keys...), kubeconfigs...) {
 		if _, err := os.Stat(filepath.Join(outputDir, name)); err != nil {
 			t.Fatalf("expected %s to be written: %v", name, err)
 		}
@@ -60,6 +61,33 @@ func TestGenerateAll(t *testing.T) {
 	if config.CurrentContext != "admin@coreshift" {
 		t.Fatalf("unexpected current context: %q", config.CurrentContext)
 	}
+
+	// The aggregated servers run with the system:admin identity, so their
+	// embedded client certificates must carry the system:masters group.
+	for _, name := range []string{OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename} {
+		config, err := clientcmd.Load(readFile(t, outputDir, name))
+		if err != nil {
+			t.Fatalf("load %s: %v", name, err)
+		}
+		user := config.AuthInfos["system:admin"]
+		if user == nil {
+			t.Fatalf("%s has no system:admin user", name)
+		}
+		cert := parseCertificate(t, user.ClientCertificateData)
+		if cert.Subject.CommonName != "system:admin" {
+			t.Fatalf("%s client certificate common name = %q, want system:admin", name, cert.Subject.CommonName)
+		}
+		if err := cert.CheckSignatureFrom(caCert); err != nil {
+			t.Fatalf("%s client certificate is not signed by CA: %v", name, err)
+		}
+		found := false
+		for _, org := range cert.Subject.Organization {
+			found = found || org == "system:masters"
+		}
+		if !found {
+			t.Fatalf("%s client certificate is not in the system:masters group", name)
+		}
+	}
 }
 
 func TestGenerateAllCustomAPIServerURL(t *testing.T) {
@@ -77,7 +105,7 @@ func TestGenerateAllCustomAPIServerURL(t *testing.T) {
 		t.Fatalf("unexpected cluster config: %#v", cluster)
 	}
 
-	for _, name := range []string{ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename} {
+	for _, name := range []string{ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename} {
 		config, err := clientcmd.Load(readFile(t, outputDir, name))
 		if err != nil {
 			t.Fatalf("load %s: %v", name, err)
@@ -106,7 +134,7 @@ func TestGenerateAllKeyPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{CAKeyFilename, APIServerKeyFilename, FrontProxyCAKeyFilename, FrontProxyClientKeyFilename, ServiceServingKeyFilename, AdminKeyFilename, AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, SAKeyFilename} {
+	for _, name := range []string{CAKeyFilename, APIServerKeyFilename, FrontProxyCAKeyFilename, FrontProxyClientKeyFilename, ServiceServingKeyFilename, AdminKeyFilename, AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, SAKeyFilename} {
 		info, err := os.Stat(filepath.Join(outputDir, name))
 		if err != nil {
 			t.Fatal(err)

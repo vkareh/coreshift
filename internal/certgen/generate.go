@@ -18,23 +18,25 @@ const defaultAPIServerURL = "https://127.0.0.1:6443"
 
 // Artifacts written by GenerateAll into the output directory.
 const (
-	CACertFilename                      = "ca.crt"
-	CAKeyFilename                       = "ca.key"
-	APIServerCertFilename               = "apiserver.crt"
-	APIServerKeyFilename                = "apiserver.key"
-	FrontProxyCACertFilename            = "front-proxy-ca.crt"
-	FrontProxyCAKeyFilename             = "front-proxy-ca.key"
-	FrontProxyClientCertFilename        = "front-proxy-client.crt"
-	FrontProxyClientKeyFilename         = "front-proxy-client.key"
-	ServiceServingCertFilename          = "service-serving.crt"
-	ServiceServingKeyFilename           = "service-serving.key"
-	AdminCertFilename                   = "admin.crt"
-	AdminKeyFilename                    = "admin.key"
-	AdminKubeconfigFilename             = "admin.kubeconfig"
-	ControllerManagerKubeconfigFilename = "kube-controller-manager.kubeconfig"
-	SchedulerKubeconfigFilename         = "kube-scheduler.kubeconfig"
-	SAKeyFilename                       = "sa.key"
-	SAPubFilename                       = "sa.pub"
+	CACertFilename                       = "ca.crt"
+	CAKeyFilename                        = "ca.key"
+	APIServerCertFilename                = "apiserver.crt"
+	APIServerKeyFilename                 = "apiserver.key"
+	FrontProxyCACertFilename             = "front-proxy-ca.crt"
+	FrontProxyCAKeyFilename              = "front-proxy-ca.key"
+	FrontProxyClientCertFilename         = "front-proxy-client.crt"
+	FrontProxyClientKeyFilename          = "front-proxy-client.key"
+	ServiceServingCertFilename           = "service-serving.crt"
+	ServiceServingKeyFilename            = "service-serving.key"
+	AdminCertFilename                    = "admin.crt"
+	AdminKeyFilename                     = "admin.key"
+	AdminKubeconfigFilename              = "admin.kubeconfig"
+	ControllerManagerKubeconfigFilename  = "kube-controller-manager.kubeconfig"
+	SchedulerKubeconfigFilename          = "kube-scheduler.kubeconfig"
+	OpenShiftAPIServerKubeconfigFilename = "openshift-apiserver.kubeconfig"
+	OAuthAPIServerKubeconfigFilename     = "oauth-apiserver.kubeconfig"
+	SAKeyFilename                        = "sa.key"
+	SAPubFilename                        = "sa.pub"
 )
 
 // GenerateAll generates every certificate and key needed to run a CoreShift
@@ -50,6 +52,8 @@ const (
 //	admin.kubeconfig                                kubeconfig for the admin client
 //	kube-controller-manager.kubeconfig              kubeconfig for kube-controller-manager
 //	kube-scheduler.kubeconfig                       kubeconfig for kube-scheduler
+//	openshift-apiserver.kubeconfig                  kubeconfig for the OpenShift API server
+//	oauth-apiserver.kubeconfig                      kubeconfig for the OAuth API server
 //	sa.key, sa.pub                                  service-account signing key pair
 //
 // Each kubeconfig embeds the CA and its client's certificate material, so it
@@ -105,6 +109,14 @@ func GenerateAll(outputDir string, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("generate kube-scheduler kubeconfig: %w", err)
 	}
+	openshiftAPIServerKubeconfig, err := generateAggregatedKubeconfig(serverURL, caCertPEM, caKeyPEM)
+	if err != nil {
+		return fmt.Errorf("generate openshift-apiserver kubeconfig: %w", err)
+	}
+	oauthAPIServerKubeconfig, err := generateAggregatedKubeconfig(serverURL, caCertPEM, caKeyPEM)
+	if err != nil {
+		return fmt.Errorf("generate oauth-apiserver kubeconfig: %w", err)
+	}
 
 	files := []struct {
 		name string
@@ -126,6 +138,8 @@ func GenerateAll(outputDir string, opts Options) error {
 		{AdminKubeconfigFilename, kubeconfig, 0o600},
 		{ControllerManagerKubeconfigFilename, controllerManagerKubeconfig, 0o600},
 		{SchedulerKubeconfigFilename, schedulerKubeconfig, 0o600},
+		{OpenShiftAPIServerKubeconfigFilename, openshiftAPIServerKubeconfig, 0o600},
+		{OAuthAPIServerKubeconfigFilename, oauthAPIServerKubeconfig, 0o600},
 		{SAKeyFilename, saKeyPEM, 0o600},
 		{SAPubFilename, saPubPEM, 0o644},
 	}
