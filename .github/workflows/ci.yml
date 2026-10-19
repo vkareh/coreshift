@@ -3,6 +3,8 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    - cron: '0 3 * * *'
 
 permissions:
   contents: read
@@ -29,3 +31,27 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64.8
+
+  nightly-smoke:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run live smoke tests
+        env:
+          PULL_SECRET: ${{ secrets.PULL_SECRET }}
+        run: |
+          if [ -z "$PULL_SECRET" ]; then
+            echo "PULL_SECRET repository secret is not configured; skipping smoke tests"
+            exit 0
+          fi
+          secret="$RUNNER_TEMP/pull-secret"
+          printf '%s' "$PULL_SECRET" > "$secret"
+          SMOKE_PULL_SECRET_PATH="$secret" go test ./pkg/image/ -run Smoke -v -timeout 60m

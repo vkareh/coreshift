@@ -38,3 +38,11 @@ component image references are cached under `~/.cache/coreshift/`
 (`$XDG_CACHE_HOME/coreshift`), keyed by image digest. A second run of the
 same pinned release pulls nothing from the registry and starts straight
 from the cache. Delete the directory to clear it.
+
+## Nightly smoke tests
+
+CI runs the live, pull-secret-gated smoke tests nightly on a schedule.
+The nightly job needs a repository secret named `PULL_SECRET` holding the
+JSON pull secret; a maintainer must add it under Settings -> Secrets and
+variables -> Actions to enable the run. Without the secret the job skips
+cleanly instead of failing.

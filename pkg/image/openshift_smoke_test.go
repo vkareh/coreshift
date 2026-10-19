@@ -14,9 +14,9 @@ import (
 // components are five distinct images, pulls each from the real
 // registry, extracts the binaries, and executes them on the host.
 func TestExtractOpenShiftComponentsSmoke(t *testing.T) {
-	pullSecret, err := os.ReadFile(smokePullSecretPath)
+	pullSecret, err := os.ReadFile(smokePullSecretPath())
 	if errors.Is(err, os.ErrNotExist) {
-		t.Skipf("pull secret not found at %s", smokePullSecretPath)
+		t.Skipf("pull secret not found at %s", smokePullSecretPath())
 	}
 	if err != nil {
 		t.Fatal(err)

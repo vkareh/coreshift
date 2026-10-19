@@ -12,14 +12,23 @@ import (
 // live verification against the real registry. The test skips when the
 // secret is absent, so environments without it still pass.
 const (
-	smokePullSecretPath = "./pull-secret"
-	smokeReleaseImage   = "quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64"
+	smokeReleaseImage = "quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64"
+
+	// Developer default; CI overrides it with SMOKE_PULL_SECRET_PATH.
+	smokePullSecretDefault = "./pull-secret"
 )
 
+func smokePullSecretPath() string {
+	if p := os.Getenv("SMOKE_PULL_SECRET_PATH"); p != "" {
+		return p
+	}
+	return smokePullSecretDefault
+}
+
 func TestExtractKubeComponentsSmoke(t *testing.T) {
-	pullSecret, err := os.ReadFile(smokePullSecretPath)
+	pullSecret, err := os.ReadFile(smokePullSecretPath())
 	if errors.Is(err, os.ErrNotExist) {
-		t.Skipf("pull secret not found at %s", smokePullSecretPath)
+		t.Skipf("pull secret not found at %s", smokePullSecretPath())
 	}
 	if err != nil {
 		t.Fatal(err)
