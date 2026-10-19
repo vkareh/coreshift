@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/vkareh/coreshift/internal/aggregation"
 	"github.com/vkareh/coreshift/internal/certgen"
+	"github.com/vkareh/coreshift/internal/rbac"
 	"github.com/vkareh/coreshift/internal/supervisor"
 	"github.com/vkareh/coreshift/pkg/image"
 )
@@ -196,15 +197,21 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 				"--proxy-client-key-file=" + filepath.Join(stateDir, certgen.FrontProxyClientKeyFilename),
 				"--enable-aggregator-routing=true",
 			},
-			AfterStart: func(ctx context.Context) error {
-				// The aggregated servers need kube-apiserver up for delegated
-				// auth, and the aggregation wiring needs it to accept writes.
-				// Bound the wait so a broken kube-apiserver fails the run
-				// instead of blocking startup forever.
-				ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-				defer cancel()
-				return aggregation.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), aggregatedServers, filepath.Join(stateDir, certgen.CACertFilename))
-			},
+		AfterStart: func(ctx context.Context) error {
+			// The aggregated servers need kube-apiserver up for delegated
+			// auth, the aggregation wiring needs it to accept writes, and
+			// the controller permissions must exist before the cluster
+			// policy controller starts calling. Bound the wait so a
+			// broken kube-apiserver fails the run instead of blocking
+			// startup forever.
+			ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			defer cancel()
+			kubeconfig := filepath.Join(stateDir, certgen.AdminKubeconfigFilename)
+			if err := aggregation.Seed(ctx, kubeconfig, aggregatedServers, filepath.Join(stateDir, certgen.CACertFilename)); err != nil {
+				return err
+			}
+			return rbac.Seed(ctx, kubeconfig)
+		},
 		},
 		{
 			Name: "kube-controller-manager",
