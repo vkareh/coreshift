@@ -68,7 +68,11 @@ func (c *Client) extractCached(ctx context.Context, kind, imageRef string, extra
 		return "", fmt.Errorf("pull image: %w", err)
 	}
 
-	tmp, err := os.MkdirTemp(filepath.Dir(dir), "."+filepath.Base(dir)+".")
+	parent := filepath.Dir(dir)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", fmt.Errorf("create cache directory: %w", err)
+	}
+	tmp, err := os.MkdirTemp(parent, "."+filepath.Base(dir)+".")
 	if err != nil {
 		return "", fmt.Errorf("create cache directory: %w", err)
 	}
