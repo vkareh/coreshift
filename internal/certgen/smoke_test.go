@@ -30,6 +30,7 @@ func TestGenerateAllSmoke(t *testing.T) {
 		SchedulerKubeconfigFilename,
 		OpenShiftAPIServerKubeconfigFilename,
 		OAuthAPIServerKubeconfigFilename,
+		SessionSecretsFilename,
 		SAKeyFilename, SAPubFilename,
 	}
 	for _, name := range artifacts {

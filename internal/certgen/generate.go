@@ -35,6 +35,7 @@ const (
 	SchedulerKubeconfigFilename          = "kube-scheduler.kubeconfig"
 	OpenShiftAPIServerKubeconfigFilename = "openshift-apiserver.kubeconfig"
 	OAuthAPIServerKubeconfigFilename     = "oauth-apiserver.kubeconfig"
+	SessionSecretsFilename               = "session-secrets.yaml"
 	SAKeyFilename                        = "sa.key"
 	SAPubFilename                        = "sa.pub"
 )
@@ -54,6 +55,7 @@ const (
 //	kube-scheduler.kubeconfig                       kubeconfig for kube-scheduler
 //	openshift-apiserver.kubeconfig                  kubeconfig for the OpenShift API server
 //	oauth-apiserver.kubeconfig                      kubeconfig for the OAuth API server
+//	session-secrets.yaml                            session signing and encryption secrets for the OAuth server
 //	sa.key, sa.pub                                  service-account signing key pair
 //
 // Each kubeconfig embeds the CA and its client's certificate material, so it
@@ -91,6 +93,10 @@ func GenerateAll(outputDir string, opts Options) error {
 	saKeyPEM, saPubPEM, err := GenerateServiceAccountKeyPair()
 	if err != nil {
 		return fmt.Errorf("generate service-account key pair: %w", err)
+	}
+	sessionSecrets, err := GenerateSessionSecrets()
+	if err != nil {
+		return fmt.Errorf("generate session secrets: %w", err)
 	}
 
 	serverURL := opts.APIServerURL
@@ -140,6 +146,7 @@ func GenerateAll(outputDir string, opts Options) error {
 		{SchedulerKubeconfigFilename, schedulerKubeconfig, 0o600},
 		{OpenShiftAPIServerKubeconfigFilename, openshiftAPIServerKubeconfig, 0o600},
 		{OAuthAPIServerKubeconfigFilename, oauthAPIServerKubeconfig, 0o600},
+		{SessionSecretsFilename, sessionSecrets, 0o600},
 		{SAKeyFilename, saKeyPEM, 0o600},
 		{SAPubFilename, saPubPEM, 0o644},
 	}
