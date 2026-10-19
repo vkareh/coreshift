@@ -255,6 +255,27 @@ func TestRunKillsChildThatIgnoresTermination(t *testing.T) {
 	}
 }
 
+func TestRunSetsChildEnvironment(t *testing.T) {
+	out := &syncBuffer{}
+	done := make(chan error, 1)
+	go func() {
+		done <- (&Supervisor{Stdout: out, Stderr: out}).Run(context.Background(), []Process{
+			{
+				Name: "envy",
+				Path: "bash",
+				Args: []string{"-c", "echo seen=$CORESHIFT_TEST_ONLY; exit 7"},
+				Env:  append(os.Environ(), "CORESHIFT_TEST_ONLY=set"),
+			},
+		})
+	}()
+
+	err := waitForRun(t, done)
+	if err == nil || !strings.Contains(err.Error(), "envy exited") {
+		t.Fatalf("expected error naming the exited child, got: %v", err)
+	}
+	waitForLine(t, out, "[envy] seen=set")
+}
+
 func TestRunAfterStartGatesLaterChildren(t *testing.T) {
 	orderFile := filepath.Join(t.TempDir(), "order")
 	gated := filepath.Join(t.TempDir(), "gated")
