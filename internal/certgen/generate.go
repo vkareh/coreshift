@@ -18,26 +18,29 @@ const defaultAPIServerURL = "https://127.0.0.1:6443"
 
 // Artifacts written by GenerateAll into the output directory.
 const (
-	CACertFilename                       = "ca.crt"
-	CAKeyFilename                        = "ca.key"
-	APIServerCertFilename                = "apiserver.crt"
-	APIServerKeyFilename                 = "apiserver.key"
-	FrontProxyCACertFilename             = "front-proxy-ca.crt"
-	FrontProxyCAKeyFilename              = "front-proxy-ca.key"
-	FrontProxyClientCertFilename         = "front-proxy-client.crt"
-	FrontProxyClientKeyFilename          = "front-proxy-client.key"
-	ServiceServingCertFilename           = "service-serving.crt"
-	ServiceServingKeyFilename            = "service-serving.key"
-	AdminCertFilename                    = "admin.crt"
-	AdminKeyFilename                     = "admin.key"
-	AdminKubeconfigFilename              = "admin.kubeconfig"
-	ControllerManagerKubeconfigFilename  = "kube-controller-manager.kubeconfig"
-	SchedulerKubeconfigFilename          = "kube-scheduler.kubeconfig"
-	OpenShiftAPIServerKubeconfigFilename = "openshift-apiserver.kubeconfig"
-	OAuthAPIServerKubeconfigFilename     = "oauth-apiserver.kubeconfig"
-	SessionSecretsFilename               = "session-secrets.yaml"
-	SAKeyFilename                        = "sa.key"
-	SAPubFilename                        = "sa.pub"
+	CACertFilename                               = "ca.crt"
+	CAKeyFilename                                = "ca.key"
+	APIServerCertFilename                        = "apiserver.crt"
+	APIServerKeyFilename                         = "apiserver.key"
+	FrontProxyCACertFilename                     = "front-proxy-ca.crt"
+	FrontProxyCAKeyFilename                      = "front-proxy-ca.key"
+	FrontProxyClientCertFilename                 = "front-proxy-client.crt"
+	FrontProxyClientKeyFilename                  = "front-proxy-client.key"
+	ServiceServingCertFilename                   = "service-serving.crt"
+	ServiceServingKeyFilename                    = "service-serving.key"
+	AdminCertFilename                            = "admin.crt"
+	AdminKeyFilename                             = "admin.key"
+	AdminKubeconfigFilename                      = "admin.kubeconfig"
+	ControllerManagerKubeconfigFilename          = "kube-controller-manager.kubeconfig"
+	SchedulerKubeconfigFilename                  = "kube-scheduler.kubeconfig"
+	OpenShiftAPIServerKubeconfigFilename         = "openshift-apiserver.kubeconfig"
+	OAuthAPIServerKubeconfigFilename             = "oauth-apiserver.kubeconfig"
+	OAuthServerKubeconfigFilename                = "oauth-server.kubeconfig"
+	OpenShiftControllerManagerKubeconfigFilename = "openshift-controller-manager.kubeconfig"
+	ClusterPolicyControllerKubeconfigFilename    = "cluster-policy-controller.kubeconfig"
+	SessionSecretsFilename                       = "session-secrets.yaml"
+	SAKeyFilename                                = "sa.key"
+	SAPubFilename                                = "sa.pub"
 )
 
 // GenerateAll generates every certificate and key needed to run a CoreShift
@@ -55,6 +58,9 @@ const (
 //	kube-scheduler.kubeconfig                       kubeconfig for kube-scheduler
 //	openshift-apiserver.kubeconfig                  kubeconfig for the OpenShift API server
 //	oauth-apiserver.kubeconfig                      kubeconfig for the OAuth API server
+//	oauth-server.kubeconfig                         kubeconfig for the OAuth server
+//	openshift-controller-manager.kubeconfig         kubeconfig for the OpenShift controller manager
+//	cluster-policy-controller.kubeconfig            kubeconfig for the cluster policy controller
 //	session-secrets.yaml                            session signing and encryption secrets for the OAuth server
 //	sa.key, sa.pub                                  service-account signing key pair
 //
@@ -115,13 +121,25 @@ func GenerateAll(outputDir string, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("generate kube-scheduler kubeconfig: %w", err)
 	}
-	openshiftAPIServerKubeconfig, err := generateAggregatedKubeconfig(serverURL, caCertPEM, caKeyPEM)
+	openshiftAPIServerKubeconfig, err := generateAdminKubeconfig(serverURL, caCertPEM, caKeyPEM)
 	if err != nil {
 		return fmt.Errorf("generate openshift-apiserver kubeconfig: %w", err)
 	}
-	oauthAPIServerKubeconfig, err := generateAggregatedKubeconfig(serverURL, caCertPEM, caKeyPEM)
+	oauthAPIServerKubeconfig, err := generateAdminKubeconfig(serverURL, caCertPEM, caKeyPEM)
 	if err != nil {
 		return fmt.Errorf("generate oauth-apiserver kubeconfig: %w", err)
+	}
+	oauthServerKubeconfig, err := generateAdminKubeconfig(serverURL, caCertPEM, caKeyPEM)
+	if err != nil {
+		return fmt.Errorf("generate oauth-server kubeconfig: %w", err)
+	}
+	openShiftControllerManagerKubeconfig, err := generateAdminKubeconfig(serverURL, caCertPEM, caKeyPEM)
+	if err != nil {
+		return fmt.Errorf("generate openshift-controller-manager kubeconfig: %w", err)
+	}
+	clusterPolicyControllerKubeconfig, err := generateAdminKubeconfig(serverURL, caCertPEM, caKeyPEM)
+	if err != nil {
+		return fmt.Errorf("generate cluster-policy-controller kubeconfig: %w", err)
 	}
 
 	files := []struct {
@@ -146,6 +164,9 @@ func GenerateAll(outputDir string, opts Options) error {
 		{SchedulerKubeconfigFilename, schedulerKubeconfig, 0o600},
 		{OpenShiftAPIServerKubeconfigFilename, openshiftAPIServerKubeconfig, 0o600},
 		{OAuthAPIServerKubeconfigFilename, oauthAPIServerKubeconfig, 0o600},
+		{OAuthServerKubeconfigFilename, oauthServerKubeconfig, 0o600},
+		{OpenShiftControllerManagerKubeconfigFilename, openShiftControllerManagerKubeconfig, 0o600},
+		{ClusterPolicyControllerKubeconfigFilename, clusterPolicyControllerKubeconfig, 0o600},
 		{SessionSecretsFilename, sessionSecrets, 0o600},
 		{SAKeyFilename, saKeyPEM, 0o600},
 		{SAPubFilename, saPubPEM, 0o644},
