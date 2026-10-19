@@ -23,9 +23,11 @@ const DefaultReleaseImage = "quay.io/openshift-release-dev/ocp-release:4.22.8-x8
 // through the aggregation layer; the ports appear both in the server flags
 // and in the endpoints the aggregation wiring registers.
 const (
-	openShiftAPIServerPort = 8443
-	oauthAPIServerPort     = 8444
-	oauthServerPort        = 8445
+	openShiftAPIServerPort         = 8443
+	oauthAPIServerPort             = 8444
+	oauthServerPort                = 8445
+	openShiftControllerManagerPort = 8446
+	clusterPolicyControllerPort    = 10357
 )
 
 // aggregatedServers lists the aggregated API servers and the API groups
@@ -109,7 +111,8 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 	if err != nil {
 		return fmt.Errorf("extract kube components: %w", err)
 	}
-	openShiftBinaries, err := client.ExtractOpenShiftComponents(ctx, releaseFilesystem, binaries, "openshift-apiserver", "oauth-apiserver", "oauth-server")
+	openShiftBinaries, err := client.ExtractOpenShiftComponents(ctx, releaseFilesystem, binaries,
+		"openshift-apiserver", "oauth-apiserver", "oauth-server", "openshift-controller-manager", "cluster-policy-controller")
 	if err != nil {
 		return fmt.Errorf("extract openshift components: %w", err)
 	}
@@ -136,6 +139,15 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 	}
 
 	oauthServerConfig, err := writeOAuthServerConfig(stateDir)
+	if err != nil {
+		return err
+	}
+
+	openShiftControllerManagerConfig, err := writeOpenShiftControllerManagerConfig(stateDir)
+	if err != nil {
+		return err
+	}
+	clusterPolicyControllerConfig, err := writeClusterPolicyControllerConfig(stateDir)
 	if err != nil {
 		return err
 	}
@@ -268,6 +280,36 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 				"--config=" + oauthServerConfig,
 			},
 		},
+		// The controller managers run all their controllers against the API
+		// server. They elect leaders through a lease in the given namespace;
+		// the component namespaces Hypershift passes exist only in its
+		// clusters, so they point at the always-present default namespace.
+		// POD_NAMESPACE keeps each component's event owner reference in the
+		// same namespace.
+		{
+			Name: "openshift-controller-manager",
+			Path: openShiftBinaries["openshift-controller-manager"],
+			Args: []string{
+				"start",
+				"--config=" + openShiftControllerManagerConfig,
+				"--kubeconfig=" + filepath.Join(stateDir, certgen.OpenShiftControllerManagerKubeconfigFilename),
+				"--namespace=default",
+			},
+			// The binary links against the gpgme libraries extracted
+			// alongside it.
+			Env: append(os.Environ(), "LD_LIBRARY_PATH="+binaries, "POD_NAMESPACE=default"),
+		},
+		{
+			Name: "cluster-policy-controller",
+			Path: openShiftBinaries["cluster-policy-controller"],
+			Args: []string{
+				"start",
+				"--config=" + clusterPolicyControllerConfig,
+				"--kubeconfig=" + filepath.Join(stateDir, certgen.ClusterPolicyControllerKubeconfigFilename),
+				"--namespace=default",
+			},
+			Env: append(os.Environ(), "POD_NAMESPACE=default"),
+		},
 	}
 
 	return (&supervisor.Supervisor{}).Run(ctx, processes)
@@ -304,6 +346,8 @@ func ensureCertificates(stateDir string) error {
 		certgen.OpenShiftAPIServerKubeconfigFilename,
 		certgen.OAuthAPIServerKubeconfigFilename,
 		certgen.OAuthServerKubeconfigFilename,
+		certgen.OpenShiftControllerManagerKubeconfigFilename,
+		certgen.ClusterPolicyControllerKubeconfigFilename,
 		certgen.SessionSecretsFilename,
 		certgen.SAKeyFilename, certgen.SAPubFilename,
 	}
@@ -439,6 +483,57 @@ oauthConfig:
 		filepath.Join(stateDir, certgen.SessionSecretsFilename))
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		return "", fmt.Errorf("write oauth-server config: %w", err)
+	}
+	return path, nil
+}
+
+// writeOpenShiftControllerManagerConfig writes openshift-controller-
+// manager's component configuration: serving its health endpoint on
+// localhost with the shared service-serving certificate. The remaining
+// fields follow Hypershift's control-plane operator; unset controller and
+// image-template fields fall back to the component's built-in defaults.
+func writeOpenShiftControllerManagerConfig(stateDir string) (string, error) {
+	path := filepath.Join(stateDir, "openshift-controller-manager-config.yaml")
+	config := fmt.Sprintf(`apiVersion: openshiftcontrolplane.config.openshift.io/v1
+kind: OpenShiftControllerManagerConfig
+dockerPullSecret:
+  internalRegistryHostname: image-registry.openshift-image-registry.svc:5000
+leaderElection:
+  name: openshift-master-controllers
+servingInfo:
+  bindAddress: 127.0.0.1:%d
+  certFile: %s
+  keyFile: %s
+  clientCA: %s
+`, openShiftControllerManagerPort,
+		filepath.Join(stateDir, certgen.ServiceServingCertFilename),
+		filepath.Join(stateDir, certgen.ServiceServingKeyFilename),
+		filepath.Join(stateDir, certgen.CACertFilename))
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		return "", fmt.Errorf("write openshift-controller-manager config: %w", err)
+	}
+	return path, nil
+}
+
+// writeClusterPolicyControllerConfig writes cluster-policy-controller's
+// component configuration: the same shape openshift-controller-manager
+// uses, serving its health endpoint on localhost. Unset fields fall back
+// to the component's built-in defaults, which enable every controller.
+func writeClusterPolicyControllerConfig(stateDir string) (string, error) {
+	path := filepath.Join(stateDir, "cluster-policy-controller-config.yaml")
+	config := fmt.Sprintf(`apiVersion: openshiftcontrolplane.config.openshift.io/v1
+kind: OpenShiftControllerManagerConfig
+servingInfo:
+  bindAddress: 127.0.0.1:%d
+  certFile: %s
+  keyFile: %s
+  clientCA: %s
+`, clusterPolicyControllerPort,
+		filepath.Join(stateDir, certgen.ServiceServingCertFilename),
+		filepath.Join(stateDir, certgen.ServiceServingKeyFilename),
+		filepath.Join(stateDir, certgen.CACertFilename))
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		return "", fmt.Errorf("write cluster-policy-controller config: %w", err)
 	}
 	return path, nil
 }
