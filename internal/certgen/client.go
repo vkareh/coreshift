@@ -83,12 +83,12 @@ func generateComponentKubeconfig(commonName, serverURL string, caCertPEM, caKeyP
 	return generateKubeconfig(serverURL, commonName, caCertPEM, clientCertPEM, clientKeyPEM)
 }
 
-// generateAggregatedKubeconfig creates a directly usable kubeconfig for an
-// aggregated API server's client. Following Hypershift's control-plane
-// operator, these servers run with the system:admin identity: their
-// delegated authentication and authorization calls and self-bootstrapped
-// RBAC then work without seeding any component-specific RBAC.
-func generateAggregatedKubeconfig(serverURL string, caCertPEM, caKeyPEM []byte) ([]byte, error) {
+// generateAdminKubeconfig creates a directly usable kubeconfig for a
+// control-plane component that Hypershift runs with its admin kubeconfig:
+// the aggregated API servers, the OAuth server, and the two controller
+// managers. These components run as the system:admin identity so their
+// calls work without seeding any component-specific RBAC.
+func generateAdminKubeconfig(serverURL string, caCertPEM, caKeyPEM []byte) ([]byte, error) {
 	clientCertPEM, clientKeyPEM, err := generateClientCert(caCertPEM, caKeyPEM, pkix.Name{
 		CommonName:   "system:admin",
 		Organization: []string{"system:masters"},
