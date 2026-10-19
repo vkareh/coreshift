@@ -25,6 +25,7 @@ const DefaultReleaseImage = "quay.io/openshift-release-dev/ocp-release:4.22.8-x8
 const (
 	openShiftAPIServerPort = 8443
 	oauthAPIServerPort     = 8444
+	oauthServerPort        = 8445
 )
 
 // aggregatedServers lists the aggregated API servers and the API groups
@@ -108,7 +109,7 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 	if err != nil {
 		return fmt.Errorf("extract kube components: %w", err)
 	}
-	openShiftBinaries, err := client.ExtractOpenShiftComponents(ctx, releaseFilesystem, binaries, "openshift-apiserver", "oauth-apiserver")
+	openShiftBinaries, err := client.ExtractOpenShiftComponents(ctx, releaseFilesystem, binaries, "openshift-apiserver", "oauth-apiserver", "oauth-server")
 	if err != nil {
 		return fmt.Errorf("extract openshift components: %w", err)
 	}
@@ -130,6 +131,11 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 	}
 
 	openShiftAPIServerConfig, err := writeOpenShiftAPIServerConfig(stateDir, advertiseAddress)
+	if err != nil {
+		return err
+	}
+
+	oauthServerConfig, err := writeOAuthServerConfig(stateDir)
 	if err != nil {
 		return err
 	}
@@ -225,9 +231,6 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 				"--requestheader-group-headers=X-Remote-Group",
 				"--requestheader-extra-headers-prefix=X-Remote-Extra-",
 				"--client-ca-file=" + filepath.Join(stateDir, certgen.CACertFilename),
-				// No oauth-server runs here for the apiserver to hand
-				// oauth flows to.
-				"--internal-oauth-disabled=true",
 			},
 		},
 		{
@@ -250,6 +253,19 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 				"--requestheader-group-headers=X-Remote-Group",
 				"--requestheader-extra-headers-prefix=X-Remote-Extra-",
 				"--client-ca-file=" + filepath.Join(stateDir, certgen.CACertFilename),
+			},
+		},
+		// oauth-server hands login flows to the identity providers in its
+		// config; with none configured it serves a deny-all provider, so it
+		// starts and answers without cluster-side seed objects. Its API
+		// calls, such as issuing tokens through the aggregated OAuth API
+		// server, use the generated admin kubeconfig.
+		{
+			Name: "oauth-server",
+			Path: openShiftBinaries["oauth-server"],
+			Args: []string{
+				"osinserver",
+				"--config=" + oauthServerConfig,
 			},
 		},
 	}
@@ -287,6 +303,8 @@ func ensureCertificates(stateDir string) error {
 		certgen.SchedulerKubeconfigFilename,
 		certgen.OpenShiftAPIServerKubeconfigFilename,
 		certgen.OAuthAPIServerKubeconfigFilename,
+		certgen.OAuthServerKubeconfigFilename,
+		certgen.SessionSecretsFilename,
 		certgen.SAKeyFilename, certgen.SAPubFilename,
 	}
 	complete := true
@@ -378,6 +396,49 @@ kubeClientConfig:
 		filepath.Join(stateDir, certgen.OpenShiftAPIServerKubeconfigFilename))
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		return "", fmt.Errorf("write openshift-apiserver config: %w", err)
+	}
+	return path, nil
+}
+
+// writeOAuthServerConfig writes oauth-server's component configuration:
+// serving on localhost with the shared service-serving certificate, calling
+// the API server through the generated admin kubeconfig, and keeping login
+// sessions with the generated session secrets. The grant handling and token
+// lifetimes follow Hypershift's control-plane operator, which denies grants
+// by default because the method must be chosen per OAuth client.
+func writeOAuthServerConfig(stateDir string) (string, error) {
+	path := filepath.Join(stateDir, "oauth-server-config.yaml")
+	config := fmt.Sprintf(`apiVersion: osin.config.openshift.io/v1
+kind: OsinServerConfig
+servingInfo:
+  bindAddress: 127.0.0.1:%d
+  certFile: %s
+  keyFile: %s
+  clientCA: %s
+kubeClientConfig:
+  kubeConfig: %s
+oauthConfig:
+  grantConfig:
+    method: deny
+    serviceAccountMethod: prompt
+  identityProviders: []
+  masterCA: %s
+  sessionConfig:
+    sessionMaxAgeSeconds: 300
+    sessionName: ssn
+    sessionSecretsFile: %s
+  tokenConfig:
+    accessTokenMaxAgeSeconds: 86400
+    authorizeTokenMaxAgeSeconds: 300
+`, oauthServerPort,
+		filepath.Join(stateDir, certgen.ServiceServingCertFilename),
+		filepath.Join(stateDir, certgen.ServiceServingKeyFilename),
+		filepath.Join(stateDir, certgen.CACertFilename),
+		filepath.Join(stateDir, certgen.OAuthServerKubeconfigFilename),
+		filepath.Join(stateDir, certgen.CACertFilename),
+		filepath.Join(stateDir, certgen.SessionSecretsFilename))
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		return "", fmt.Errorf("write oauth-server config: %w", err)
 	}
 	return path, nil
 }
