@@ -30,3 +30,11 @@ cost and complexity of a full cluster.
 
 `coreshift render` sits underneath both — a scope-agnostic YAML artifact usable
 by podman, kubectl, or other tooling.
+
+## Cache
+
+Extracted control plane binaries and the release image's manifest of
+component image references are cached under `~/.cache/coreshift/`
+(`$XDG_CACHE_HOME/coreshift`), keyed by image digest. A second run of the
+same pinned release pulls nothing from the registry and starts straight
+from the cache. Delete the directory to clear it.
