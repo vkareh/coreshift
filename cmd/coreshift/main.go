@@ -91,29 +91,19 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 		return fmt.Errorf("create image client: %w", err)
 	}
 
-	releaseFilesystem, err := os.MkdirTemp("", "coreshift-api-release-")
+	releaseRoot, err := client.CachedRelease(ctx, DefaultReleaseImage)
 	if err != nil {
-		return fmt.Errorf("create release image directory: %w", err)
+		return fmt.Errorf("prepare release image: %w", err)
 	}
-	defer os.RemoveAll(releaseFilesystem)
-	if err := client.PullAndUnpack(ctx, DefaultReleaseImage, releaseFilesystem); err != nil {
-		return fmt.Errorf("pull release image: %w", err)
-	}
-
-	binaries, err := os.MkdirTemp("", "coreshift-api-bin-")
-	if err != nil {
-		return fmt.Errorf("create binary directory: %w", err)
-	}
-	defer os.RemoveAll(binaries)
-	etcdPath, err := extractEtcd(ctx, client, releaseFilesystem, binaries)
+	etcdPath, err := client.ExtractEtcd(ctx, releaseRoot)
 	if err != nil {
 		return err
 	}
-	kubeBinaries, err := client.ExtractKubeComponents(ctx, releaseFilesystem, binaries)
+	kubeBinaries, err := client.ExtractKubeComponents(ctx, releaseRoot)
 	if err != nil {
 		return fmt.Errorf("extract kube components: %w", err)
 	}
-	openShiftBinaries, err := client.ExtractOpenShiftComponents(ctx, releaseFilesystem, binaries,
+	openShiftBinaries, err := client.ExtractOpenShiftComponents(ctx, releaseRoot,
 		"openshift-apiserver", "oauth-apiserver", "oauth-server", "openshift-controller-manager", "cluster-policy-controller")
 	if err != nil {
 		return fmt.Errorf("extract openshift components: %w", err)
@@ -307,8 +297,8 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 				"--namespace=default",
 			},
 			// The binary links against the gpgme libraries extracted
-			// alongside it.
-			Env: append(os.Environ(), "LD_LIBRARY_PATH="+binaries, "POD_NAMESPACE=default"),
+			// alongside it in its cache directory.
+			Env: append(os.Environ(), "LD_LIBRARY_PATH="+filepath.Dir(openShiftBinaries["openshift-controller-manager"]), "POD_NAMESPACE=default"),
 		},
 		{
 			Name: "cluster-policy-controller",
@@ -374,28 +364,6 @@ func ensureCertificates(stateDir string) error {
 		return nil
 	}
 	return certgen.GenerateAll(stateDir, certgen.Options{})
-}
-
-// extractEtcd resolves the etcd image from an unpacked release image,
-// pulls it, and extracts the etcd binary into targetDirectory.
-func extractEtcd(ctx context.Context, client *image.Client, releaseFilesystem, targetDirectory string) (string, error) {
-	etcdImage, err := image.ResolveComponentImage(releaseFilesystem, "etcd")
-	if err != nil {
-		return "", fmt.Errorf("resolve etcd image: %w", err)
-	}
-
-	filesystem, err := os.MkdirTemp("", "coreshift-api-image-")
-	if err != nil {
-		return "", fmt.Errorf("create image directory: %w", err)
-	}
-	defer os.RemoveAll(filesystem)
-	if err := client.PullAndUnpack(ctx, etcdImage, filesystem); err != nil {
-		return "", fmt.Errorf("pull etcd image: %w", err)
-	}
-	if err := image.ExtractBinary(filesystem, "/usr/bin/etcd", targetDirectory); err != nil {
-		return "", fmt.Errorf("extract etcd: %w", err)
-	}
-	return filepath.Join(targetDirectory, "etcd"), nil
 }
 
 // writeSchedulerConfig writes kube-scheduler's component configuration

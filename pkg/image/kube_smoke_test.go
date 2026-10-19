@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"testing"
 )
 
@@ -15,9 +16,6 @@ const (
 	smokeReleaseImage   = "quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64"
 )
 
-// TestExtractKubeComponentsSmoke resolves the hyperkube image from the
-// pinned release payload, pulls it from the real registry, and extracts
-// the core kube binaries end to end.
 func TestExtractKubeComponentsSmoke(t *testing.T) {
 	pullSecret, err := os.ReadFile(smokePullSecretPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -26,6 +24,8 @@ func TestExtractKubeComponentsSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Keep the smoke test's cache separate from the user's.
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
 	client, err := NewClient(pullSecret)
 	if err != nil {
@@ -33,12 +33,12 @@ func TestExtractKubeComponentsSmoke(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	releaseFilesystem := t.TempDir()
-	if err := client.PullAndUnpack(ctx, smokeReleaseImage, releaseFilesystem); err != nil {
+	releaseRoot, err := client.CachedRelease(ctx, smokeReleaseImage)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	binaries, err := client.ExtractKubeComponents(ctx, releaseFilesystem, t.TempDir())
+	binaries, err := client.ExtractKubeComponents(ctx, releaseRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,5 +56,14 @@ func TestExtractKubeComponentsSmoke(t *testing.T) {
 		if info.Size() == 0 {
 			t.Fatalf("%s is empty", component)
 		}
+	}
+
+	// A second call must return the same paths straight from the cache.
+	again, err := client.ExtractKubeComponents(ctx, releaseRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(binaries, again) {
+		t.Fatalf("second call returned %v, want %v", again, binaries)
 	}
 }
