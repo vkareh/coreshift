@@ -3,7 +3,6 @@ package image
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 )
 
@@ -20,37 +19,42 @@ var kubeComponents = []struct{ component, path string }{
 	{"kube-scheduler", "/usr/bin/kube-scheduler"},
 }
 
-// ExtractKubeComponents resolves the hyperkube image from an unpacked
-// release image, pulls it, and extracts the core kube binaries into
-// targetDirectory. It returns a map of component name to local binary
-// path.
-func (c *Client) ExtractKubeComponents(ctx context.Context, releaseImageRoot, targetDirectory string) (map[string]string, error) {
-	imageRef, err := ResolveComponentImage(releaseImageRoot, hyperkubeComponent)
+// ExtractKubeComponents resolves the hyperkube image from a cached
+// release manifest, extracts the core kube binaries into the cache, and
+// returns a map of component name to local binary path.
+func (c *Client) ExtractKubeComponents(ctx context.Context, releaseRoot string) (map[string]string, error) {
+	imageRef, err := ResolveComponentImage(releaseRoot, hyperkubeComponent)
 	if err != nil {
 		return nil, fmt.Errorf("resolve hyperkube image: %w", err)
 	}
-
-	filesystem, err := os.MkdirTemp("", "coreshift-hyperkube-")
+	dir, err := c.extractCached(ctx, componentsKind, imageRef, func(filesystem, target string) error {
+		_, err := extractKubeBinaries(filesystem, target)
+		return err
+	})
 	if err != nil {
-		return nil, fmt.Errorf("create hyperkube image directory: %w", err)
+		return nil, fmt.Errorf("extract kube components: %w", err)
 	}
-	defer os.RemoveAll(filesystem)
-	if err := c.PullAndUnpack(ctx, imageRef, filesystem); err != nil {
-		return nil, fmt.Errorf("pull hyperkube image: %w", err)
-	}
-	return extractKubeBinaries(filesystem, targetDirectory)
+	return kubeBinaryPaths(dir), nil
 }
 
 // extractKubeBinaries copies the core kube binaries from an unpacked
 // hyperkube image filesystem into targetDirectory and returns a map of
 // component name to extracted binary path.
 func extractKubeBinaries(hyperkubeRoot, targetDirectory string) (map[string]string, error) {
-	binaries := make(map[string]string, len(kubeComponents))
 	for _, component := range kubeComponents {
 		if err := ExtractBinary(hyperkubeRoot, component.path, targetDirectory); err != nil {
 			return nil, fmt.Errorf("extract %s: %w", component.component, err)
 		}
-		binaries[component.component] = filepath.Join(targetDirectory, filepath.Base(component.path))
 	}
-	return binaries, nil
+	return kubeBinaryPaths(targetDirectory), nil
+}
+
+// kubeBinaryPaths maps component names to their extracted binary paths
+// in dir.
+func kubeBinaryPaths(dir string) map[string]string {
+	binaries := make(map[string]string, len(kubeComponents))
+	for _, component := range kubeComponents {
+		binaries[component.component] = filepath.Join(dir, filepath.Base(component.path))
+	}
+	return binaries
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"os"
 	"path/filepath"
 	"slices"
 )
@@ -43,12 +42,12 @@ var openshiftComponents = []openshiftComponent{
 }
 
 // ExtractOpenShiftComponents resolves each requested OpenShift API layer
-// component's image from an unpacked release image, pulls it, and extracts
-// the component binary into targetDirectory. It returns a map of component
-// name to local binary path. With no names, every known component is
-// extracted; otherwise only the named ones, so callers that run a subset do
-// not pay for the other component image pulls.
-func (c *Client) ExtractOpenShiftComponents(ctx context.Context, releaseImageRoot, targetDirectory string, names ...string) (map[string]string, error) {
+// component's image from a cached release manifest, extracts the
+// component binary into the cache, and returns a map of component name
+// to local binary path. With no names, every known component is
+// extracted; otherwise only the named ones, so callers that run a subset
+// do not pay for the other component image pulls.
+func (c *Client) ExtractOpenShiftComponents(ctx context.Context, releaseRoot string, names ...string) (map[string]string, error) {
 	selected, err := selectOpenShiftComponents(names...)
 	if err != nil {
 		return nil, err
@@ -56,7 +55,7 @@ func (c *Client) ExtractOpenShiftComponents(ctx context.Context, releaseImageRoo
 
 	binaries := make(map[string]string, len(selected))
 	for _, component := range selected {
-		path, err := c.extractOpenShiftComponent(ctx, releaseImageRoot, component, targetDirectory)
+		path, err := c.extractOpenShiftComponent(ctx, releaseRoot, component)
 		if err != nil {
 			return nil, err
 		}
@@ -88,24 +87,22 @@ func selectOpenShiftComponents(names ...string) ([]openshiftComponent, error) {
 	return selected, nil
 }
 
-// extractOpenShiftComponent resolves one component's image from an
-// unpacked release image, pulls it, and extracts the binary into
-// targetDirectory, returning the extracted binary path.
-func (c *Client) extractOpenShiftComponent(ctx context.Context, releaseImageRoot string, component openshiftComponent, targetDirectory string) (string, error) {
-	imageRef, err := ResolveComponentImage(releaseImageRoot, component.component)
+// extractOpenShiftComponent resolves one component's image from a
+// cached release manifest, extracts the binary into the cache, and
+// returns the extracted binary path.
+func (c *Client) extractOpenShiftComponent(ctx context.Context, releaseRoot string, component openshiftComponent) (string, error) {
+	imageRef, err := ResolveComponentImage(releaseRoot, component.component)
 	if err != nil {
 		return "", fmt.Errorf("resolve %s image: %w", component.component, err)
 	}
-
-	filesystem, err := os.MkdirTemp("", "coreshift-"+component.component+"-")
+	dir, err := c.extractCached(ctx, componentsKind, imageRef, func(filesystem, target string) error {
+		_, err := extractOpenShiftBinary(component, filesystem, target)
+		return err
+	})
 	if err != nil {
-		return "", fmt.Errorf("create %s image directory: %w", component.component, err)
+		return "", fmt.Errorf("extract %s: %w", component.component, err)
 	}
-	defer os.RemoveAll(filesystem)
-	if err := c.PullAndUnpack(ctx, imageRef, filesystem); err != nil {
-		return "", fmt.Errorf("pull %s image: %w", component.component, err)
-	}
-	return extractOpenShiftBinary(component, filesystem, targetDirectory)
+	return filepath.Join(dir, filepath.Base(component.path)), nil
 }
 
 // extractOpenShiftBinary copies one component's binary, plus any shared
