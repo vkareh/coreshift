@@ -16,13 +16,16 @@ const componentsKind = "components"
 // cachePath returns the cache location for imageRef below the given
 // subdirectory. References keep their registry and repository structure,
 // so the reference itself names the cache entry and different images
-// never share one.
+// never share one. Colons become dashes because they would break the
+// library search path pointing extracted binaries at their bundled
+// libraries; a collision would require the same digest, hence the same
+// content, and is harmless.
 func cachePath(kind, imageRef string) (string, error) {
 	root, err := cacheRoot()
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(root, kind, filepath.FromSlash(imageRef))
+	path := filepath.Join(root, kind, filepath.FromSlash(strings.ReplaceAll(imageRef, ":", "-")))
 	if rel, err := filepath.Rel(root, path); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("image reference escapes cache: %q", imageRef)
 	}
