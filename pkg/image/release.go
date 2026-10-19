@@ -19,8 +19,8 @@ const releaseManifestPath = "release-manifests/image-references"
 // Cache subdirectories for release manifests and for records mapping
 // tag references to the digests they resolved to.
 const (
-	releaseKind     = "release"
-	tagRecordKind   = "tags"
+	releaseKind   = "release"
+	tagRecordKind = "tags"
 )
 
 // imageStream is the subset of the image.openshift.io/v1 ImageStream schema
