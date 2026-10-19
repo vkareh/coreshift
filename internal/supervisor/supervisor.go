@@ -28,6 +28,9 @@ type Process struct {
 	Path string
 	// Args are the arguments passed to the executable.
 	Args []string
+	// Env, when set, is the complete environment for the child, replacing
+	// this process's environment. When nil the child inherits it.
+	Env []string
 	// AfterStart, when set, runs after this process starts and must return
 	// before later processes start. It is how a process that other children
 	// depend on gates their startup, for example by waiting for the process
@@ -145,6 +148,7 @@ func (c *child) terminate() {
 
 func startChild(proc *Process, stdout, stderr io.Writer, mu *sync.Mutex) (*child, error) {
 	cmd := exec.Command(proc.Path, proc.Args...)
+	cmd.Env = proc.Env
 
 	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
