@@ -20,7 +20,7 @@ func TestCachePathKeepsReferenceStructure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(cacheRootForTest(t), componentsKind, "quay.io", "example", "repo@"+testDigest)
+	want := filepath.Join(cacheRootForTest(t), componentsKind, "quay.io", "example", "repo@sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	if path != want {
 		t.Fatalf("path = %q, want %q", path, want)
 	}
