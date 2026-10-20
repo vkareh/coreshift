@@ -70,8 +70,8 @@ func TestGenerateAll(t *testing.T) {
 		if err != nil {
 			t.Fatalf("load %s: %v", name, err)
 		}
-		user := config.AuthInfos["system:admin"]
-		if user == nil {
+		user, ok := config.AuthInfos["system:admin"]
+		if !ok {
 			t.Fatalf("%s has no system:admin user", name)
 		}
 		cert := parseCertificate(t, user.ClientCertificateData)
