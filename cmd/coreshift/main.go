@@ -75,7 +75,9 @@ func newAPICommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&pullSecretPath, "pull-secret", "", "path to a Red Hat pull secret with credentials for the release image registry (required)")
-	cmd.MarkFlagRequired("pull-secret")
+	if err := cmd.MarkFlagRequired("pull-secret"); err != nil {
+		panic(err) // the flag is defined above
+	}
 	return cmd
 }
 
