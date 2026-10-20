@@ -21,10 +21,14 @@ func TestSeedRegistersDefinitions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, want := range []struct{ name, group, plural string }{
-		{"clusterresourcequotas.quota.openshift.io", "quota.openshift.io", "clusterresourcequotas"},
-		{"securitycontextconstraints.security.openshift.io", "security.openshift.io", "securitycontextconstraints"},
-		{"rangeallocations.security.internal.openshift.io", "security.internal.openshift.io", "rangeallocations"},
+	for _, want := range []struct {
+		name, group, plural string
+		scope               apiextensionsv1.ResourceScope
+	}{
+		{"clusterresourcequotas.quota.openshift.io", "quota.openshift.io", "clusterresourcequotas", apiextensionsv1.ClusterScoped},
+		{"securitycontextconstraints.security.openshift.io", "security.openshift.io", "securitycontextconstraints", apiextensionsv1.ClusterScoped},
+		{"rangeallocations.security.internal.openshift.io", "security.internal.openshift.io", "rangeallocations", apiextensionsv1.ClusterScoped},
+		{"rolebindingrestrictions.authorization.openshift.io", "authorization.openshift.io", "rolebindingrestrictions", apiextensionsv1.NamespaceScoped},
 	} {
 		definition, err := client.ApiextensionsV1().CustomResourceDefinitions().Get(context.Background(), want.name, metav1.GetOptions{})
 		if err != nil {
@@ -36,7 +40,7 @@ func TestSeedRegistersDefinitions(t *testing.T) {
 		if definition.Spec.Names.Plural != want.plural {
 			t.Fatalf("%s: unexpected plural: %s", want.name, definition.Spec.Names.Plural)
 		}
-		if definition.Spec.Scope != apiextensionsv1.ClusterScoped {
+		if definition.Spec.Scope != want.scope {
 			t.Fatalf("%s: unexpected scope: %s", want.name, definition.Spec.Scope)
 		}
 		if len(definition.Spec.Versions) != 1 || definition.Spec.Versions[0].Name != "v1" {
