@@ -8,12 +8,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/vkareh/coreshift/internal/aggregation"
 	"github.com/vkareh/coreshift/internal/certgen"
 	"github.com/vkareh/coreshift/internal/crd"
+	"github.com/vkareh/coreshift/internal/oauth"
 	"github.com/vkareh/coreshift/internal/rbac"
 	"github.com/vkareh/coreshift/internal/scc"
 	"github.com/vkareh/coreshift/internal/supervisor"
@@ -133,7 +135,7 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 		return err
 	}
 
-	oauthServerConfig, err := writeOAuthServerConfig(stateDir)
+	oauthServerConfig, err := writeOAuthServerConfig(stateDir, nil)
 	if err != nil {
 		return err
 	}
@@ -314,6 +316,20 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 				"osinserver",
 				"--config=" + oauthServerConfig,
 			},
+			// The server reads identity providers only from its config
+			// file; in real clusters the authentication operator renders
+			// the OAuth object's providers into it and restarts the
+			// server. The same rendering runs here, once the API server
+			// answers and before the server starts. Without any providers
+			// the config keeps the deny-all-only content written above.
+			BeforeStart: func(ctx context.Context) error {
+				providers, err := oauth.Render(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), stateDir)
+				if err != nil {
+					return err
+				}
+				_, err = writeOAuthServerConfig(stateDir, providers)
+				return err
+			},
 		},
 		// The controller managers run all their controllers against the API
 		// server. They elect leaders through a lease in the given namespace;
@@ -484,9 +500,27 @@ kubeClientConfig:
 // the API server through the generated admin kubeconfig, and keeping login
 // sessions with the generated session secrets. The grant handling and token
 // lifetimes follow Hypershift's control-plane operator, which denies grants
-// by default because the method must be chosen per OAuth client.
-func writeOAuthServerConfig(stateDir string) (string, error) {
+// by default because the method must be chosen per OAuth client. The given
+// htpasswd providers, if any, are rendered the way the authentication
+// operator renders the OAuth object's providers in real clusters.
+func writeOAuthServerConfig(stateDir string, providers []oauth.Provider) (string, error) {
 	path := filepath.Join(stateDir, "oauth-server-config.yaml")
+	identityProviders := "identityProviders: []"
+	if len(providers) > 0 {
+		stanzas := make([]string, 0, len(providers))
+		for _, provider := range providers {
+			stanzas = append(stanzas, fmt.Sprintf(`  - name: %s
+    challenge: true
+    login: true
+    mappingMethod: %s
+    provider:
+      apiVersion: osin.config.openshift.io/v1
+      kind: HTPasswdPasswordIdentityProvider
+      file: %s
+`, provider.Name, provider.MappingMethod, provider.File))
+		}
+		identityProviders = "identityProviders:\n" + strings.Join(stanzas, "")
+	}
 	config := fmt.Sprintf(`apiVersion: osin.config.openshift.io/v1
 kind: OsinServerConfig
 servingInfo:
@@ -500,7 +534,7 @@ oauthConfig:
   grantConfig:
     method: deny
     serviceAccountMethod: prompt
-  identityProviders: []
+  %s
   masterCA: %s
   sessionConfig:
     sessionMaxAgeSeconds: 300
@@ -514,6 +548,7 @@ oauthConfig:
 		filepath.Join(stateDir, certgen.ServiceServingKeyFilename),
 		filepath.Join(stateDir, certgen.CACertFilename),
 		filepath.Join(stateDir, certgen.OAuthServerKubeconfigFilename),
+		identityProviders,
 		filepath.Join(stateDir, certgen.CACertFilename),
 		filepath.Join(stateDir, certgen.SessionSecretsFilename))
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
