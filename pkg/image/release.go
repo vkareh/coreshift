@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,7 +75,7 @@ func (c *Client) CachedRelease(ctx context.Context, releaseImage string) (string
 		if recorded, ok := readTagRecord(releaseImage); ok {
 			if dir, err := cachePath(releaseKind, recorded); err == nil {
 				if _, err := os.Stat(dir); err == nil {
-					log.Printf("using cached image %s", recorded)
+					Logger.Printf("using cached image %s", recorded)
 					return dir, nil
 				}
 			}
