@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	aggregatorclient "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
@@ -84,6 +85,74 @@ func Seed(ctx context.Context, kubeconfigPath string, servers []Server, caBundle
 		return err
 	}
 	return seedWithRetry(ctx, kubeClient, aggregatorClient, servers, caBundle)
+}
+
+// WaitReady polls the main API endpoint's health and each aggregated
+// server's API availability until all answer or the context expires.
+func WaitReady(ctx context.Context, kubeconfigPath string, servers []Server) error {
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	if err != nil {
+		return fmt.Errorf("load kubeconfig: %w", err)
+	}
+	kubeClient, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("create kube client: %w", err)
+	}
+	aggregatorClient, err := aggregatorclient.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("create aggregator client: %w", err)
+	}
+	return waitReady(ctx, kubeClient.Discovery().RESTClient(), aggregatorClient, servers)
+}
+
+func waitReady(ctx context.Context, restClient rest.Interface, aggregatorClient aggregatorclient.Interface, servers []Server) error {
+	if err := waitForHealthz(ctx, restClient); err != nil {
+		return err
+	}
+	for _, server := range servers {
+		for _, group := range server.Groups {
+			if err := waitForGroup(ctx, aggregatorClient, group); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// waitForHealthz polls the API server's health endpoint until it answers
+// or the context expires.
+func waitForHealthz(ctx context.Context, client rest.Interface) error {
+	err := wait.PollUntilContextCancel(ctx, apiPollInterval, true, func(ctx context.Context) (bool, error) {
+		_, err := client.Get().AbsPath("/healthz").DoRaw(ctx)
+		return err == nil, nil
+	})
+	if err != nil {
+		return fmt.Errorf("wait for the API server's health endpoint: %w", ctx.Err())
+	}
+	return nil
+}
+
+// waitForGroup polls one aggregated API group's availability, as the
+// aggregation layer reports it, until the group is available or the
+// context expires.
+func waitForGroup(ctx context.Context, client aggregatorclient.Interface, group string) error {
+	name := fmt.Sprintf("v1.%s.openshift.io", group)
+	err := wait.PollUntilContextCancel(ctx, apiPollInterval, true, func(ctx context.Context) (bool, error) {
+		service, err := client.ApiregistrationV1().APIServices().Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return false, nil
+		}
+		for _, condition := range service.Status.Conditions {
+			if condition.Type == v1.Available {
+				return condition.Status == v1.ConditionTrue, nil
+			}
+		}
+		return false, nil
+	})
+	if err != nil {
+		return fmt.Errorf("wait for the %s API: %w", name, ctx.Err())
+	}
+	return nil
 }
 
 // seedWithRetry keeps retrying registration until the context expires.
