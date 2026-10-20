@@ -20,8 +20,8 @@ import (
 )
 
 // The client oc logs in with, mirroring the authentication operator's
-// bootstrapped challenging client. The redirect URI is the main API
-// endpoint's implicit token URL.
+// bootstrapped challenging client. The redirect URI follows the API
+// endpoint, so it is filled in at seed time from the run's port.
 //
 //go:embed openshift-challenging-client.yaml
 var manifest string
@@ -40,8 +40,10 @@ var clients = schema.GroupVersionResource{
 var objectRetryInterval = 3 * time.Second
 
 // Seed creates the login clients. The writes are retried and idempotent,
-// so it is safe to call while the API is still coming up.
-func Seed(ctx context.Context, kubeconfigPath string) error {
+// so it is safe to call while the API is still coming up. The client's
+// redirect URI is derived from apiServerURL, the endpoint clients log in
+// to.
+func Seed(ctx context.Context, kubeconfigPath, apiServerURL string) error {
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("load kubeconfig: %w", err)
@@ -50,15 +52,19 @@ func Seed(ctx context.Context, kubeconfigPath string) error {
 	if err != nil {
 		return fmt.Errorf("create dynamic client: %w", err)
 	}
-	return seedWithRetry(ctx, client)
+	return seedWithRetry(ctx, client, apiServerURL)
 }
 
 // seedWithRetry keeps retrying until the context expires. The aggregated
 // OAuth API can reject the first writes while it warms up.
-func seedWithRetry(ctx context.Context, client dynamic.Interface) error {
+func seedWithRetry(ctx context.Context, client dynamic.Interface, apiServerURL string) error {
 	object := &unstructured.Unstructured{}
 	if err := yaml.Unmarshal([]byte(manifest), object); err != nil {
 		return fmt.Errorf("parse OAuth client manifest: %w", err)
+	}
+	redirectURIs := []string{apiServerURL + "/oauth/token/implicit"}
+	if err := unstructured.SetNestedStringSlice(object.Object, redirectURIs, "redirectURIs"); err != nil {
+		return fmt.Errorf("set redirect URIs: %w", err)
 	}
 	var lastErr error
 	pollErr := wait.PollUntilContextCancel(ctx, objectRetryInterval, true, func(ctx context.Context) (bool, error) {

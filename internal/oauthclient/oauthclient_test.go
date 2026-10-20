@@ -22,10 +22,12 @@ func newClient() *dynamicfake.FakeDynamicClient {
 	)
 }
 
+const testAPIURL = "https://127.0.0.1:7443"
+
 func TestSeedCreatesLoginClient(t *testing.T) {
 	client := newClient()
 
-	if err := seedWithRetry(context.Background(), client); err != nil {
+	if err := seedWithRetry(context.Background(), client, testAPIURL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -37,15 +39,19 @@ func TestSeedCreatesLoginClient(t *testing.T) {
 	if err != nil || grantMethod != "auto" {
 		t.Fatalf("client grant method is %q (err %v), want auto", grantMethod, err)
 	}
+	redirects, _, err := unstructured.NestedStringSlice(created.Object, "redirectURIs")
+	if err != nil || len(redirects) != 1 || redirects[0] != testAPIURL+"/oauth/token/implicit" {
+		t.Fatalf("client redirect URIs are %v (err %v), want [%s]", redirects, err, testAPIURL+"/oauth/token/implicit")
+	}
 }
 
 func TestSeedIsIdempotent(t *testing.T) {
 	client := newClient()
 
-	if err := seedWithRetry(context.Background(), client); err != nil {
+	if err := seedWithRetry(context.Background(), client, testAPIURL); err != nil {
 		t.Fatal(err)
 	}
-	if err := seedWithRetry(context.Background(), client); err != nil {
+	if err := seedWithRetry(context.Background(), client, testAPIURL); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -66,7 +72,7 @@ func TestSeedRetriesUntilAPIAcceptsWrites(t *testing.T) {
 		return false, nil, nil
 	})
 
-	if err := seedWithRetry(context.Background(), client); err != nil {
+	if err := seedWithRetry(context.Background(), client, testAPIURL); err != nil {
 		t.Fatal(err)
 	}
 	if rejections != 2 {
@@ -86,7 +92,7 @@ func TestSeedFailsOnPersistentError(t *testing.T) {
 		return true, nil, errors.New("broken")
 	})
 
-	err := seedWithRetry(ctx, client)
+	err := seedWithRetry(ctx, client, testAPIURL)
 	if err == nil || errors.Unwrap(err).Error() != "broken" {
 		t.Fatalf("expected the persistent error, got: %v", err)
 	}
