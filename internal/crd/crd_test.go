@@ -29,6 +29,7 @@ func TestSeedRegistersDefinitions(t *testing.T) {
 		{"securitycontextconstraints.security.openshift.io", "security.openshift.io", "securitycontextconstraints", apiextensionsv1.ClusterScoped},
 		{"rangeallocations.security.internal.openshift.io", "security.internal.openshift.io", "rangeallocations", apiextensionsv1.ClusterScoped},
 		{"rolebindingrestrictions.authorization.openshift.io", "authorization.openshift.io", "rolebindingrestrictions", apiextensionsv1.NamespaceScoped},
+		{"oauths.config.openshift.io", "config.openshift.io", "oauths", apiextensionsv1.ClusterScoped},
 	} {
 		definition, err := client.ApiextensionsV1().CustomResourceDefinitions().Get(context.Background(), want.name, metav1.GetOptions{})
 		if err != nil {

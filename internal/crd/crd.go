@@ -50,6 +50,13 @@ var rangeAllocationManifest string
 //go:embed 0000_03_config-operator_01_rolebindingrestrictions.crd.yaml
 var roleBindingRestrictionsManifest string
 
+// The OAuth definition backs the OAuth objects the OAuth server watches to
+// load identity providers at runtime; without it, applying one fails with
+// "no matches for kind OAuth".
+//
+//go:embed 0000_10_config-operator_01_oauths.crd.yaml
+var oauthManifest string
+
 // definitions pairs each embedded manifest with the name of the definition
 // it holds.
 var definitions = []struct {
@@ -60,6 +67,7 @@ var definitions = []struct {
 	{name: "securitycontextconstraints.security.openshift.io", manifest: securityContextConstraintsManifest},
 	{name: "rangeallocations.security.internal.openshift.io", manifest: rangeAllocationManifest},
 	{name: "rolebindingrestrictions.authorization.openshift.io", manifest: roleBindingRestrictionsManifest},
+	{name: "oauths.config.openshift.io", manifest: oauthManifest},
 }
 
 // objectRetryInterval spaces out retries while kube-apiserver warms up or
