@@ -276,6 +276,66 @@ func TestRunSetsChildEnvironment(t *testing.T) {
 	waitForLine(t, out, "[envy] seen=set")
 }
 
+func TestRunBeforeStartRunsBeforeProcess(t *testing.T) {
+	gated := filepath.Join(t.TempDir(), "gated")
+	out := &syncBuffer{}
+
+	// The child only announces startup once the gate file exists, and the
+	// hook is its only writer, so the announcement proves the hook ran to
+	// completion before the child started.
+	proc := Process{
+		Name: "gated",
+		Path: "bash",
+		Args: []string{"-c", fmt.Sprintf(
+			"while [ ! -f %q ]; do sleep 0.05; done; echo started; while :; do sleep 0.1; done", gated)},
+		BeforeStart: func(ctx context.Context) error {
+			return os.WriteFile(gated, []byte("ok"), 0o644)
+		},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- (&Supervisor{Stdout: out, Stderr: out}).Run(context.Background(), []Process{proc})
+	}()
+
+	waitForLine(t, out, "[gated] started")
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForRun(t, done); err != nil {
+		t.Fatalf("Run returned an error after SIGINT: %v", err)
+	}
+}
+
+func TestRunBeforeStartFailureFailsRun(t *testing.T) {
+	orderFile := filepath.Join(t.TempDir(), "order")
+	out := &syncBuffer{}
+	first := stopper("first", orderFile)
+	second := stopper("second", orderFile)
+	// The hook fails only after the earlier child announced startup, so
+	// the teardown check below can rely on a clean termination.
+	second.BeforeStart = func(ctx context.Context) error {
+		waitForLine(t, out, "[first] started")
+		return fmt.Errorf("gate never opened")
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- (&Supervisor{Stdout: out, Stderr: out}).Run(context.Background(), []Process{first, second})
+	}()
+
+	err := waitForRun(t, done)
+	if err == nil || !strings.Contains(err.Error(), "before start of second") || !strings.Contains(err.Error(), "gate never opened") {
+		t.Fatalf("expected error from failed BeforeStart hook, got: %v", err)
+	}
+	if got := readOrder(t, orderFile); !reflect.DeepEqual(got, []string{"first"}) {
+		t.Fatalf("children were not torn down, termination order: %v", got)
+	}
+	if strings.Contains(out.String(), "[second] started") {
+		t.Fatalf("child started despite hook failure:\n%s", out.String())
+	}
+}
+
 func TestRunAfterStartGatesLaterChildren(t *testing.T) {
 	orderFile := filepath.Join(t.TempDir(), "order")
 	gated := filepath.Join(t.TempDir(), "gated")

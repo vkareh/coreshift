@@ -31,6 +31,12 @@ type Process struct {
 	// Env, when set, is the complete environment for the child, replacing
 	// this process's environment. When nil the child inherits it.
 	Env []string
+	// BeforeStart, when set, runs right before this process starts, after
+	// all earlier processes and their hooks have completed. It is how a
+	// process consumes state that only exists once earlier processes are
+	// running, for example by reading objects the API server serves.
+	// Returning an error fails the run and tears the children down.
+	BeforeStart func(ctx context.Context) error
 	// AfterStart, when set, runs after this process starts and must return
 	// before later processes start. It is how a process that other children
 	// depend on gates their startup, for example by waiting for the process
@@ -94,6 +100,18 @@ func (s *Supervisor) Run(ctx context.Context, processes []Process) error {
 	}
 
 	for i := range processes {
+		if hook := processes[i].BeforeStart; hook != nil {
+			if err := hook(ctx); err != nil {
+				shutdown()
+				return fmt.Errorf("before start of %s: %w", processes[i].Name, err)
+			}
+			// A canceled context means shutdown was requested while the
+			// hook ran; report a clean shutdown, not a hook failure.
+			if ctx.Err() != nil {
+				shutdown()
+				return nil
+			}
+		}
 		c, err := startChild(&processes[i], stdout, stderr, &mu)
 		if err != nil {
 			shutdown()
