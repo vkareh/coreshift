@@ -43,6 +43,13 @@ var securityContextConstraintsManifest string
 //go:embed 0000_03_config-operator_02_rangeallocations.crd.yaml
 var rangeAllocationManifest string
 
+// The role binding restrictions definition backs the admission check that
+// gates every role binding creation; without it, the RBAC bootstrap cannot
+// create its bindings and the API server never becomes healthy.
+//
+//go:embed 0000_03_config-operator_01_rolebindingrestrictions.crd.yaml
+var roleBindingRestrictionsManifest string
+
 // definitions pairs each embedded manifest with the name of the definition
 // it holds.
 var definitions = []struct {
@@ -52,6 +59,7 @@ var definitions = []struct {
 	{name: "clusterresourcequotas.quota.openshift.io", manifest: clusterResourceQuotaManifest},
 	{name: "securitycontextconstraints.security.openshift.io", manifest: securityContextConstraintsManifest},
 	{name: "rangeallocations.security.internal.openshift.io", manifest: rangeAllocationManifest},
+	{name: "rolebindingrestrictions.authorization.openshift.io", manifest: roleBindingRestrictionsManifest},
 }
 
 // objectRetryInterval spaces out retries while kube-apiserver warms up or
