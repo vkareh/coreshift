@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"os"
@@ -353,6 +355,8 @@ func apiStateDir() (string, error) {
 // stateDir unless a complete set is already present. Reuse matters: a fresh
 // CA on every run would invalidate kubeconfigs saved outside the state
 // directory and leave etcd data trusted by a CA nothing signs for anymore.
+// A set whose service-serving certificate lacks the loopback address counts
+// as incomplete, so it is regenerated rather than reused.
 func ensureCertificates(stateDir string) error {
 	artifacts := []string{
 		certgen.CACertFilename, certgen.CAKeyFilename,
@@ -380,10 +384,30 @@ func ensureCertificates(stateDir string) error {
 			break
 		}
 	}
-	if complete {
+	if complete && serviceServingCertHasLoopback(stateDir) {
 		return nil
 	}
 	return certgen.GenerateAll(stateDir, certgen.Options{})
+}
+
+// serviceServingCertHasLoopback reports whether the saved service-serving
+// certificate covers 127.0.0.1. Sets generated before that address was added
+// to the certificate must be regenerated, or clients following the OAuth
+// discovery document to the OAuth server fail TLS verification.
+func serviceServingCertHasLoopback(stateDir string) bool {
+	data, err := os.ReadFile(filepath.Join(stateDir, certgen.ServiceServingCertFilename))
+	if err != nil {
+		return false
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return false
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false
+	}
+	return cert.VerifyHostname("127.0.0.1") == nil
 }
 
 // writeSchedulerConfig writes kube-scheduler's component configuration
