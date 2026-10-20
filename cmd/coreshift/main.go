@@ -15,6 +15,7 @@ import (
 	"github.com/vkareh/coreshift/internal/certgen"
 	"github.com/vkareh/coreshift/internal/crd"
 	"github.com/vkareh/coreshift/internal/rbac"
+	"github.com/vkareh/coreshift/internal/scc"
 	"github.com/vkareh/coreshift/internal/supervisor"
 	"github.com/vkareh/coreshift/pkg/image"
 )
@@ -266,6 +267,17 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 				"--requestheader-group-headers=X-Remote-Group",
 				"--requestheader-extra-headers-prefix=X-Remote-Extra-",
 				"--client-ca-file=" + filepath.Join(stateDir, certgen.CACertFilename),
+			},
+			// The default security context constraints are stored through
+			// the security API this server serves; they are created once it
+			// answers, so the controllers that start later, above all the
+			// cluster policy controller, see them from the beginning. Bound
+			// the wait so a broken server fails the run instead of blocking
+			// startup forever.
+			AfterStart: func(ctx context.Context) error {
+				ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				defer cancel()
+				return scc.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
 			},
 		},
 		{
