@@ -387,7 +387,7 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 		},
 	}
 
-	return (&supervisor.Supervisor{}).Run(ctx, processes)
+	return (&supervisor.Supervisor{LogDir: filepath.Join(stateDir, "logs")}).Run(ctx, processes)
 }
 
 // apiStateDir returns the XDG state directory holding the generated
