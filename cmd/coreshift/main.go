@@ -21,6 +21,7 @@ import (
 	"github.com/vkareh/coreshift/internal/scc"
 	"github.com/vkareh/coreshift/internal/supervisor"
 	"github.com/vkareh/coreshift/pkg/image"
+	clientcmd "k8s.io/client-go/tools/clientcmd"
 )
 
 var version = "dev"
@@ -95,6 +96,9 @@ func runAPI(ctx context.Context, pullSecretPath string, verbose bool) error {
 	}
 	fmt.Println("Preparing certificates")
 	if err := ensureCertificates(stateDir); err != nil {
+		return err
+	}
+	if err := restoreAdminContext(stateDir); err != nil {
 		return err
 	}
 
@@ -498,6 +502,35 @@ func serviceServingCertHasLoopback(stateDir string) bool {
 		return false
 	}
 	return cert.VerifyHostname("127.0.0.1") == nil
+}
+
+// adminContextName is the certificate-based context the generated admin
+// kubeconfig selects.
+const adminContextName = "admin@coreshift"
+
+// restoreAdminContext points the admin kubeconfig's current context back at
+// the certificate-based admin context. Logging in with oc adds token
+// contexts to the file and makes one of them current; a startup would then
+// try the token before the OAuth API that validates it exists, and stall
+// until the seeding timeouts fail the run. Login contexts are kept; only
+// the selection is corrected.
+func restoreAdminContext(stateDir string) error {
+	path := filepath.Join(stateDir, certgen.AdminKubeconfigFilename)
+	config, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		return fmt.Errorf("read admin kubeconfig: %w", err)
+	}
+	if config.CurrentContext == adminContextName {
+		return nil
+	}
+	if _, ok := config.Contexts[adminContextName]; !ok {
+		return fmt.Errorf("admin kubeconfig has no %s context", adminContextName)
+	}
+	config.CurrentContext = adminContextName
+	if err := clientcmd.WriteToFile(*config, path); err != nil {
+		return fmt.Errorf("write admin kubeconfig: %w", err)
+	}
+	return nil
 }
 
 // writeSchedulerConfig writes kube-scheduler's component configuration
