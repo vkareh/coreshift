@@ -10,10 +10,12 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/vkareh/coreshift/internal/certgen"
+	"github.com/vkareh/coreshift/internal/oauth"
 )
 
 func TestEnsureCertificatesReusesCompleteSet(t *testing.T) {
@@ -70,6 +72,41 @@ func writeStaleServiceServingCert(t *testing.T, stateDir string) {
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	if err := os.WriteFile(filepath.Join(stateDir, certgen.ServiceServingCertFilename), certPEM, 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWriteOAuthServerConfigWithoutProviders(t *testing.T) {
+	path, err := writeOAuthServerConfig(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := string(readFile(t, filepath.Dir(path), filepath.Base(path)))
+	if !strings.Contains(config, "identityProviders: []") {
+		t.Fatalf("config without providers is not deny-all only:\n%s", config)
+	}
+}
+
+func TestWriteOAuthServerConfigRendersProviders(t *testing.T) {
+	stateDir := t.TempDir()
+	file := filepath.Join(stateDir, "htpasswd-0")
+	providers := []oauth.Provider{{Name: "developers", MappingMethod: "claim", File: file}}
+
+	path, err := writeOAuthServerConfig(stateDir, providers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := string(readFile(t, filepath.Dir(path), filepath.Base(path)))
+	want := `  identityProviders:
+  - name: developers
+    challenge: true
+    login: true
+    mappingMethod: claim
+    provider:
+      apiVersion: osin.config.openshift.io/v1
+      kind: HTPasswdPasswordIdentityProvider
+      file: ` + file + "\n"
+	if !strings.Contains(config, want) {
+		t.Fatalf("config missing provider stanza, want:\n%s\ngot:\n%s", want, config)
 	}
 }
 
