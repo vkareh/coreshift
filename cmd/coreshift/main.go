@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,15 +78,17 @@ func newRootCommand() *cobra.Command {
 
 func newAPICommand() *cobra.Command {
 	var pullSecretPath string
+	var port int
 	var verbose bool
 	cmd := &cobra.Command{
 		Use:   "api",
 		Short: "Run the OpenShift API control plane",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAPI(cmd.Context(), pullSecretPath, verbose)
+			return runAPI(cmd.Context(), pullSecretPath, port, verbose)
 		},
 	}
 	cmd.Flags().StringVar(&pullSecretPath, "pull-secret", "", "path to a Red Hat pull secret with credentials for the release image registry (required)")
+	cmd.Flags().IntVar(&port, "port", defaultAPIPort, "port the API server listens on")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "stream child process logs to the terminal")
 	if err := cmd.MarkFlagRequired("pull-secret"); err != nil {
 		panic(err) // the flag is defined above
@@ -93,18 +96,18 @@ func newAPICommand() *cobra.Command {
 	return cmd
 }
 
-func runAPI(ctx context.Context, pullSecretPath string, verbose bool) error {
+func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool) error {
 	if verbose {
 		// Image cache messages are quiet by default; verbose runs show
 		// them again, like the live child logs.
 		image.Logger.SetOutput(os.Stderr)
 	}
-	stateDir, err := apiStateDir()
+	stateDir, err := apiStateDir(port)
 	if err != nil {
 		return err
 	}
 	fmt.Println("Preparing certificates")
-	if err := ensureCertificates(stateDir, defaultAPIPort); err != nil {
+	if err := ensureCertificates(stateDir, port); err != nil {
 		return err
 	}
 	if err := restoreAdminContext(stateDir); err != nil {
@@ -165,17 +168,17 @@ func runAPI(ctx context.Context, pullSecretPath string, verbose bool) error {
 		return err
 	}
 
-	oauthMetadataFile, err := writeOAuthMetadata(stateDir, defaultAPIPort)
+	oauthMetadataFile, err := writeOAuthMetadata(stateDir, port)
 	if err != nil {
 		return err
 	}
 
-	tokenReviewKubeconfig, err := writeTokenReviewKubeconfig(stateDir, defaultAPIPort)
+	tokenReviewKubeconfig, err := writeTokenReviewKubeconfig(stateDir, port)
 	if err != nil {
 		return err
 	}
 
-	kubeAPIServerConfig, err := writeKubeAPIServerConfig(stateDir, oauthMetadataFile, defaultAPIPort)
+	kubeAPIServerConfig, err := writeKubeAPIServerConfig(stateDir, oauthMetadataFile, port)
 	if err != nil {
 		return err
 	}
@@ -208,7 +211,7 @@ func runAPI(ctx context.Context, pullSecretPath string, verbose bool) error {
 			Path: kubeBinaries["kube-apiserver"],
 			Args: []string{
 				"--etcd-servers=http://127.0.0.1:2379",
-				"--secure-port=6443",
+				"--secure-port=" + strconv.Itoa(port),
 				"--bind-address=127.0.0.1",
 				"--tls-cert-file=" + filepath.Join(stateDir, certgen.APIServerCertFilename),
 				"--tls-private-key-file=" + filepath.Join(stateDir, certgen.APIServerKeyFilename),
@@ -350,7 +353,7 @@ func runAPI(ctx context.Context, pullSecretPath string, verbose bool) error {
 		ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
 		fmt.Println("Seeding OAuth client")
-		return oauthclient.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), apiServerURL(defaultAPIPort))
+		return oauthclient.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), apiServerURL(port))
 	},
 	},
 	// oauth-server hands login flows to the identity providers in its
@@ -423,7 +426,7 @@ func runAPI(ctx context.Context, pullSecretPath string, verbose bool) error {
 			if err := aggregation.WaitReady(ctx, kubeconfig, aggregatedServers); err != nil {
 				return fmt.Errorf("control plane not ready: %w", err)
 			}
-			printReadySummary(stateDir, defaultAPIPort)
+			printReadySummary(stateDir, port)
 			return nil
 		},
 	}
@@ -443,16 +446,24 @@ func printReadySummary(stateDir string, port int) {
 }
 
 // apiStateDir returns the XDG state directory holding the generated
-// certificates and etcd data, so they survive across runs.
-func apiStateDir() (string, error) {
-	if base := os.Getenv("XDG_STATE_HOME"); base != "" {
-		return filepath.Join(base, "coreshift", "api"), nil
+// certificates and etcd data, so they survive across runs. The default
+// port keeps the original location; any other port gets its own
+// subdirectory, so runs on different ports do not share certificates
+// or etcd data.
+func apiStateDir(port int) (string, error) {
+	base := os.Getenv("XDG_STATE_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("determine home directory: %w", err)
+		}
+		base = filepath.Join(home, ".local", "state")
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("determine home directory: %w", err)
+	dir := filepath.Join(base, "coreshift", "api")
+	if port != defaultAPIPort {
+		dir = filepath.Join(dir, strconv.Itoa(port))
 	}
-	return filepath.Join(home, ".local", "state", "coreshift", "api"), nil
+	return dir, nil
 }
 
 // ensureCertificates generates the certificate and kubeconfig set into

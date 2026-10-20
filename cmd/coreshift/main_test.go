@@ -174,6 +174,30 @@ func TestGeneratedFilesFollowAPIPort(t *testing.T) {
 	}
 }
 
+// TestAPIStateDirPerPort checks that the default port keeps the original
+// state directory while any other port gets its own subdirectory, so runs
+// on different ports stay independent.
+func TestAPIStateDirPerPort(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+
+	def, err := apiStateDir(defaultAPIPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(base, "coreshift", "api"); def != want {
+		t.Fatalf("default port state dir = %q, want %q", def, want)
+	}
+
+	other, err := apiStateDir(7443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(base, "coreshift", "api", "7443"); other != want {
+		t.Fatalf("port 7443 state dir = %q, want %q", other, want)
+	}
+}
+
 func TestWriteOAuthServerConfigWithoutProviders(t *testing.T) {
 	path, err := writeOAuthServerConfig(t.TempDir(), nil)
 	if err != nil {
