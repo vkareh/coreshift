@@ -135,6 +135,16 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 		return err
 	}
 
+	oauthMetadataFile, err := writeOAuthMetadata(stateDir)
+	if err != nil {
+		return err
+	}
+
+	kubeAPIServerConfig, err := writeKubeAPIServerConfig(stateDir, oauthMetadataFile)
+	if err != nil {
+		return err
+	}
+
 	openShiftControllerManagerConfig, err := writeOpenShiftControllerManagerConfig(stateDir)
 	if err != nil {
 		return err
@@ -173,7 +183,10 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 				"--service-account-key-file=" + filepath.Join(stateDir, certgen.SAPubFilename),
 				// OpenShift's service CIDR.
 				"--service-cluster-ip-range=172.30.0.0/16",
-				"--authorization-mode=RBAC",
+				// OpenShift mode stops kube-apiserver from implicitly
+				// trusting the system:masters group; the authorizers real
+				// clusters run restore that trust explicitly.
+				"--authorization-mode=Scope,SystemMasters,RBAC,Node",
 				// Delegated authentication for the aggregation layer: the
 				// requestheader flags publish how proxied requests carry user
 				// identity, and the proxy client flags identify kube-apiserver
@@ -187,6 +200,13 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 				"--proxy-client-cert-file=" + filepath.Join(stateDir, certgen.FrontProxyClientCertFilename),
 				"--proxy-client-key-file=" + filepath.Join(stateDir, certgen.FrontProxyClientKeyFilename),
 				"--enable-aggregator-routing=true",
+				// The OpenShift config switches the forked kube-apiserver
+				// into OpenShift mode, which among other things serves the
+				// OAuth discovery document clients like oc need to log in.
+				// The flag is hidden and marked deprecated upstream, but it
+				// is how every real deployment, including Hypershift's,
+				// runs the server.
+				"--openshift-config=" + kubeAPIServerConfig,
 			},
 		AfterStart: func(ctx context.Context) error {
 			// The aggregated servers need kube-apiserver up for delegated
@@ -462,6 +482,65 @@ oauthConfig:
 		filepath.Join(stateDir, certgen.SessionSecretsFilename))
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		return "", fmt.Errorf("write oauth-server config: %w", err)
+	}
+	return path, nil
+}
+
+// writeOAuthMetadata writes the OAuth authorization server metadata that
+// kube-apiserver serves at /.well-known/oauth-authorization-server. The
+// issuer is the main API endpoint; the authorization and token endpoints are
+// the OAuth server's. The remaining fields match what the installer writes
+// in real clusters, so clients see the same document shape as in production.
+func writeOAuthMetadata(stateDir string) (string, error) {
+	path := filepath.Join(stateDir, "oauth-metadata.json")
+	metadata := fmt.Sprintf(`{
+  "issuer": "https://127.0.0.1:6443",
+  "authorization_endpoint": "https://127.0.0.1:%d/oauth/authorize",
+  "token_endpoint": "https://127.0.0.1:%d/oauth/token",
+  "scopes_supported": [
+    "user:check-access",
+    "user:full",
+    "user:info",
+    "user:list-projects",
+    "user:list-scoped"
+  ],
+  "response_types_supported": ["code", "token"],
+  "grant_types_supported": ["authorization_code", "implicit"],
+  "code_challenge_methods_supported": ["plain", "S256"]
+}
+`, oauthServerPort, oauthServerPort)
+	if err := os.WriteFile(path, []byte(metadata), 0o600); err != nil {
+		return "", fmt.Errorf("write oauth metadata: %w", err)
+	}
+	return path, nil
+}
+
+// writeKubeAPIServerConfig writes the OpenShift kube-apiserver configuration.
+// The forked kube-apiserver only serves the OAuth discovery document and the
+// rest of its OpenShift behavior when given this file; the operator that
+// manages kube-apiserver in real clusters and Hypershift write the same
+// shape. The serving address, service CIDR, and service-account key mirror
+// the command line, because the config loader defaults them to in-pod paths
+// that do not exist here and its values take precedence over the flags.
+func writeKubeAPIServerConfig(stateDir, oauthMetadataFile string) (string, error) {
+	path := filepath.Join(stateDir, "kube-apiserver-config.json")
+	config := fmt.Sprintf(`{
+  "apiVersion": "kubecontrolplane.config.openshift.io/v1",
+  "kind": "KubeAPIServerConfig",
+  "servingInfo": {
+    "bindAddress": "127.0.0.1:6443"
+  },
+  "servicesSubnet": "172.30.0.0/16",
+  "serviceAccountPublicKeyFiles": [
+    %q
+  ],
+  "authConfig": {
+    "oauthMetadataFile": %q
+  }
+}
+`, filepath.Join(stateDir, certgen.SAPubFilename), oauthMetadataFile)
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		return "", fmt.Errorf("write kube-apiserver config: %w", err)
 	}
 	return path, nil
 }
