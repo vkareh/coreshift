@@ -16,6 +16,7 @@ import (
 	"github.com/vkareh/coreshift/internal/certgen"
 	"github.com/vkareh/coreshift/internal/crd"
 	"github.com/vkareh/coreshift/internal/oauth"
+	"github.com/vkareh/coreshift/internal/oauthclient"
 	"github.com/vkareh/coreshift/internal/rbac"
 	"github.com/vkareh/coreshift/internal/scc"
 	"github.com/vkareh/coreshift/internal/supervisor"
@@ -145,6 +146,11 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 		return err
 	}
 
+	tokenReviewKubeconfig, err := writeTokenReviewKubeconfig(stateDir)
+	if err != nil {
+		return err
+	}
+
 	kubeAPIServerConfig, err := writeKubeAPIServerConfig(stateDir, oauthMetadataFile)
 	if err != nil {
 		return err
@@ -205,13 +211,19 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 				"--proxy-client-cert-file=" + filepath.Join(stateDir, certgen.FrontProxyClientCertFilename),
 				"--proxy-client-key-file=" + filepath.Join(stateDir, certgen.FrontProxyClientKeyFilename),
 				"--enable-aggregator-routing=true",
-				// The OpenShift config switches the forked kube-apiserver
-				// into OpenShift mode, which among other things serves the
-				// OAuth discovery document clients like oc need to log in.
-				// The flag is hidden and marked deprecated upstream, but it
-				// is how every real deployment, including Hypershift's,
-				// runs the server.
-				"--openshift-config=" + kubeAPIServerConfig,
+			// The OpenShift config switches the forked kube-apiserver
+			// into OpenShift mode, which among other things serves the
+			// OAuth discovery document clients like oc need to log in.
+			// The flag is hidden and marked deprecated upstream, but it
+			// is how every real deployment, including Hypershift's,
+			// runs the server.
+			"--openshift-config=" + kubeAPIServerConfig,
+			// Access tokens issued by the OAuth server are only
+			// validated by the aggregated OAuth API server; this webhook
+			// is how kube-apiserver asks it to review them. Real
+			// clusters carry the same wiring from their operators.
+			"--authentication-token-webhook-config-file=" + tokenReviewKubeconfig,
+			"--authentication-token-webhook-version=v1",
 			},
 		AfterStart: func(ctx context.Context) error {
 			// The aggregated servers need kube-apiserver up for delegated
@@ -301,10 +313,20 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 				"--requestheader-username-headers=X-Remote-User",
 				"--requestheader-group-headers=X-Remote-Group",
 				"--requestheader-extra-headers-prefix=X-Remote-Extra-",
-				"--client-ca-file=" + filepath.Join(stateDir, certgen.CACertFilename),
-			},
+			"--client-ca-file=" + filepath.Join(stateDir, certgen.CACertFilename),
 		},
-		// oauth-server hands login flows to the identity providers in its
+		// The login client is stored through the OAuth API this server
+		// serves; it is created once the server answers, so logins have
+		// a client to talk to from the first attempt. Bound the wait so
+		// a broken server fails the run instead of blocking startup
+		// forever.
+		AfterStart: func(ctx context.Context) error {
+			ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			defer cancel()
+			return oauthclient.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
+		},
+	},
+	// oauth-server hands login flows to the identity providers in its
 		// config; with none configured it serves a deny-all provider, so it
 		// starts and answers without cluster-side seed objects. Its API
 		// calls, such as issuing tokens through the aggregated OAuth API
@@ -582,6 +604,39 @@ func writeOAuthMetadata(stateDir string) (string, error) {
 `, oauthServerPort, oauthServerPort)
 	if err := os.WriteFile(path, []byte(metadata), 0o600); err != nil {
 		return "", fmt.Errorf("write oauth metadata: %w", err)
+	}
+	return path, nil
+}
+
+// writeTokenReviewKubeconfig writes the kubeconfig kube-apiserver uses to
+// have OAuth access tokens reviewed: it points at the aggregated OAuth API
+// server's token review endpoint and authenticates with the generated
+// admin identity, whose permissions cover the review call.
+func writeTokenReviewKubeconfig(stateDir string) (string, error) {
+	path := filepath.Join(stateDir, "token-review.kubeconfig")
+	kubeconfig := fmt.Sprintf(`apiVersion: v1
+kind: Config
+clusters:
+- name: coreshift
+  cluster:
+    certificate-authority: %s
+    server: https://127.0.0.1:6443/apis/oauth.openshift.io/v1/tokenreviews
+contexts:
+- name: admin@coreshift
+  context:
+    cluster: coreshift
+    user: admin
+current-context: admin@coreshift
+users:
+- name: admin
+  user:
+    client-certificate: %s
+    client-key: %s
+`, filepath.Join(stateDir, certgen.CACertFilename),
+		filepath.Join(stateDir, certgen.AdminCertFilename),
+		filepath.Join(stateDir, certgen.AdminKeyFilename))
+	if err := os.WriteFile(path, []byte(kubeconfig), 0o600); err != nil {
+		return "", fmt.Errorf("write token review kubeconfig: %w", err)
 	}
 	return path, nil
 }
