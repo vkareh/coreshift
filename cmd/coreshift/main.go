@@ -84,6 +84,11 @@ func newAPICommand() *cobra.Command {
 }
 
 func runAPI(ctx context.Context, pullSecretPath string, verbose bool) error {
+	if verbose {
+		// Image cache messages are quiet by default; verbose runs show
+		// them again, like the live child logs.
+		image.Logger.SetOutput(os.Stderr)
+	}
 	stateDir, err := apiStateDir()
 	if err != nil {
 		return err

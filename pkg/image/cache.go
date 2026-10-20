@@ -3,11 +3,17 @@ package image
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// Logger receives image pull and cache messages. It discards them by
+// default so runs stay quiet; callers wanting the messages, such as
+// verbose runs, point it at a real writer.
+var Logger = log.New(io.Discard, "", log.LstdFlags)
 
 // componentsKind is the cache subdirectory holding files extracted from
 // component images.
@@ -57,10 +63,10 @@ func (c *Client) extractCached(ctx context.Context, kind, imageRef string, extra
 		return "", err
 	}
 	if _, err := os.Stat(dir); err == nil {
-		log.Printf("using cached image %s", imageRef)
+		Logger.Printf("using cached image %s", imageRef)
 		return dir, nil
 	}
-	log.Printf("pulling image %s", imageRef)
+	Logger.Printf("pulling image %s", imageRef)
 
 	filesystem, err := os.MkdirTemp("", "coreshift-image-")
 	if err != nil {
