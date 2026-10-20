@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -22,12 +23,12 @@ import (
 
 func TestEnsureCertificatesReusesCompleteSet(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureCertificates(stateDir); err != nil {
+	if err := ensureCertificates(stateDir, defaultAPIPort); err != nil {
 		t.Fatal(err)
 	}
 	caBefore := readFile(t, stateDir, certgen.CACertFilename)
 
-	if err := ensureCertificates(stateDir); err != nil {
+	if err := ensureCertificates(stateDir, defaultAPIPort); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(caBefore, readFile(t, stateDir, certgen.CACertFilename)) {
@@ -37,12 +38,12 @@ func TestEnsureCertificatesReusesCompleteSet(t *testing.T) {
 
 func TestEnsureCertificatesRegeneratesSetWithoutLoopbackSAN(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureCertificates(stateDir); err != nil {
+	if err := ensureCertificates(stateDir, defaultAPIPort); err != nil {
 		t.Fatal(err)
 	}
 	writeStaleServiceServingCert(t, stateDir)
 
-	if err := ensureCertificates(stateDir); err != nil {
+	if err := ensureCertificates(stateDir, defaultAPIPort); err != nil {
 		t.Fatal(err)
 	}
 	cert := parseCertificate(t, readFile(t, stateDir, certgen.ServiceServingCertFilename))
@@ -79,7 +80,7 @@ func writeStaleServiceServingCert(t *testing.T, stateDir string) {
 
 func TestRestoreAdminContextSwitchesBackFromLoginContext(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureCertificates(stateDir); err != nil {
+	if err := ensureCertificates(stateDir, defaultAPIPort); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(stateDir, certgen.AdminKubeconfigFilename)
@@ -115,7 +116,7 @@ func TestRestoreAdminContextSwitchesBackFromLoginContext(t *testing.T) {
 
 func TestRestoreAdminContextKeepsCorrectSelectionUntouched(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureCertificates(stateDir); err != nil {
+	if err := ensureCertificates(stateDir, defaultAPIPort); err != nil {
 		t.Fatal(err)
 	}
 
@@ -125,6 +126,51 @@ func TestRestoreAdminContextKeepsCorrectSelectionUntouched(t *testing.T) {
 	}
 	if after := readFile(t, stateDir, certgen.AdminKubeconfigFilename); !bytes.Equal(before, after) {
 		t.Fatal("kubeconfig was rewritten although the selection was already correct")
+	}
+}
+
+// TestGeneratedFilesFollowAPIPort checks that a non-default port reaches
+// every file generated from it: the kubeconfigs, the OAuth discovery
+// metadata, the token review kubeconfig, and the kube-apiserver config.
+func TestGeneratedFilesFollowAPIPort(t *testing.T) {
+	stateDir := t.TempDir()
+	const port = 7443
+	if err := ensureCertificates(stateDir, port); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		certgen.AdminKubeconfigFilename,
+		certgen.ControllerManagerKubeconfigFilename,
+		certgen.OAuthServerKubeconfigFilename,
+	} {
+		config, err := clientcmd.LoadFromFile(filepath.Join(stateDir, name))
+		if err != nil {
+			t.Fatalf("load %s: %v", name, err)
+		}
+		if server := config.Clusters["coreshift"].Server; server != apiServerURL(port) {
+			t.Fatalf("%s server = %q, want %q", name, server, apiServerURL(port))
+		}
+	}
+
+	if _, err := writeOAuthMetadata(stateDir, port); err != nil {
+		t.Fatal(err)
+	}
+	if metadata := string(readFile(t, stateDir, "oauth-metadata.json")); !strings.Contains(metadata, apiServerURL(port)) {
+		t.Fatalf("oauth metadata issuer does not follow the port:\n%s", metadata)
+	}
+
+	if _, err := writeTokenReviewKubeconfig(stateDir, port); err != nil {
+		t.Fatal(err)
+	}
+	if kubeconfig := string(readFile(t, stateDir, "token-review.kubeconfig")); !strings.Contains(kubeconfig, apiServerURL(port)) {
+		t.Fatalf("token review kubeconfig does not follow the port:\n%s", kubeconfig)
+	}
+
+	if _, err := writeKubeAPIServerConfig(stateDir, filepath.Join(stateDir, "oauth-metadata.json"), port); err != nil {
+		t.Fatal(err)
+	}
+	if config := string(readFile(t, stateDir, "kube-apiserver-config.json")); !strings.Contains(config, fmt.Sprintf("127.0.0.1:%d", port)) {
+		t.Fatalf("kube-apiserver config does not follow the port:\n%s", config)
 	}
 }
 

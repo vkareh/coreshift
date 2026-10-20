@@ -39,6 +39,15 @@ const (
 	clusterPolicyControllerPort    = 10357
 )
 
+// defaultAPIPort is the port the API server listens on unless overridden.
+const defaultAPIPort = 6443
+
+// apiServerURL returns the endpoint clients use to reach the API server
+// listening on the given port.
+func apiServerURL(port int) string {
+	return fmt.Sprintf("https://127.0.0.1:%d", port)
+}
+
 // aggregatedServers lists the aggregated API servers and the API groups
 // each one serves, without the openshift.io suffix. kube-apiserver proxies
 // these groups to the server named in each entry. The addresses are filled
@@ -95,7 +104,7 @@ func runAPI(ctx context.Context, pullSecretPath string, verbose bool) error {
 		return err
 	}
 	fmt.Println("Preparing certificates")
-	if err := ensureCertificates(stateDir); err != nil {
+	if err := ensureCertificates(stateDir, defaultAPIPort); err != nil {
 		return err
 	}
 	if err := restoreAdminContext(stateDir); err != nil {
@@ -156,17 +165,17 @@ func runAPI(ctx context.Context, pullSecretPath string, verbose bool) error {
 		return err
 	}
 
-	oauthMetadataFile, err := writeOAuthMetadata(stateDir)
+	oauthMetadataFile, err := writeOAuthMetadata(stateDir, defaultAPIPort)
 	if err != nil {
 		return err
 	}
 
-	tokenReviewKubeconfig, err := writeTokenReviewKubeconfig(stateDir)
+	tokenReviewKubeconfig, err := writeTokenReviewKubeconfig(stateDir, defaultAPIPort)
 	if err != nil {
 		return err
 	}
 
-	kubeAPIServerConfig, err := writeKubeAPIServerConfig(stateDir, oauthMetadataFile)
+	kubeAPIServerConfig, err := writeKubeAPIServerConfig(stateDir, oauthMetadataFile, defaultAPIPort)
 	if err != nil {
 		return err
 	}
@@ -341,7 +350,7 @@ func runAPI(ctx context.Context, pullSecretPath string, verbose bool) error {
 		ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
 		fmt.Println("Seeding OAuth client")
-		return oauthclient.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
+		return oauthclient.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), apiServerURL(defaultAPIPort))
 	},
 	},
 	// oauth-server hands login flows to the identity providers in its
@@ -414,7 +423,7 @@ func runAPI(ctx context.Context, pullSecretPath string, verbose bool) error {
 			if err := aggregation.WaitReady(ctx, kubeconfig, aggregatedServers); err != nil {
 				return fmt.Errorf("control plane not ready: %w", err)
 			}
-			printReadySummary(stateDir)
+			printReadySummary(stateDir, defaultAPIPort)
 			return nil
 		},
 	}
@@ -423,13 +432,14 @@ func runAPI(ctx context.Context, pullSecretPath string, verbose bool) error {
 
 // printReadySummary prints what a client needs to use the running control
 // plane: the endpoint, the admin kubeconfig, and the login command.
-func printReadySummary(stateDir string) {
+func printReadySummary(stateDir string, port int) {
+	endpoint := apiServerURL(port)
 	fmt.Println()
 	fmt.Println("Control plane ready")
-	fmt.Println("  API endpoint: https://127.0.0.1:6443")
+	fmt.Printf("  API endpoint: %s\n", endpoint)
 	fmt.Printf("  Kubeconfig:   %s\n", filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
-	fmt.Printf("  Log in with:  oc login https://127.0.0.1:6443 --certificate-authority=%s -u <username> -p <password>\n",
-		filepath.Join(stateDir, certgen.CACertFilename))
+	fmt.Printf("  Log in with:  oc login %s --certificate-authority=%s -u <username> -p <password>\n",
+		endpoint, filepath.Join(stateDir, certgen.CACertFilename))
 }
 
 // apiStateDir returns the XDG state directory holding the generated
@@ -451,7 +461,7 @@ func apiStateDir() (string, error) {
 // directory and leave etcd data trusted by a CA nothing signs for anymore.
 // A set whose service-serving certificate lacks the loopback address counts
 // as incomplete, so it is regenerated rather than reused.
-func ensureCertificates(stateDir string) error {
+func ensureCertificates(stateDir string, port int) error {
 	artifacts := []string{
 		certgen.CACertFilename, certgen.CAKeyFilename,
 		certgen.APIServerCertFilename, certgen.APIServerKeyFilename,
@@ -481,7 +491,7 @@ func ensureCertificates(stateDir string) error {
 	if complete && serviceServingCertHasLoopback(stateDir) {
 		return nil
 	}
-	return certgen.GenerateAll(stateDir, certgen.Options{})
+	return certgen.GenerateAll(stateDir, certgen.Options{APIServerURL: apiServerURL(port)})
 }
 
 // serviceServingCertHasLoopback reports whether the saved service-serving
@@ -657,10 +667,10 @@ oauthConfig:
 // issuer is the main API endpoint; the authorization and token endpoints are
 // the OAuth server's. The remaining fields match what the installer writes
 // in real clusters, so clients see the same document shape as in production.
-func writeOAuthMetadata(stateDir string) (string, error) {
+func writeOAuthMetadata(stateDir string, port int) (string, error) {
 	path := filepath.Join(stateDir, "oauth-metadata.json")
 	metadata := fmt.Sprintf(`{
-  "issuer": "https://127.0.0.1:6443",
+  "issuer": %q,
   "authorization_endpoint": "https://127.0.0.1:%d/oauth/authorize",
   "token_endpoint": "https://127.0.0.1:%d/oauth/token",
   "scopes_supported": [
@@ -674,7 +684,7 @@ func writeOAuthMetadata(stateDir string) (string, error) {
   "grant_types_supported": ["authorization_code", "implicit"],
   "code_challenge_methods_supported": ["plain", "S256"]
 }
-`, oauthServerPort, oauthServerPort)
+`, apiServerURL(port), oauthServerPort, oauthServerPort)
 	if err := os.WriteFile(path, []byte(metadata), 0o600); err != nil {
 		return "", fmt.Errorf("write oauth metadata: %w", err)
 	}
@@ -685,7 +695,7 @@ func writeOAuthMetadata(stateDir string) (string, error) {
 // have OAuth access tokens reviewed: it points at the aggregated OAuth API
 // server's token review endpoint and authenticates with the generated
 // admin identity, whose permissions cover the review call.
-func writeTokenReviewKubeconfig(stateDir string) (string, error) {
+func writeTokenReviewKubeconfig(stateDir string, port int) (string, error) {
 	path := filepath.Join(stateDir, "token-review.kubeconfig")
 	kubeconfig := fmt.Sprintf(`apiVersion: v1
 kind: Config
@@ -693,7 +703,7 @@ clusters:
 - name: coreshift
   cluster:
     certificate-authority: %s
-    server: https://127.0.0.1:6443/apis/oauth.openshift.io/v1/tokenreviews
+    server: %s/apis/oauth.openshift.io/v1/tokenreviews
 contexts:
 - name: admin@coreshift
   context:
@@ -706,6 +716,7 @@ users:
     client-certificate: %s
     client-key: %s
 `, filepath.Join(stateDir, certgen.CACertFilename),
+		apiServerURL(port),
 		filepath.Join(stateDir, certgen.AdminCertFilename),
 		filepath.Join(stateDir, certgen.AdminKeyFilename))
 	if err := os.WriteFile(path, []byte(kubeconfig), 0o600); err != nil {
@@ -721,13 +732,13 @@ users:
 // shape. The serving address, service CIDR, and service-account key mirror
 // the command line, because the config loader defaults them to in-pod paths
 // that do not exist here and its values take precedence over the flags.
-func writeKubeAPIServerConfig(stateDir, oauthMetadataFile string) (string, error) {
+func writeKubeAPIServerConfig(stateDir, oauthMetadataFile string, port int) (string, error) {
 	path := filepath.Join(stateDir, "kube-apiserver-config.json")
 	config := fmt.Sprintf(`{
   "apiVersion": "kubecontrolplane.config.openshift.io/v1",
   "kind": "KubeAPIServerConfig",
   "servingInfo": {
-    "bindAddress": "127.0.0.1:6443"
+    "bindAddress": "127.0.0.1:%d"
   },
   "servicesSubnet": "172.30.0.0/16",
   "serviceAccountPublicKeyFiles": [
@@ -737,7 +748,7 @@ func writeKubeAPIServerConfig(stateDir, oauthMetadataFile string) (string, error
     "oauthMetadataFile": %q
   }
 }
-`, filepath.Join(stateDir, certgen.SAPubFilename), oauthMetadataFile)
+`, port, filepath.Join(stateDir, certgen.SAPubFilename), oauthMetadataFile)
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		return "", fmt.Errorf("write kube-apiserver config: %w", err)
 	}
