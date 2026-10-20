@@ -16,6 +16,8 @@ import (
 
 	"github.com/vkareh/coreshift/internal/certgen"
 	"github.com/vkareh/coreshift/internal/oauth"
+	clientcmd "k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 func TestEnsureCertificatesReusesCompleteSet(t *testing.T) {
@@ -72,6 +74,57 @@ func writeStaleServiceServingCert(t *testing.T, stateDir string) {
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	if err := os.WriteFile(filepath.Join(stateDir, certgen.ServiceServingCertFilename), certPEM, 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRestoreAdminContextSwitchesBackFromLoginContext(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := ensureCertificates(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(stateDir, certgen.AdminKubeconfigFilename)
+
+	// Simulate an oc login: a token context is added and made current.
+	config, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loginContext := "dev/127-0-0-1:6443"
+	config.AuthInfos[loginContext] = &clientcmdapi.AuthInfo{Token: "sha256~example"}
+	config.Contexts[loginContext] = &clientcmdapi.Context{Cluster: "coreshift", AuthInfo: loginContext}
+	config.CurrentContext = loginContext
+	if err := clientcmd.WriteToFile(*config, path); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := restoreAdminContext(stateDir); err != nil {
+		t.Fatal(err)
+	}
+
+	config, err = clientcmd.LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.CurrentContext != "admin@coreshift" {
+		t.Fatalf("current context = %q, want admin@coreshift", config.CurrentContext)
+	}
+	if config.Contexts[loginContext] == nil || config.AuthInfos[loginContext] == nil {
+		t.Fatal("login context was removed")
+	}
+}
+
+func TestRestoreAdminContextKeepsCorrectSelectionUntouched(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := ensureCertificates(stateDir); err != nil {
+		t.Fatal(err)
+	}
+
+	before := readFile(t, stateDir, certgen.AdminKubeconfigFilename)
+	if err := restoreAdminContext(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if after := readFile(t, stateDir, certgen.AdminKubeconfigFilename); !bytes.Equal(before, after) {
+		t.Fatal("kubeconfig was rewritten although the selection was already correct")
 	}
 }
 
