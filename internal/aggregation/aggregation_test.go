@@ -3,6 +3,9 @@ package aggregation
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,9 +14,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ktesting "k8s.io/client-go/testing"
 	aggregatorfake "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset/fake"
 	"k8s.io/utils/ptr"
+
+	aggregationv1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 )
 
 func testServers() []Server {
@@ -173,5 +180,95 @@ func TestSeedRetriesRejectedWrites(t *testing.T) {
 	}
 	if service.Name != "openshift-apiserver" {
 		t.Fatalf("service was not registered after retry: %+v", service)
+	}
+}
+
+// healthServer returns a test API endpoint answering /healthz, plus a
+// REST client pointing at it.
+func healthServer(t *testing.T) (*httptest.Server, rest.Interface) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	client, err := rest.UnversionedRESTClientForConfigAndClient(
+		&rest.Config{
+			Host: server.URL,
+			ContentConfig: rest.ContentConfig{
+				NegotiatedSerializer: scheme.Codecs.WithoutConversion(),
+			},
+		}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return server, client
+}
+
+// availableAPIClient returns an aggregator client whose APIServices are
+// all marked available.
+func availableAPIClient(t *testing.T) *aggregatorfake.Clientset {
+	t.Helper()
+	client := aggregatorfake.NewSimpleClientset()
+	for _, server := range testServers() {
+		for _, group := range server.Groups {
+			apiService := &aggregationv1.APIService{
+				ObjectMeta: metav1.ObjectMeta{Name: "v1." + group + ".openshift.io"},
+			}
+			apiService.Status.Conditions = []aggregationv1.APIServiceCondition{{
+				Type:   aggregationv1.Available,
+				Status: aggregationv1.ConditionTrue,
+			}}
+			if _, err := client.ApiregistrationV1().APIServices().Create(context.Background(), apiService, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return client
+}
+
+func TestWaitReadyPassesOnceHealthAndAPIsAnswer(t *testing.T) {
+	_, restClient := healthServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := waitReady(ctx, restClient, availableAPIClient(t), testServers()); err != nil {
+		t.Fatalf("expected readiness once health and APIs answer: %v", err)
+	}
+}
+
+func TestWaitReadyFailsWhenHealthNeverAnswers(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	restClient, err := rest.UnversionedRESTClientForConfigAndClient(
+		&rest.Config{
+			Host: server.URL,
+			ContentConfig: rest.ContentConfig{
+				NegotiatedSerializer: scheme.Codecs.WithoutConversion(),
+			},
+		}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	err = waitReady(ctx, restClient, availableAPIClient(t), testServers())
+	if err == nil || !strings.Contains(err.Error(), "API server's health endpoint") {
+		t.Fatalf("expected a health endpoint error, got: %v", err)
+	}
+}
+
+func TestWaitReadyFailsWhenAggregatedAPINeverBecomesAvailable(t *testing.T) {
+	_, restClient := healthServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	err := waitReady(ctx, restClient, aggregatorfake.NewSimpleClientset(), testServers())
+	if err == nil || !strings.Contains(err.Error(), "v1.project.openshift.io") {
+		t.Fatalf("expected an error naming the unavailable API, got: %v", err)
 	}
 }
