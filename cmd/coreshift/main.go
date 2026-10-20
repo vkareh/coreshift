@@ -67,25 +67,28 @@ func newRootCommand() *cobra.Command {
 
 func newAPICommand() *cobra.Command {
 	var pullSecretPath string
+	var verbose bool
 	cmd := &cobra.Command{
 		Use:   "api",
 		Short: "Run the OpenShift API control plane",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAPI(cmd.Context(), pullSecretPath)
+			return runAPI(cmd.Context(), pullSecretPath, verbose)
 		},
 	}
 	cmd.Flags().StringVar(&pullSecretPath, "pull-secret", "", "path to a Red Hat pull secret with credentials for the release image registry (required)")
+	cmd.Flags().BoolVar(&verbose, "verbose", false, "stream child process logs to the terminal")
 	if err := cmd.MarkFlagRequired("pull-secret"); err != nil {
 		panic(err) // the flag is defined above
 	}
 	return cmd
 }
 
-func runAPI(ctx context.Context, pullSecretPath string) error {
+func runAPI(ctx context.Context, pullSecretPath string, verbose bool) error {
 	stateDir, err := apiStateDir()
 	if err != nil {
 		return err
 	}
+	fmt.Println("Preparing certificates")
 	if err := ensureCertificates(stateDir); err != nil {
 		return err
 	}
@@ -99,6 +102,7 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 		return fmt.Errorf("create image client: %w", err)
 	}
 
+	fmt.Println("Preparing release image")
 	releaseRoot, err := client.CachedRelease(ctx, DefaultReleaseImage)
 	if err != nil {
 		return fmt.Errorf("prepare release image: %w", err)
@@ -236,6 +240,7 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 			// the run instead of blocking startup forever.
 			ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			defer cancel()
+			fmt.Println("Seeding cluster objects")
 			kubeconfig := filepath.Join(stateDir, certgen.AdminKubeconfigFilename)
 			if err := aggregation.Seed(ctx, kubeconfig, aggregatedServers, filepath.Join(stateDir, certgen.CACertFilename)); err != nil {
 				return err
@@ -290,11 +295,12 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 			// cluster policy controller, see them from the beginning. Bound
 			// the wait so a broken server fails the run instead of blocking
 			// startup forever.
-			AfterStart: func(ctx context.Context) error {
-				ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-				defer cancel()
-				return scc.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
-			},
+		AfterStart: func(ctx context.Context) error {
+			ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			defer cancel()
+			fmt.Println("Seeding security context constraints")
+			return scc.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
+		},
 		},
 		{
 			Name: "openshift-oauth-apiserver",
@@ -322,11 +328,12 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 		// a client to talk to from the first attempt. Bound the wait so
 		// a broken server fails the run instead of blocking startup
 		// forever.
-		AfterStart: func(ctx context.Context) error {
-			ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-			defer cancel()
-			return oauthclient.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
-		},
+	AfterStart: func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		fmt.Println("Seeding OAuth client")
+		return oauthclient.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
+	},
 	},
 	// oauth-server hands login flows to the identity providers in its
 		// config; with none configured it serves a deny-all provider, so it
@@ -387,7 +394,33 @@ func runAPI(ctx context.Context, pullSecretPath string) error {
 		},
 	}
 
-	return (&supervisor.Supervisor{LogDir: filepath.Join(stateDir, "logs")}).Run(ctx, processes)
+	sup := &supervisor.Supervisor{
+		LogDir:  filepath.Join(stateDir, "logs"),
+		Verbose: verbose,
+		AfterStart: func(ctx context.Context) error {
+			fmt.Println("Waiting for the control plane to be ready")
+			ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			defer cancel()
+			kubeconfig := filepath.Join(stateDir, certgen.AdminKubeconfigFilename)
+			if err := aggregation.WaitReady(ctx, kubeconfig, aggregatedServers); err != nil {
+				return fmt.Errorf("control plane not ready: %w", err)
+			}
+			printReadySummary(stateDir)
+			return nil
+		},
+	}
+	return sup.Run(ctx, processes)
+}
+
+// printReadySummary prints what a client needs to use the running control
+// plane: the endpoint, the admin kubeconfig, and the login command.
+func printReadySummary(stateDir string) {
+	fmt.Println()
+	fmt.Println("Control plane ready")
+	fmt.Println("  API endpoint: https://127.0.0.1:6443")
+	fmt.Printf("  Kubeconfig:   %s\n", filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
+	fmt.Printf("  Log in with:  oc login https://127.0.0.1:6443 --certificate-authority=%s -u <username> -p <password>\n",
+		filepath.Join(stateDir, certgen.CACertFilename))
 }
 
 // apiStateDir returns the XDG state directory holding the generated
