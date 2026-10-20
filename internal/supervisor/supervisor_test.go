@@ -79,11 +79,34 @@ func readOrder(t *testing.T, orderFile string) []string {
 	return names
 }
 
-func TestRunForwardsOutputWithComponentPrefix(t *testing.T) {
+func readLogFile(t *testing.T, logDir, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(logDir, name+".log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// assertInOrder fails unless the lines appear in the given order in output.
+func assertInOrder(t *testing.T, output string, lines ...string) {
+	t.Helper()
+	at := 0
+	for _, line := range lines {
+		i := strings.Index(output[at:], line)
+		if i < 0 {
+			t.Fatalf("expected %q in order in:\n%s", line, output)
+		}
+		at += i + len(line)
+	}
+}
+
+func TestRunVerboseForwardsOutputWithComponentPrefix(t *testing.T) {
 	stdout, stderr := &syncBuffer{}, &syncBuffer{}
+	logDir := t.TempDir()
 	done := make(chan error, 1)
 	go func() {
-		done <- (&Supervisor{Stdout: stdout, Stderr: stderr}).Run(context.Background(), []Process{
+		done <- (&Supervisor{LogDir: logDir, Verbose: true, Stdout: stdout, Stderr: stderr, Progress: stdout}).Run(context.Background(), []Process{
 			{Name: "writer", Path: "bash", Args: []string{
 				"-c", "echo out-one; echo err-one 1>&2; echo out-two; printf no-trailing-newline",
 			}},
@@ -100,15 +123,80 @@ func TestRunForwardsOutputWithComponentPrefix(t *testing.T) {
 	if strings.Contains(stdout.String(), "err-one") {
 		t.Errorf("child stderr leaked into supervisor stdout:\n%s", stdout.String())
 	}
+	// Verbose runs keep writing the log files.
+	log := readLogFile(t, logDir, "writer")
+	for _, line := range []string{"out-one", "err-one", "out-two", "no-trailing-newline"} {
+		if !strings.Contains(log, line) {
+			t.Errorf("log file missing %q:\n%s", line, log)
+		}
+	}
+	if strings.Contains(log, "[writer]") {
+		t.Errorf("log file carries the live prefix:\n%s", log)
+	}
+}
+
+func TestRunCapturesOutputToPerChildLogFiles(t *testing.T) {
+	logDir := t.TempDir()
+	progress := &syncBuffer{}
+	done := make(chan error, 1)
+	go func() {
+		done <- (&Supervisor{LogDir: logDir, Progress: progress}).Run(context.Background(), []Process{
+			{Name: "writer", Path: "bash", Args: []string{
+				"-c", "echo out-line; echo err-line 1>&2; exit 5",
+			}},
+		})
+	}()
+
+	if err := waitForRun(t, done); err == nil {
+		t.Fatal("expected an error when a child exits")
+	}
+	log := readLogFile(t, logDir, "writer")
+	for _, line := range []string{"out-line", "err-line"} {
+		if !strings.Contains(log, line) {
+			t.Errorf("log file missing %q:\n%s", line, log)
+		}
+	}
+	for _, leaked := range []string{"[writer]", "out-line", "err-line"} {
+		if strings.Contains(progress.String(), leaked) {
+			t.Errorf("quiet run leaked child output into progress lines:\n%s", progress.String())
+		}
+	}
+}
+
+func TestRunFailureIncludesRecentLogTail(t *testing.T) {
+	logDir := t.TempDir()
+	done := make(chan error, 1)
+	go func() {
+		done <- (&Supervisor{LogDir: logDir, Progress: &syncBuffer{}}).Run(context.Background(), []Process{
+			{Name: "chatty", Path: "bash", Args: []string{
+				"-c", "for i in $(seq 1 25); do echo line-$i; done; exit 9",
+			}},
+		})
+	}()
+
+	err := waitForRun(t, done)
+	if err == nil {
+		t.Fatal("expected an error when a child exits")
+	}
+	if !strings.Contains(err.Error(), "full log: "+filepath.Join(logDir, "chatty.log")) {
+		t.Fatalf("error does not name the child's log file: %v", err)
+	}
+	if !strings.Contains(err.Error(), "line-25") {
+		t.Fatalf("error missing the most recent log line: %v", err)
+	}
+	// Only the last logTailLines lines are included.
+	if strings.Contains(err.Error(), "line-5\n") {
+		t.Fatalf("error includes log lines older than the tail: %v", err)
+	}
 }
 
 func TestRunCancellationTerminatesChildrenInReverseOrder(t *testing.T) {
 	orderFile := filepath.Join(t.TempDir(), "order")
-	out := &syncBuffer{}
+	progress, out := &syncBuffer{}, &syncBuffer{}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- (&Supervisor{Stdout: out, Stderr: out}).Run(ctx, []Process{
+		done <- (&Supervisor{LogDir: t.TempDir(), Verbose: true, Stdout: out, Stderr: out, Progress: progress}).Run(ctx, []Process{
 			stopper("first", orderFile),
 			stopper("second", orderFile),
 			stopper("third", orderFile),
@@ -127,14 +215,15 @@ func TestRunCancellationTerminatesChildrenInReverseOrder(t *testing.T) {
 	if got := readOrder(t, orderFile); !reflect.DeepEqual(got, want) {
 		t.Fatalf("children were terminated in order %v, want %v", got, want)
 	}
+	assertInOrder(t, progress.String(), "stopping third", "stopping second", "stopping first")
 }
 
 func TestRunSignalTerminatesChildrenInReverseOrder(t *testing.T) {
 	orderFile := filepath.Join(t.TempDir(), "order")
-	out := &syncBuffer{}
+	progress, out := &syncBuffer{}, &syncBuffer{}
 	done := make(chan error, 1)
 	go func() {
-		done <- (&Supervisor{Stdout: out, Stderr: out}).Run(context.Background(), []Process{
+		done <- (&Supervisor{LogDir: t.TempDir(), Verbose: true, Stdout: out, Stderr: out, Progress: progress}).Run(context.Background(), []Process{
 			stopper("first", orderFile),
 			stopper("second", orderFile),
 		})
@@ -152,6 +241,7 @@ func TestRunSignalTerminatesChildrenInReverseOrder(t *testing.T) {
 	if got := readOrder(t, orderFile); !reflect.DeepEqual(got, want) {
 		t.Fatalf("children were terminated in order %v, want %v", got, want)
 	}
+	assertInOrder(t, progress.String(), "stopping second", "stopping first")
 }
 
 func TestRunFailsFastWhenChildExits(t *testing.T) {
@@ -176,10 +266,9 @@ func TestRunFailsFastWhenChildExits(t *testing.T) {
 			"while [ ! -f %q ]; do sleep 0.05; done; exit 7", readyFile)},
 	}
 
-	out := &syncBuffer{}
 	done := make(chan error, 1)
 	go func() {
-		done <- (&Supervisor{Stdout: out, Stderr: out}).Run(context.Background(), []Process{first, second})
+		done <- (&Supervisor{LogDir: t.TempDir(), Progress: &syncBuffer{}}).Run(context.Background(), []Process{first, second})
 	}()
 
 	err := waitForRun(t, done)
@@ -195,10 +284,9 @@ func TestRunFailsFastWhenChildExits(t *testing.T) {
 }
 
 func TestRunFailsFastWhenChildExitsCleanly(t *testing.T) {
-	out := &syncBuffer{}
 	done := make(chan error, 1)
 	go func() {
-		done <- (&Supervisor{Stdout: out, Stderr: out}).Run(context.Background(), []Process{
+		done <- (&Supervisor{LogDir: t.TempDir(), Progress: &syncBuffer{}}).Run(context.Background(), []Process{
 			{Name: "sleeper", Path: "sleep", Args: []string{"0.2"}},
 		})
 	}()
@@ -211,10 +299,10 @@ func TestRunFailsFastWhenChildExitsCleanly(t *testing.T) {
 
 func TestRunStartFailureDoesNotStartLaterChildren(t *testing.T) {
 	orderFile := filepath.Join(t.TempDir(), "order")
-	out := &syncBuffer{}
+	progress := &syncBuffer{}
 	done := make(chan error, 1)
 	go func() {
-		done <- (&Supervisor{Stdout: out, Stderr: out}).Run(context.Background(), []Process{
+		done <- (&Supervisor{LogDir: t.TempDir(), Progress: progress}).Run(context.Background(), []Process{
 			{Name: "missing", Path: filepath.Join(t.TempDir(), "missing-binary")},
 			stopper("never", orderFile),
 		})
@@ -227,8 +315,8 @@ func TestRunStartFailureDoesNotStartLaterChildren(t *testing.T) {
 	if got := readOrder(t, orderFile); len(got) != 0 {
 		t.Fatalf("later children should not have been started, termination order: %v", got)
 	}
-	if strings.Contains(out.String(), "[never]") {
-		t.Fatalf("later child produced output:\n%s", out.String())
+	if strings.Contains(progress.String(), "starting never") {
+		t.Fatalf("later child was started:\n%s", progress.String())
 	}
 }
 
@@ -240,7 +328,7 @@ func TestRunKillsChildThatIgnoresTermination(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- (&Supervisor{Stdout: out, Stderr: out}).Run(ctx, []Process{
+		done <- (&Supervisor{LogDir: t.TempDir(), Verbose: true, Stdout: out, Stderr: out, Progress: out}).Run(ctx, []Process{
 			{Name: "stubborn", Path: "bash", Args: []string{
 				"-c", "trap '' TERM; echo started; while :; do sleep 0.1; done",
 			}},
@@ -256,10 +344,10 @@ func TestRunKillsChildThatIgnoresTermination(t *testing.T) {
 }
 
 func TestRunSetsChildEnvironment(t *testing.T) {
-	out := &syncBuffer{}
+	logDir := t.TempDir()
 	done := make(chan error, 1)
 	go func() {
-		done <- (&Supervisor{Stdout: out, Stderr: out}).Run(context.Background(), []Process{
+		done <- (&Supervisor{LogDir: logDir, Progress: &syncBuffer{}}).Run(context.Background(), []Process{
 			{
 				Name: "envy",
 				Path: "bash",
@@ -273,7 +361,9 @@ func TestRunSetsChildEnvironment(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "envy exited") {
 		t.Fatalf("expected error naming the exited child, got: %v", err)
 	}
-	waitForLine(t, out, "[envy] seen=set")
+	if log := readLogFile(t, logDir, "envy"); !strings.Contains(log, "seen=set") {
+		t.Fatalf("child environment was not set, log:\n%s", log)
+	}
 }
 
 func TestRunBeforeStartRunsBeforeProcess(t *testing.T) {
@@ -295,7 +385,7 @@ func TestRunBeforeStartRunsBeforeProcess(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- (&Supervisor{Stdout: out, Stderr: out}).Run(context.Background(), []Process{proc})
+		done <- (&Supervisor{LogDir: t.TempDir(), Verbose: true, Stdout: out, Stderr: out, Progress: out}).Run(context.Background(), []Process{proc})
 	}()
 
 	waitForLine(t, out, "[gated] started")
@@ -321,7 +411,7 @@ func TestRunBeforeStartFailureFailsRun(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- (&Supervisor{Stdout: out, Stderr: out}).Run(context.Background(), []Process{first, second})
+		done <- (&Supervisor{LogDir: t.TempDir(), Verbose: true, Stdout: out, Stderr: out, Progress: out}).Run(context.Background(), []Process{first, second})
 	}()
 
 	err := waitForRun(t, done)
@@ -359,7 +449,7 @@ func TestRunAfterStartGatesLaterChildren(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- (&Supervisor{Stdout: out, Stderr: out}).Run(context.Background(), []Process{first, second})
+		done <- (&Supervisor{LogDir: t.TempDir(), Verbose: true, Stdout: out, Stderr: out, Progress: out}).Run(context.Background(), []Process{first, second})
 	}()
 
 	waitForLine(t, out, "[second] started")
@@ -383,7 +473,7 @@ func TestRunAfterStartFailureFailsRun(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- (&Supervisor{Stdout: out, Stderr: out}).Run(context.Background(), []Process{first, stopper("second", orderFile)})
+		done <- (&Supervisor{LogDir: t.TempDir(), Verbose: true, Stdout: out, Stderr: out, Progress: out}).Run(context.Background(), []Process{first, stopper("second", orderFile)})
 	}()
 
 	err := waitForRun(t, done)
@@ -395,5 +485,126 @@ func TestRunAfterStartFailureFailsRun(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "[second] started") {
 		t.Fatalf("later child started despite hook failure:\n%s", out.String())
+	}
+}
+
+func TestRunAfterStartHookRunsAfterAllChildren(t *testing.T) {
+	progress := &syncBuffer{}
+	hookRan := make(chan struct{})
+	sup := &Supervisor{
+		LogDir:   t.TempDir(),
+		Progress: progress,
+		AfterStart: func(ctx context.Context) error {
+			close(hookRan)
+			return nil
+		},
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- sup.Run(context.Background(), []Process{
+			stopper("only", filepath.Join(t.TempDir(), "unused")),
+		})
+	}()
+
+	waitForLine(t, progress, "starting only")
+	select {
+	case <-hookRan:
+	case <-time.After(10 * time.Second):
+		t.Fatal("AfterStart hook did not run after all children started")
+	}
+	// Run keeps waiting for shutdown after the hook returned.
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned before shutdown was requested: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForRun(t, done); err != nil {
+		t.Fatalf("Run returned an error after SIGINT: %v", err)
+	}
+}
+
+func TestRunAfterStartHookFailureFailsRun(t *testing.T) {
+	orderFile := filepath.Join(t.TempDir(), "order")
+	out := &syncBuffer{}
+	// The hook fails only after the child installed its signal handler,
+	// so the teardown check below can rely on a clean termination.
+	sup := &Supervisor{
+		LogDir:  t.TempDir(),
+		Verbose: true,
+		Stdout:  out,
+		Stderr:  out,
+		AfterStart: func(ctx context.Context) error {
+			waitForLine(t, out, "[only] started")
+			return fmt.Errorf("never ready")
+		},
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- sup.Run(context.Background(), []Process{stopper("only", orderFile)})
+	}()
+
+	err := waitForRun(t, done)
+	if err == nil || !strings.Contains(err.Error(), "never ready") {
+		t.Fatalf("expected the hook's error, got: %v", err)
+	}
+	if got := readOrder(t, orderFile); !reflect.DeepEqual(got, []string{"only"}) {
+		t.Fatalf("children were not torn down, termination order: %v", got)
+	}
+}
+
+func TestRunAfterStartHookInterruptExitsCleanly(t *testing.T) {
+	orderFile := filepath.Join(t.TempDir(), "order")
+	out := &syncBuffer{}
+	sup := &Supervisor{
+		LogDir:   t.TempDir(),
+		Verbose:  true,
+		Stdout:   out,
+		Stderr:   out,
+		Progress: &syncBuffer{},
+		// The hook polls until shutdown is requested, then reports the
+		// cancellation as its error, the way a readiness poll does.
+		AfterStart: func(ctx context.Context) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- sup.Run(context.Background(), []Process{stopper("only", orderFile)})
+	}()
+
+	waitForLine(t, out, "[only] started")
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForRun(t, done); err != nil {
+		t.Fatalf("Run returned an error after SIGINT during the hook: %v", err)
+	}
+	if got := readOrder(t, orderFile); !reflect.DeepEqual(got, []string{"only"}) {
+		t.Fatalf("children were not torn down, termination order: %v", got)
+	}
+}
+
+func TestRunChildAfterStartInterruptExitsCleanly(t *testing.T) {
+	only := stopper("only", filepath.Join(t.TempDir(), "unused"))
+	only.AfterStart = func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	progress := &syncBuffer{}
+	done := make(chan error, 1)
+	go func() {
+		done <- (&Supervisor{LogDir: t.TempDir(), Progress: progress}).Run(context.Background(), []Process{only})
+	}()
+
+	waitForLine(t, progress, "starting only")
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForRun(t, done); err != nil {
+		t.Fatalf("Run returned an error after SIGINT during the hook: %v", err)
 	}
 }
