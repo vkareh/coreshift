@@ -183,7 +183,7 @@ func extractEntry(r io.Reader, destination, target string, h *tar.Header) error 
 			return err
 		}
 		return os.Link(link, target)
-	case tar.TypeReg, tar.TypeRegA:
+	case tar.TypeReg:
 		f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, os.FileMode(h.Mode)&0o777)
 		if err != nil {
 			return err
