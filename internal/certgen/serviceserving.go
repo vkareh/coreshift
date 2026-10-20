@@ -7,6 +7,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"net"
 	"time"
 )
 
@@ -50,6 +51,9 @@ func GenerateServiceServingCert(caCertPEM, caKeyPEM []byte) (certPEM, keyPEM []b
 		NotBefore: now,
 		NotAfter:  now.Add(1 * 365 * 24 * time.Hour),
 		DNSNames:  serviceServingDNSNames,
+		// The OAuth server serves on the loopback address, which clients
+		// reach by following the OAuth discovery document.
+		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
 		KeyUsage:  x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		// Both usages: kube-apiserver dials these servers as a TLS client,
 		// and OpenShift issues them as client-and-serving certificates.
