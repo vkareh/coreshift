@@ -21,8 +21,8 @@ func TestGenerateServiceServingCert(t *testing.T) {
 			t.Fatalf("%s SAN missing: %v", name, err)
 		}
 	}
-	if len(cert.IPAddresses) != 0 {
-		t.Fatal("generated certificate has unexpected IP SANs")
+	if err := cert.VerifyHostname("127.0.0.1"); err != nil {
+		t.Fatalf("loopback SAN missing: %v", err)
 	}
 	var serverAuth, clientAuth bool
 	for _, usage := range cert.ExtKeyUsage {
