@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -104,6 +105,7 @@ func newRootCommand() *cobra.Command {
 		Version: version,
 	}
 	root.AddCommand(newAPICommand())
+	root.AddCommand(newCleanupCommand())
 	return root
 }
 
@@ -495,12 +497,259 @@ func printReadySummary(stateDir string, port int) {
 		endpoint, filepath.Join(stateDir, certgen.CACertFilename))
 }
 
+// newCleanupCommand builds the command that removes CoreShift's on-disk
+// artifacts: the state directories, and with --cache the shared image
+// cache.
+func newCleanupCommand() *cobra.Command {
+	var port int
+	var all bool
+	var clearCache bool
+	cmd := &cobra.Command{
+		Use:   "cleanup",
+		Short: "Remove CoreShift state directories and cache",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if all && cmd.Flags().Changed("port") {
+				return fmt.Errorf("--all already removes every state directory; drop --port")
+			}
+			return runCleanup(port, all, clearCache)
+		},
+	}
+	cmd.Flags().IntVar(&port, "port", defaultAPIPort, "port whose state directory is removed")
+	cmd.Flags().BoolVar(&all, "all", false, "remove every state directory: the default one and all per-port ones")
+	cmd.Flags().BoolVar(&clearCache, "cache", false, "also remove the shared image cache, which the next run rebuilds by re-pulling")
+	return cmd
+}
+
+// cleanupTarget is a directory cleanup removes, with the name for it in
+// messages.
+type cleanupTarget struct {
+	path string
+	kind string
+}
+
+// runCleanup removes the chosen state directories and, with clearCache,
+// the shared image cache. It refuses while a control plane is running,
+// because cleaning under a live instance would pull its data out from
+// under it. A missing directory is reported, not an error, so the command
+// is safe to re-run and to call from scripts.
+func runCleanup(port int, all, clearCache bool) error {
+	running, err := runningControlPlane()
+	if err != nil {
+		return err
+	}
+	if running != "" {
+		return fmt.Errorf("a CoreShift control plane is running:\n  %s\n"+
+			"Stop it first; cleaning up under a running control plane would pull its data out from under it", running)
+	}
+	targets, err := cleanupTargets(port, all)
+	if err != nil {
+		return err
+	}
+	if clearCache {
+		cacheDir, err := image.CacheRoot()
+		if err != nil {
+			return err
+		}
+		targets = append(targets, cleanupTarget{path: cacheDir, kind: "image cache"})
+	}
+	var freed int64
+	removed := false
+	for _, target := range targets {
+		size, err := dirSize(target.path)
+		if os.IsNotExist(err) {
+			fmt.Printf("No %s at %s\n", target.kind, target.path)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Removing %s (%s)\n", target.path, humanSize(size))
+		if err := os.RemoveAll(target.path); err != nil {
+			return fmt.Errorf("remove %s: %w", target.path, err)
+		}
+		freed += size
+		removed = true
+	}
+	// A full cleanup leaves nothing behind: drop the state directories'
+	// parents once they are empty. Removing a non-empty parent fails and
+	// is ignored.
+	apiRoot, err := apiStateDir(defaultAPIPort)
+	if err != nil {
+		return err
+	}
+	_ = os.Remove(apiRoot)
+	_ = os.Remove(filepath.Dir(apiRoot))
+	if removed {
+		fmt.Printf("Freed %s\n", humanSize(freed))
+	}
+	return nil
+}
+
+// cleanupTargets lists the state directories to remove: one port's, or
+// with all every per-port directory followed by the default one. The
+// default one comes last so its size, measured right before its removal,
+// counts only the content the earlier removals left.
+func cleanupTargets(port int, all bool) ([]cleanupTarget, error) {
+	if !all {
+		dir, err := apiStateDir(port)
+		if err != nil {
+			return nil, err
+		}
+		return []cleanupTarget{{path: dir, kind: "state directory"}}, nil
+	}
+	apiRoot, err := apiStateDir(defaultAPIPort)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(apiRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []cleanupTarget{{path: apiRoot, kind: "state directory"}}, nil
+		}
+		return nil, err
+	}
+	var targets []cleanupTarget
+	for _, entry := range entries {
+		if !entry.IsDir() || !isPortName(entry.Name()) {
+			continue
+		}
+		targets = append(targets, cleanupTarget{path: filepath.Join(apiRoot, entry.Name()), kind: "state directory"})
+	}
+	return append(targets, cleanupTarget{path: apiRoot, kind: "state directory"}), nil
+}
+
+// isPortName reports whether name names a per-port state directory; the
+// layout names them after their port, and nothing else there is.
+func isPortName(name string) bool {
+	_, err := strconv.Atoi(name)
+	return err == nil
+}
+
+// runningControlPlane returns the command line of a running CoreShift
+// control plane process, or an empty string when none is.
+func runningControlPlane() (string, error) {
+	stateDir, err := stateRoot()
+	if err != nil {
+		return "", err
+	}
+	cacheDir, err := image.CacheRoot()
+	if err != nil {
+		return "", err
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return "", fmt.Errorf("list processes: %w", err)
+	}
+	self := os.Getpid()
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid == self {
+			continue
+		}
+		args := processArgs(pid)
+		if isControlPlaneArgs(args, stateDir, cacheDir) {
+			return strings.Join(args, " "), nil
+		}
+	}
+	return "", nil
+}
+
+// isControlPlaneArgs reports whether a command line belongs to a running
+// control plane: the supervisor by name, or any command line carrying a
+// CoreShift state or cache path, which every control plane child's does.
+// Other processes mentioning those paths also match, which errs on
+// refusing.
+func isControlPlaneArgs(args []string, stateDir, cacheDir string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	if filepath.Base(args[0]) == "coreshift" && len(args) > 1 && args[1] == "api" {
+		return true
+	}
+	for _, arg := range args {
+		// Child command lines carry the paths as --flag=value.
+		if i := strings.Index(arg, "="); i >= 0 {
+			arg = arg[i+1:]
+		}
+		if withinDir(arg, stateDir) || withinDir(arg, cacheDir) {
+			return true
+		}
+	}
+	return false
+}
+
+// processArgs returns the command line of a process as its arguments.
+// Kernel threads and processes that cannot be read give none.
+func processArgs(pid int) []string {
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00")
+}
+
+// withinDir reports whether path is dir or lies below it.
+func withinDir(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// dirSize sums the sizes of the regular files under dir. Walk errors are
+// skipped, so the sum is best effort; removing the directory does not
+// depend on it.
+func dirSize(dir string) (int64, error) {
+	if _, err := os.Stat(dir); err != nil {
+		return 0, err
+	}
+	var size int64
+	_ = filepath.WalkDir(dir, func(_ string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if entry.Type().IsRegular() {
+			if info, err := entry.Info(); err == nil {
+				size += info.Size()
+			}
+		}
+		return nil
+	})
+	return size, nil
+}
+
+// humanSize renders a byte count for people.
+func humanSize(size int64) string {
+	switch {
+	case size >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(size)/(1<<30))
+	case size >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(size)/(1<<20))
+	case size >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(size)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", size)
+	}
+}
+
 // apiStateDir returns the XDG state directory holding the generated
 // certificates and etcd data, so they survive across runs. The default
 // port keeps the original location; any other port gets its own
 // subdirectory, so runs on different ports do not share certificates
 // or etcd data.
 func apiStateDir(port int) (string, error) {
+	root, err := stateRoot()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(root, "api")
+	if port != defaultAPIPort {
+		dir = filepath.Join(dir, strconv.Itoa(port))
+	}
+	return dir, nil
+}
+
+// stateRoot returns the directory CoreShift keeps its state below:
+// $XDG_STATE_HOME/coreshift, defaulting to ~/.local/state/coreshift.
+func stateRoot() (string, error) {
 	base := os.Getenv("XDG_STATE_HOME")
 	if base == "" {
 		home, err := os.UserHomeDir()
@@ -509,11 +758,7 @@ func apiStateDir(port int) (string, error) {
 		}
 		base = filepath.Join(home, ".local", "state")
 	}
-	dir := filepath.Join(base, "coreshift", "api")
-	if port != defaultAPIPort {
-		dir = filepath.Join(dir, strconv.Itoa(port))
-	}
-	return dir, nil
+	return filepath.Join(base, "coreshift"), nil
 }
 
 // releaseMarkerFilename records which release image created the state
