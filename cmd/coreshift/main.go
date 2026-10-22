@@ -171,6 +171,9 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 		return fmt.Errorf("resolve release image: %w", err)
 	}
 	fmt.Printf("  Release image: %s\n", releaseRef)
+	if err := ensureReleaseMarker(stateDir, releaseRef); err != nil {
+		return err
+	}
 	releaseRoot, err := client.CachedRelease(ctx, releaseRef)
 	if err != nil {
 		return fmt.Errorf("prepare release image: %w", err)
@@ -511,6 +514,43 @@ func apiStateDir(port int) (string, error) {
 		dir = filepath.Join(dir, strconv.Itoa(port))
 	}
 	return dir, nil
+}
+
+// releaseMarkerFilename records which release image created the state
+// directory's etcd data. etcd data only works with the release that
+// wrote it, so the marker is checked before anything starts.
+const releaseMarkerFilename = "release-image"
+
+// ensureReleaseMarker refuses to reuse a state directory whose etcd data
+// is incompatible with the release this run resolved: one written by
+// another release, or one from before markers existed. A fresh directory
+// gains a marker naming the resolved release.
+func ensureReleaseMarker(stateDir, releaseRef string) error {
+	marker := filepath.Join(stateDir, releaseMarkerFilename)
+	recorded, err := os.ReadFile(marker)
+	if err == nil {
+		created := strings.TrimSpace(string(recorded))
+		if created == releaseRef {
+			return nil
+		}
+		return fmt.Errorf("state directory %s was created by release %s and cannot be reused by %s\n"+
+			"etcd data only works with the release that created it.\n"+
+			"Use a different --port to get a separate state directory, or remove %s to start fresh",
+			stateDir, created, releaseRef, stateDir)
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("read release marker: %w", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "etcd-data")); err == nil {
+		return fmt.Errorf("state directory %s has etcd data from before releases were recorded in it\n"+
+			"etcd data only works with the release that created it.\n"+
+			"Use a different --port to get a separate state directory, or remove %s to start fresh",
+			stateDir, stateDir)
+	}
+	if err := os.WriteFile(marker, []byte(releaseRef), 0o644); err != nil {
+		return fmt.Errorf("write release marker: %w", err)
+	}
+	return nil
 }
 
 // ensureCertificates generates the certificate and kubeconfig set into
