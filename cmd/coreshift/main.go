@@ -28,11 +28,18 @@ import (
 
 var version = "dev"
 
-const DefaultReleaseImage = "quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64"
-
 // defaultReleaseRepository is the repository the release image is
 // resolved from unless an exact image is pinned.
 const defaultReleaseRepository = "quay.io/openshift-release-dev/ocp-release"
+
+// releaseOptions carries the flags that choose which OpenShift release
+// runs: an exact image reference, or a version resolved from a registry.
+type releaseOptions struct {
+	image    string
+	version  string
+	registry string
+	arch     string
+}
 
 // goArchToUname maps Go's runtime architecture names to the uname -m
 // names that release image tags use.
@@ -104,10 +111,7 @@ func newAPICommand() *cobra.Command {
 	var pullSecretPath string
 	var port int
 	var verbose bool
-	var releaseImage string
-	var releaseVersion string
-	var releaseRegistry string
-	var arch string
+	var release releaseOptions
 	defaultArch, err := releaseArch(runtime.GOARCH)
 	if err != nil {
 		// Every architecture OpenShift releases payloads for is in the
@@ -118,23 +122,23 @@ func newAPICommand() *cobra.Command {
 		Use:   "api",
 		Short: "Run the OpenShift API control plane",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAPI(cmd.Context(), pullSecretPath, port, verbose)
+			return runAPI(cmd.Context(), pullSecretPath, port, verbose, release)
 		},
 	}
 	cmd.Flags().StringVar(&pullSecretPath, "pull-secret", "", "path to a Red Hat pull secret with credentials for the release image registry (required)")
 	cmd.Flags().IntVar(&port, "port", defaultAPIPort, "port the API server listens on")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "stream child process logs to the terminal")
-	cmd.Flags().StringVar(&releaseImage, "release-image", "", "exact release image reference to run, e.g. "+DefaultReleaseImage)
-	cmd.Flags().StringVar(&releaseVersion, "version", "", "OpenShift version to run, X.Y or X.Y.Z; defaults to the newest release")
-	cmd.Flags().StringVar(&releaseRegistry, "registry", defaultReleaseRepository, "repository to resolve the release image from")
-	cmd.Flags().StringVar(&arch, "arch", defaultArch, "architecture of the release payload, as uname -m reports it")
+	cmd.Flags().StringVar(&release.image, "release-image", "", "exact release image reference to run, e.g. quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64")
+	cmd.Flags().StringVar(&release.version, "version", "", "OpenShift version to run, X.Y or X.Y.Z; defaults to the newest release")
+	cmd.Flags().StringVar(&release.registry, "registry", defaultReleaseRepository, "repository to resolve the release image from")
+	cmd.Flags().StringVar(&release.arch, "arch", defaultArch, "architecture of the release payload, as uname -m reports it")
 	if err := cmd.MarkFlagRequired("pull-secret"); err != nil {
 		panic(err) // the flag is defined above
 	}
 	return cmd
 }
 
-func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool) error {
+func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, release releaseOptions) error {
 	if verbose {
 		// Image cache messages are quiet by default; verbose runs show
 		// them again, like the live child logs.
@@ -162,7 +166,12 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool) 
 	}
 
 	fmt.Println("Preparing release image")
-	releaseRoot, err := client.CachedRelease(ctx, DefaultReleaseImage)
+	releaseRef, err := client.ResolveRelease(ctx, release.registry, release.version, release.arch, release.image)
+	if err != nil {
+		return fmt.Errorf("resolve release image: %w", err)
+	}
+	fmt.Printf("  Release image: %s\n", releaseRef)
+	releaseRoot, err := client.CachedRelease(ctx, releaseRef)
 	if err != nil {
 		return fmt.Errorf("prepare release image: %w", err)
 	}
