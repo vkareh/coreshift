@@ -280,6 +280,60 @@ func TestWriteOAuthServerConfigRendersProviders(t *testing.T) {
 	}
 }
 
+func TestEnsureReleaseMarkerTracksFreshDirectory(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.8-x86_64"); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(readFile(t, stateDir, releaseMarkerFilename)); got != "reg.example/ocp-release:4.22.8-x86_64" {
+		t.Fatalf("marker = %q, want the release image reference", got)
+	}
+	// The same release reuses the directory unchanged.
+	if err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.8-x86_64"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureReleaseMarkerRefusesDifferentRelease(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.8-x86_64"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.19.3-x86_64")
+	if err == nil {
+		t.Fatal("expected a refusal for a different release")
+	}
+	for _, want := range []string{"4.22.8", "4.19.3", stateDir, "--port"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal missing %q:\n%v", want, err)
+		}
+	}
+	if got := string(readFile(t, stateDir, releaseMarkerFilename)); got != "reg.example/ocp-release:4.22.8-x86_64" {
+		t.Fatalf("refusal overwrote the marker, now %q", got)
+	}
+}
+
+func TestEnsureReleaseMarkerRefusesUntrackedEtcdData(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(stateDir, "etcd-data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.8-x86_64")
+	if err == nil {
+		t.Fatal("expected a refusal for untracked etcd data")
+	}
+	for _, want := range []string{"before releases were recorded", stateDir, "--port"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal missing %q:\n%v", want, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, releaseMarkerFilename)); !os.IsNotExist(err) {
+		t.Fatalf("refusal wrote a marker anyway: %v", err)
+	}
+}
+
 func readFile(t *testing.T, dir, name string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(dir, name))
