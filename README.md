@@ -77,8 +77,8 @@ there the next time.
   under the `logs` folder of the state directory.
 - `--version`: the OpenShift version to run, `X.Y` or `X.Y.Z`. Without it the
   newest stable release for the machine's architecture is picked.
-- `--release-image`: an exact release image reference to run, skipping
-  version resolution.
+- `--release-image`: an exact release image reference to run, with no
+  registry queries at all.
 - `--registry`: the repository release versions are resolved from,
   `quay.io/openshift-release-dev/ocp-release` by default.
 - `--arch`: the release payload architecture, as `uname -m` reports it,
@@ -153,11 +153,48 @@ oc login https://127.0.0.1:6443 --certificate-authority=/home/you/.local/state/c
 
 ### Choosing the release
 
-By default the run resolves the newest stable release for the machine's
-architecture from the registry. `--version 4.22` picks the newest patch
-release of that minor stream, `--version 4.22.8` pins an exact version, and
-`--release-image` runs an exact image reference with no resolution at all.
-The startup output names the release image the run resolved.
+Four flags pick the release; the defaults cover the common case. With none
+of them set, the newest stable release for the machine's architecture is
+resolved from the registry:
+
+```
+./coreshift api --pull-secret ~/pull-secret
+```
+
+`--version X.Y` pins a minor: the newest patch release of that stream is
+resolved.
+
+```
+./coreshift api --pull-secret ~/pull-secret --version 4.22
+```
+
+Pinning exact comes in two strengths. `--version X.Y.Z` resolves exactly
+that version from the registry:
+
+```
+./coreshift api --pull-secret ~/pull-secret --version 4.22.8
+```
+
+`--release-image` pins the image reference itself and skips all registry
+queries — not even a tag listing happens — so use it when a run must be
+reproducible bit for bit, or when the registry cannot be reached for
+resolution:
+
+```
+./coreshift api --pull-secret ~/pull-secret --release-image quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64
+```
+
+`--registry` resolves from a private mirror, any v2-compliant repository,
+instead of the default `quay.io/openshift-release-dev/ocp-release`:
+
+```
+./coreshift api --pull-secret ~/pull-secret --registry mirror.corp.example/openshift-release-dev/ocp-release
+```
+
+`--arch` defaults to the machine's architecture, as `uname -m` reports it;
+pass e.g. `--arch aarch64` to resolve a payload for another architecture.
+It combines freely with `--version` and `--registry`. The startup output
+names the release image the run resolved.
 
 ### `api` or `up`
 
