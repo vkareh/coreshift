@@ -129,7 +129,13 @@ func unpackLayer(layer v1.Layer, destination string) error {
 		if err != nil {
 			return err
 		}
-		name, err := safeName(destination, header.Name)
+		// Older payloads prefix entry names with "./". Strip it; the bare
+		// root entry this leaves behind carries nothing to extract.
+		entryName := strings.TrimPrefix(header.Name, "./")
+		if entryName == "" || entryName == "." {
+			continue
+		}
+		name, err := safeName(destination, entryName)
 		if err != nil {
 			return err
 		}
