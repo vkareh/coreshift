@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 )
@@ -31,6 +32,36 @@ func TestResolveReleasePinnedSkipsRegistry(t *testing.T) {
 	}
 	if ref != "quay.io/openshift-release-dev/ocp-release:4.22.11-x86_64" {
 		t.Fatalf("ref = %q, want the pinned reference unchanged", ref)
+	}
+}
+
+// TestResolveReleasePinnedGolden resolves a pinned release image and
+// compares the result against a checked-in golden file, so any change
+// to the resolution output shows up as a reviewable fixture diff.
+func TestResolveReleasePinnedGolden(t *testing.T) {
+	// Any request to this server fails the test.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("pinned resolution made a registry request: %s %s", r.Method, r.URL)
+	}))
+	t.Cleanup(server.Close)
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 127.0.0.1 would be reached over https; localhost keeps it http.
+	repo := "localhost:" + parsed.Port() + "/repo"
+
+	ref, err := (&Client{}).ResolveRelease(context.Background(), repo, "", "x86_64",
+		"quay.io/openshift-release-dev/ocp-release:4.22.11-x86_64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden, err := os.ReadFile("testdata/resolve-pinned.golden")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := strings.TrimSpace(string(golden)); ref != want {
+		t.Fatalf("ref = %q, want golden file %q", ref, want)
 	}
 }
 
