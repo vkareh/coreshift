@@ -91,7 +91,12 @@ there the next time.
   kubeconfigs, the etcd data, and the child logs, and it is reused across
   runs. A non-default port uses `~/.local/state/coreshift/api/<port>/`
   instead, so runs on different ports never share certificates or data.
-  Delete the directory to start over.
+  Delete the directory to start over. Each directory records the release
+  image that created it and refuses to boot a different release against it,
+  because etcd data only works with the release that wrote it; run on
+  another port or delete the directory to switch releases. Directories with
+  etcd data from before this record existed are refused once, for the same
+  reason.
 - Image cache: `~/.cache/coreshift/`, shared by all runs regardless of port;
   see [Cache](#cache).
 
@@ -109,7 +114,8 @@ Control plane ready
 
 When a child fails, the run tears down and the error names the failed
 component, quotes the tail of its log, and points at the full log file, so a
-failure can be debugged without rerunning. `--verbose` trades the quiet for
+failure can be debugged without rerunning. If a child dies while startup is
+still waiting on a sibling, the error comes from the child that died. `--verbose` trades the quiet for
 live child output.
 
 ### Logging in
