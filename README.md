@@ -94,9 +94,12 @@ there the next time.
   Run `coreshift cleanup` to start over. Each directory records the release
   image that created it and refuses to boot a different release against it,
   because etcd data only works with the release that wrote it; run on
-  another port or clean up to switch releases. Directories with
-  etcd data from before this record existed are refused once, for the same
-  reason.
+  another port to keep both. On a terminal the refusal offers to remove the
+  directory and start fresh; everything in it is lost, including anything
+  created through the API, and only an explicit yes goes ahead. Without a
+  terminal the refusal names `coreshift cleanup` as the way to remove the
+  directory from a script. Directories with etcd data from before this
+  record existed get the same treatment, for the same reason.
 - Image cache: `~/.cache/coreshift/`, shared by all runs regardless of port;
   see [Cache](#cache).
 
