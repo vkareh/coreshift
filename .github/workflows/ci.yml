@@ -55,3 +55,49 @@ jobs:
           secret="$RUNNER_TEMP/pull-secret"
           printf '%s' "$PULL_SECRET" > "$secret"
           SMOKE_PULL_SECRET_PATH="$secret" go test ./pkg/image/ -run Smoke -v -timeout 60m
+
+  nightly-drift:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build -o coreshift ./cmd/coreshift
+
+      - name: Run latest-release drift check
+        env:
+          PULL_SECRET: ${{ secrets.PULL_SECRET }}
+        run: |
+          if [ -z "$PULL_SECRET" ]; then
+            echo "PULL_SECRET repository secret is not configured; skipping drift check"
+            exit 0
+          fi
+          secret="$RUNNER_TEMP/pull-secret"
+          printf '%s' "$PULL_SECRET" > "$secret"
+          export XDG_STATE_HOME="$RUNNER_TEMP/drift-state"
+          export XDG_CACHE_HOME="$RUNNER_TEMP/drift-cache"
+          log="$RUNNER_TEMP/drift.log"
+          ./coreshift api --pull-secret "$secret" --port 16443 >"$log" 2>&1 &
+          pid=$!
+          # Up to 45 minutes: a fresh cache means a full payload pull.
+          for _ in {1..90}; do
+            grep -q "Control plane ready" "$log" && break
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 30
+          done
+          kill -TERM "$pid" 2>/dev/null || true
+          status=0
+          wait "$pid" || status=$?
+          cat "$log"
+          if [ "$status" -ne 0 ] || ! grep -q "Control plane ready" "$log"; then
+            echo "The latest release did not reach a ready control plane (exit $status); its stand-ins need updating before it can be supported."
+            exit 1
+          fi
+          echo "The latest release reached ready and shut down cleanly."
