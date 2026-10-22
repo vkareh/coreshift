@@ -135,12 +135,16 @@ func (s *Supervisor) Run(ctx context.Context, processes []Process) error {
 	for i := range processes {
 		if hook := processes[i].BeforeStart; hook != nil {
 			if err := hook(ctx); err != nil {
+				dead := deadChildFailure(exits)
 				shutdown()
 				// A canceled context means shutdown was requested while
 				// the hook ran; report a clean shutdown, not a hook
 				// failure.
 				if ctx.Err() != nil {
 					return nil
+				}
+				if dead != nil {
+					return dead
 				}
 				return fmt.Errorf("before start of %s: %w", processes[i].Name, err)
 			}
@@ -152,16 +156,31 @@ func (s *Supervisor) Run(ctx context.Context, processes []Process) error {
 		s.progress("starting " + processes[i].Name)
 		c, err := s.startChild(&processes[i], stdout, stderr, &mu)
 		if err != nil {
+			dead := deadChildFailure(exits)
 			shutdown()
+			if dead != nil {
+				return dead
+			}
 			return fmt.Errorf("start %s: %w", processes[i].Name, err)
 		}
 		children = append(children, c)
 		waitForExit(c)
+		// A child that dies during startup ends the run right there; its
+		// own failure is the report, not whatever symptom a later child
+		// would run into.
+		if dead := deadChildFailure(exits); dead != nil {
+			shutdown()
+			return dead
+		}
 		if hook := processes[i].AfterStart; hook != nil {
 			if err := hook(ctx); err != nil {
+				dead := deadChildFailure(exits)
 				shutdown()
 				if ctx.Err() != nil {
 					return nil
+				}
+				if dead != nil {
+					return dead
 				}
 				return c.withLog(fmt.Errorf("after start of %s: %w", processes[i].Name, err))
 			}
@@ -174,9 +193,13 @@ func (s *Supervisor) Run(ctx context.Context, processes []Process) error {
 
 	if s.AfterStart != nil {
 		if err := s.AfterStart(ctx); err != nil {
+			dead := deadChildFailure(exits)
 			shutdown()
 			if ctx.Err() != nil {
 				return nil
+			}
+			if dead != nil {
+				return dead
 			}
 			return err
 		}
@@ -193,6 +216,21 @@ func (s *Supervisor) Run(ctx context.Context, processes []Process) error {
 	case c := <-exits:
 		shutdown()
 		return c.failure()
+	}
+}
+
+// deadChildFailure returns the failure of a child that exited on its own,
+// if any. A startup error raised while a child lies dead, such as a
+// sibling's readiness timeout, is usually that child's symptom, so the
+// dead child's own failure is the better report. It must be consulted
+// before shutdown, whose terminations would be indistinguishable from
+// real exits.
+func deadChildFailure(exits <-chan *child) error {
+	select {
+	case c := <-exits:
+		return c.failure()
+	default:
+		return nil
 	}
 }
 
