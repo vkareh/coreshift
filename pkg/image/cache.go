@@ -27,7 +27,7 @@ const componentsKind = "components"
 // libraries; a collision would require the same digest, hence the same
 // content, and is harmless.
 func cachePath(kind, imageRef string) (string, error) {
-	root, err := cacheRoot()
+	root, err := CacheRoot()
 	if err != nil {
 		return "", err
 	}
@@ -38,10 +38,10 @@ func cachePath(kind, imageRef string) (string, error) {
 	return path, nil
 }
 
-// cacheRoot returns the XDG cache directory CoreShift keeps extracted
+// CacheRoot returns the XDG cache directory CoreShift keeps extracted
 // image content in: $XDG_CACHE_HOME/coreshift, defaulting to
 // ~/.cache/coreshift.
-func cacheRoot() (string, error) {
+func CacheRoot() (string, error) {
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		return "", fmt.Errorf("determine cache directory: %w", err)
