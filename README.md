@@ -75,6 +75,14 @@ there the next time.
 - `--verbose`: stream each child's logs live to the terminal, prefixed with
   the child's name. By default child logs are captured to one file per child
   under the `logs` folder of the state directory.
+- `--version`: the OpenShift version to run, `X.Y` or `X.Y.Z`. Without it the
+  newest stable release for the machine's architecture is picked.
+- `--release-image`: an exact release image reference to run, skipping
+  version resolution.
+- `--registry`: the repository release versions are resolved from,
+  `quay.io/openshift-release-dev/ocp-release` by default.
+- `--arch`: the release payload architecture, as `uname -m` reports it,
+  defaulting to the machine's architecture.
 
 ### Where things live
 
@@ -143,11 +151,13 @@ take effect on the next restart. Once the objects above are in place, restart
 oc login https://127.0.0.1:6443 --certificate-authority=/home/you/.local/state/coreshift/api/ca.crt -u developer -p password
 ```
 
-### Fixed release image
+### Choosing the release
 
-The release image is currently hardcoded to one payload,
-`quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64`, and is not yet
-configurable. Resolving a release from a registry is planned.
+By default the run resolves the newest stable release for the machine's
+architecture from the registry. `--version 4.22` picks the newest patch
+release of that minor stream, `--version 4.22.8` pins an exact version, and
+`--release-image` runs an exact image reference with no resolution at all.
+The startup output names the release image the run resolved.
 
 ### `api` or `up`
 
