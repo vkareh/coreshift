@@ -190,6 +190,46 @@ func TestRunFailureIncludesRecentLogTail(t *testing.T) {
 	}
 }
 
+func TestRunStartupFailureReportsDeadChildNotSiblingTimeout(t *testing.T) {
+	orderFile := filepath.Join(t.TempDir(), "order")
+	out := &syncBuffer{}
+	logDir := t.TempDir()
+	// doomed dies the way a broken etcd does: a fatal log line, then a
+	// nonzero exit. survivor's hook fails the way a readiness wait on a
+	// broken dependency does, after doomed is dead.
+	doomed := Process{Name: "doomed", Path: "bash", Args: []string{
+		"-c", "echo fatal-boom; exit 3",
+	}}
+	survivor := stopper("survivor", orderFile)
+	survivor.AfterStart = func(ctx context.Context) error {
+		waitForLine(t, out, "[doomed] fatal-boom")
+		// The exit report reaches the supervisor a moment after the
+		// line is printed; let it arrive so the check below is
+		// deterministic.
+		time.Sleep(200 * time.Millisecond)
+		return fmt.Errorf("control plane not ready: timed out")
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- (&Supervisor{LogDir: logDir, Verbose: true, Stdout: out, Stderr: out, Progress: &syncBuffer{}}).Run(
+			context.Background(), []Process{doomed, survivor})
+	}()
+
+	err := waitForRun(t, done)
+	if err == nil {
+		t.Fatal("expected an error when a child dies during startup")
+	}
+	for _, want := range []string{"doomed exited", "exit status 3", "fatal-boom", "full log: " + filepath.Join(logDir, "doomed.log")} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error missing %q:\n%v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("sibling's readiness timeout hid the dead child:\n%v", err)
+	}
+}
+
 func TestRunCancellationTerminatesChildrenInReverseOrder(t *testing.T) {
 	orderFile := filepath.Join(t.TempDir(), "order")
 	progress, out := &syncBuffer{}, &syncBuffer{}
