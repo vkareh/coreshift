@@ -2,6 +2,7 @@ package image
 
 import (
 	"cmp"
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -10,6 +11,11 @@ import (
 // from most to least significant, and Compare orders versions by them.
 type Version struct {
 	Major, Minor, Patch int
+}
+
+// String returns the version as "major.minor.patch", e.g. "4.22.11".
+func (v Version) String() string {
+	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
 }
 
 // Compare orders versions by major, then minor, then patch: negative
