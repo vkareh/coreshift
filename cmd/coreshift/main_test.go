@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -196,6 +197,164 @@ func TestAPIStateDirPerPort(t *testing.T) {
 	}
 	if want := filepath.Join(base, "coreshift", "api", "7443"); other != want {
 		t.Fatalf("port 7443 state dir = %q, want %q", other, want)
+	}
+}
+
+// writeStateTree fills a state directory with a marker file, the way a
+// run does, so cleanup has something to measure and remove.
+func writeStateTree(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, releaseMarkerFilename), []byte("reg.example/ocp-release:4.22.8-x86_64"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCleanupRemovesDefaultStateDir(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	stateDir := filepath.Join(base, "coreshift", "api")
+	writeStateTree(t, stateDir)
+
+	if err := runCleanup(defaultAPIPort, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+		t.Fatal("default state directory still exists")
+	}
+}
+
+func TestCleanupRemovesPortStateDirOnly(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	stateDir, err := apiStateDir(7443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeStateTree(t, stateDir)
+	writeStateTree(t, filepath.Dir(stateDir))
+
+	if err := runCleanup(7443, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+		t.Fatal("port state directory still exists")
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(stateDir), releaseMarkerFilename)); err != nil {
+		t.Fatalf("default state directory was removed too: %v", err)
+	}
+}
+
+func TestCleanupAllSweepsEveryStateDir(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	apiRoot := filepath.Join(base, "coreshift", "api")
+	writeStateTree(t, apiRoot)
+	writeStateTree(t, filepath.Join(apiRoot, "7443"))
+	writeStateTree(t, filepath.Join(apiRoot, "8443"))
+
+	if err := runCleanup(defaultAPIPort, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(apiRoot); !os.IsNotExist(err) {
+		t.Fatal("state directories still exist after --all")
+	}
+	if _, err := os.Stat(filepath.Join(base, "coreshift")); !os.IsNotExist(err) {
+		t.Fatal("empty state root was left behind")
+	}
+}
+
+func TestCleanupMissingStateDirIsNotAnError(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := runCleanup(defaultAPIPort, false, false); err != nil {
+		t.Fatalf("missing state directory must not fail: %v", err)
+	}
+}
+
+func TestCleanupCache(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cacheBase := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheBase)
+	cacheDir := filepath.Join(cacheBase, "coreshift")
+	writeStateTree(t, cacheDir)
+
+	if err := runCleanup(defaultAPIPort, false, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
+		t.Fatal("image cache still exists")
+	}
+}
+
+func TestCleanupRefusesAllWithPort(t *testing.T) {
+	cmd := newCleanupCommand()
+	cmd.SetArgs([]string{"--all", "--port", "7443"})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "--port") {
+		t.Fatalf("err = %v, want --all and --port together refused", err)
+	}
+}
+
+// startStandbyProcess starts a process that stays alive until the test
+// ends, carrying the given extra command line argument. The two-command
+// script keeps the shell itself alive with its original command line, so
+// /proc shows the argument for the whole lifetime.
+func startStandbyProcess(t *testing.T, extraArg string) {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", "sleep 30; true", extraArg)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+}
+
+func TestCleanupRefusesWhileChildProcessRuns(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	stateDir := filepath.Join(base, "coreshift", "api")
+	writeStateTree(t, stateDir)
+
+	// A stand-in for a control plane child: its command line carries the
+	// state directory the way etcd's --data-dir does.
+	startStandbyProcess(t, "--data-dir="+filepath.Join(stateDir, "etcd-data"))
+
+	err := runCleanup(defaultAPIPort, false, false)
+	if err == nil || !strings.Contains(err.Error(), "Stop it first") {
+		t.Fatalf("err = %v, want a refusal naming the running control plane", err)
+	}
+	if _, statErr := os.Stat(stateDir); statErr != nil {
+		t.Fatalf("refusal removed the state directory anyway: %v", statErr)
+	}
+}
+
+// TestIsControlPlaneArgs checks the command lines cleanup treats as a
+// running control plane: the supervisor by name, and anything carrying a
+// state or cache path, as every control plane child does.
+func TestIsControlPlaneArgs(t *testing.T) {
+	state, cache := "/state", "/cache"
+	cases := []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"./coreshift", "api", "--pull-secret", "secret"}, true},
+		{[]string{"/usr/local/bin/coreshift", "api"}, true},
+		{[]string{"./coreshift", "cleanup"}, false},
+		{[]string{"./coreshift"}, false},
+		{[]string{"etcd", "--data-dir=" + state + "/api/etcd-data"}, true},
+		{[]string{"kube-scheduler", "--config=" + state + "/api/kube-scheduler-config.yaml"}, true},
+		{[]string{"oc", "login", "--kubeconfig=" + state + "/api/admin.kubeconfig"}, true},
+		{[]string{"etcd", "--data-dir=/elsewhere/etcd-data"}, false},
+		{[]string{"sh", "-c", "sleep 30; true", "--config=" + cache + "/components/x/y"}, true},
+		{[]string{"sh", "-c", "sleep 30; true", "--namespace=default"}, false},
+	}
+	for _, tc := range cases {
+		if got := isControlPlaneArgs(tc.args, state, cache); got != tc.want {
+			t.Errorf("isControlPlaneArgs(%q) = %v, want %v", tc.args, got, tc.want)
+		}
 	}
 }
 
