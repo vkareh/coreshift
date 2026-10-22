@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -195,6 +196,52 @@ func TestAPIStateDirPerPort(t *testing.T) {
 	}
 	if want := filepath.Join(base, "coreshift", "api", "7443"); other != want {
 		t.Fatalf("port 7443 state dir = %q, want %q", other, want)
+	}
+}
+
+// TestAPICommandResolutionFlagDefaults checks that the release
+// resolution flags are accepted and come with the documented defaults.
+func TestAPICommandResolutionFlagDefaults(t *testing.T) {
+	hostArch, err := releaseArch(runtime.GOARCH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := newAPICommand()
+	for name, want := range map[string]string{
+		"version":       "",
+		"release-image": "",
+		"registry":      "quay.io/openshift-release-dev/ocp-release",
+		"arch":          hostArch,
+	} {
+		if flag := cmd.Flags().Lookup(name); flag == nil {
+			t.Fatalf("flag --%s is not defined", name)
+		} else if flag.DefValue != want {
+			t.Fatalf("--%s default = %q, want %q", name, flag.DefValue, want)
+		}
+	}
+}
+
+func TestReleaseArchMapsGoNames(t *testing.T) {
+	for _, tc := range []struct{ goArch, want string }{
+		{"amd64", "x86_64"},
+		{"arm64", "aarch64"},
+		{"ppc64le", "ppc64le"},
+		{"s390x", "s390x"},
+	} {
+		arch, err := releaseArch(tc.goArch)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.goArch, err)
+		}
+		if arch != tc.want {
+			t.Fatalf("releaseArch(%q) = %q, want %q", tc.goArch, arch, tc.want)
+		}
+	}
+}
+
+func TestReleaseArchRejectsUnknownArchitecture(t *testing.T) {
+	_, err := releaseArch("plan9")
+	if err == nil || !strings.Contains(err.Error(), "plan9") {
+		t.Fatalf("err = %v, want unsupported architecture error", err)
 	}
 }
 

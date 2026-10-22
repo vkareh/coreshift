@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,29 @@ import (
 var version = "dev"
 
 const DefaultReleaseImage = "quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64"
+
+// defaultReleaseRepository is the repository the release image is
+// resolved from unless an exact image is pinned.
+const defaultReleaseRepository = "quay.io/openshift-release-dev/ocp-release"
+
+// goArchToUname maps Go's runtime architecture names to the uname -m
+// names that release image tags use.
+var goArchToUname = map[string]string{
+	"amd64":   "x86_64",
+	"arm64":   "aarch64",
+	"ppc64le": "ppc64le",
+	"s390x":   "s390x",
+}
+
+// releaseArch translates a Go runtime architecture name into the
+// uname -m style used by release image tags.
+func releaseArch(goArch string) (string, error) {
+	arch, ok := goArchToUname[goArch]
+	if !ok {
+		return "", fmt.Errorf("unsupported architecture %q", goArch)
+	}
+	return arch, nil
+}
 
 // Local ports of the aggregated API servers. kube-apiserver reaches them
 // through the aggregation layer; the ports appear both in the server flags
@@ -80,6 +104,16 @@ func newAPICommand() *cobra.Command {
 	var pullSecretPath string
 	var port int
 	var verbose bool
+	var releaseImage string
+	var releaseVersion string
+	var releaseRegistry string
+	var arch string
+	defaultArch, err := releaseArch(runtime.GOARCH)
+	if err != nil {
+		// Every architecture OpenShift releases payloads for is in the
+		// mapping; a binary built for anything else cannot run them.
+		panic(err)
+	}
 	cmd := &cobra.Command{
 		Use:   "api",
 		Short: "Run the OpenShift API control plane",
@@ -90,6 +124,10 @@ func newAPICommand() *cobra.Command {
 	cmd.Flags().StringVar(&pullSecretPath, "pull-secret", "", "path to a Red Hat pull secret with credentials for the release image registry (required)")
 	cmd.Flags().IntVar(&port, "port", defaultAPIPort, "port the API server listens on")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "stream child process logs to the terminal")
+	cmd.Flags().StringVar(&releaseImage, "release-image", "", "exact release image reference to run, e.g. "+DefaultReleaseImage)
+	cmd.Flags().StringVar(&releaseVersion, "version", "", "OpenShift version to run, X.Y or X.Y.Z; defaults to the newest release")
+	cmd.Flags().StringVar(&releaseRegistry, "registry", defaultReleaseRepository, "repository to resolve the release image from")
+	cmd.Flags().StringVar(&arch, "arch", defaultArch, "architecture of the release payload, as uname -m reports it")
 	if err := cmd.MarkFlagRequired("pull-secret"); err != nil {
 		panic(err) // the flag is defined above
 	}
