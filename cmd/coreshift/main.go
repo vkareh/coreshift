@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/x509"
 	"encoding/pem"
@@ -150,11 +151,7 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 	if err != nil {
 		return err
 	}
-	fmt.Println("Preparing certificates")
-	if err := ensureCertificates(stateDir, port); err != nil {
-		return err
-	}
-	if err := restoreAdminContext(stateDir); err != nil {
+	if err := prepareState(stateDir, port); err != nil {
 		return err
 	}
 
@@ -174,7 +171,17 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 	}
 	fmt.Printf("  Release image: %s\n", releaseRef)
 	if err := ensureReleaseMarker(stateDir, releaseRef); err != nil {
-		return err
+		if err := offerFreshStart(stateDir, port, err); err != nil {
+			return err
+		}
+		// The offer removed the directory: rebuild it the way a first
+		// boot does, certificates and release marker included.
+		if err := prepareState(stateDir, port); err != nil {
+			return err
+		}
+		if err := ensureReleaseMarker(stateDir, releaseRef); err != nil {
+			return err
+		}
 	}
 	releaseRoot, err := client.CachedRelease(ctx, releaseRef)
 	if err != nil {
@@ -485,6 +492,17 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 	return sup.Run(ctx, processes)
 }
 
+// prepareState writes the certificate set into stateDir and points the
+// admin kubeconfig back at the admin context. A fresh start, after the
+// old directory was removed, runs it again on the empty directory.
+func prepareState(stateDir string, port int) error {
+	fmt.Println("Preparing certificates")
+	if err := ensureCertificates(stateDir, port); err != nil {
+		return err
+	}
+	return restoreAdminContext(stateDir)
+}
+
 // printReadySummary prints what a client needs to use the running control
 // plane: the endpoint, the admin kubeconfig, and the login command.
 func printReadySummary(stateDir string, port int) {
@@ -555,17 +573,13 @@ func runCleanup(port int, all, clearCache bool) error {
 	var freed int64
 	removed := false
 	for _, target := range targets {
-		size, err := dirSize(target.path)
-		if os.IsNotExist(err) {
+		if _, err := os.Stat(target.path); os.IsNotExist(err) {
 			fmt.Printf("No %s at %s\n", target.kind, target.path)
 			continue
 		}
+		size, err := removeStateDir(target.path)
 		if err != nil {
 			return err
-		}
-		fmt.Printf("Removing %s (%s)\n", target.path, humanSize(size))
-		if err := os.RemoveAll(target.path); err != nil {
-			return fmt.Errorf("remove %s: %w", target.path, err)
 		}
 		freed += size
 		removed = true
@@ -694,6 +708,21 @@ func withinDir(path, dir string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// removeStateDir removes a state directory, reporting its size first;
+// the cleanup command and the fresh-start offer share it. It returns
+// the bytes freed.
+func removeStateDir(dir string) (int64, error) {
+	size, err := dirSize(dir)
+	if err != nil {
+		return 0, err
+	}
+	fmt.Printf("Removing %s (%s)\n", dir, humanSize(size))
+	if err := os.RemoveAll(dir); err != nil {
+		return 0, fmt.Errorf("remove %s: %w", dir, err)
+	}
+	return size, nil
+}
+
 // dirSize sums the sizes of the regular files under dir. Walk errors are
 // skipped, so the sum is best effort; removing the directory does not
 // depend on it.
@@ -796,6 +825,56 @@ func ensureReleaseMarker(stateDir, releaseRef string) error {
 		return fmt.Errorf("write release marker: %w", err)
 	}
 	return nil
+}
+
+// offerFreshStart offers to remove a state directory that refused reuse.
+// With a terminal on standard input it prints the refusal and asks
+// whether to remove the directory and start fresh; an explicit yes
+// removes it and returns nil, so the run continues from scratch. Any
+// other answer returns the refusal. Without a terminal it does not ask
+// and returns the refusal with a hint at the cleanup command.
+func offerFreshStart(stateDir string, port int, refusal error) error {
+	if !stdinIsTerminal() {
+		return fmt.Errorf("%w\nTo remove it without a prompt, run: coreshift cleanup --port %d", refusal, port)
+	}
+	fmt.Println(refusal.Error())
+	fmt.Println()
+	fmt.Printf("Remove %s and start fresh? Everything in it will be lost,\n"+
+		"including anything created through the API such as a configured\n"+
+		"identity provider [y/N]: ", stateDir)
+	answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	return startFresh(answer, stateDir, refusal)
+}
+
+// startFresh carries out the answer to the fresh-start question: only
+// an explicit yes removes the state directory; anything else, including
+// an empty answer, keeps the refusal.
+func startFresh(answer, stateDir string, refusal error) error {
+	if !parseYesNo(answer) {
+		return refusal
+	}
+	if _, err := removeStateDir(stateDir); err != nil {
+		return err
+	}
+	return nil
+}
+
+// parseYesNo parses the answer to a yes-or-no question that defaults to
+// no: only an explicit yes counts as one.
+func parseYesNo(answer string) bool {
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes":
+		return true
+	}
+	return false
+}
+
+// stdinIsTerminal reports whether standard input is an interactive
+// terminal. Pipes and redirected files answer no, so scripts never see
+// a prompt.
+func stdinIsTerminal() bool {
+	info, err := os.Stdin.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
 // ensureCertificates generates the certificate and kubeconfig set into
