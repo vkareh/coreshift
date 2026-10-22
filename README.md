@@ -91,10 +91,10 @@ there the next time.
   kubeconfigs, the etcd data, and the child logs, and it is reused across
   runs. A non-default port uses `~/.local/state/coreshift/api/<port>/`
   instead, so runs on different ports never share certificates or data.
-  Delete the directory to start over. Each directory records the release
+  Run `coreshift cleanup` to start over. Each directory records the release
   image that created it and refuses to boot a different release against it,
   because etcd data only works with the release that wrote it; run on
-  another port or delete the directory to switch releases. Directories with
+  another port or clean up to switch releases. Directories with
   etcd data from before this record existed are refused once, for the same
   reason.
 - Image cache: `~/.cache/coreshift/`, shared by all runs regardless of port;
@@ -211,13 +211,36 @@ container-based mode, when workloads have to actually run against a real
 node, CNI, DNS, and ingress. If the question is only "does it behave like
 OpenShift at the API level," `api` answers it faster and cheaper.
 
+## The `cleanup` command
+
+`coreshift cleanup` removes the state directory of the default port, so the
+next run starts fresh: new certificates, empty etcd, nothing seeded. There
+is no confirmation prompt; the command is explicit and safe for scripts.
+
+```
+./coreshift cleanup
+```
+
+- `--port N` removes that port's state directory instead.
+- `--all` removes every state directory: the default one and all per-port
+  ones.
+- `--cache` additionally removes the shared image cache. That is safe to
+  drop; it is keyed by image digest and fully rebuilt by re-pulling on the
+  next run.
+
+Each directory is listed with its size on disk before it is deleted, and
+the total freed is reported after. A missing directory is reported and is
+not an error. If a control plane is running, the command refuses and asks
+to stop it first, because cleaning under a live instance would pull its
+data out from under it.
+
 ## Cache
 
 Extracted control plane binaries and the release image's manifest of
 component image references are cached under `~/.cache/coreshift/`
 (`$XDG_CACHE_HOME/coreshift`), keyed by image digest. A second run of the
 same pinned release pulls nothing from the registry and starts straight
-from the cache. Delete the directory to clear it.
+from the cache. Run `coreshift cleanup --cache` to clear it.
 
 ## Nightly CI
 
