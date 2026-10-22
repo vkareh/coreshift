@@ -493,6 +493,110 @@ func TestEnsureReleaseMarkerRefusesUntrackedEtcdData(t *testing.T) {
 	}
 }
 
+// swapStdin points standard input at f for the duration of the test, so
+// offer helpers can be exercised without a real terminal.
+func swapStdin(t *testing.T, f *os.File) {
+	t.Helper()
+	old := os.Stdin
+	os.Stdin = f
+	t.Cleanup(func() {
+		os.Stdin = old
+	})
+}
+
+func TestParseYesNo(t *testing.T) {
+	for _, tc := range []struct {
+		answer string
+		want   bool
+	}{
+		{"y\n", true},
+		{"Y", true},
+		{"yes\n", true},
+		{" Yes \t\n", true},
+		{"", false},
+		{"\n", false},
+		{"n\n", false},
+		{"no\n", false},
+		{"ye\n", false},
+		{"yes please\n", false},
+	} {
+		if got := parseYesNo(tc.answer); got != tc.want {
+			t.Errorf("parseYesNo(%q) = %v, want %v", tc.answer, got, tc.want)
+		}
+	}
+}
+
+func TestStartFreshRemovesStateDirOnYes(t *testing.T) {
+	stateDir := t.TempDir()
+	writeStateTree(t, stateDir)
+
+	if err := startFresh("y\n", stateDir, fmt.Errorf("refusal")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+		t.Fatal("state directory still exists after an explicit yes")
+	}
+}
+
+func TestStartFreshKeepsStateDirOtherwise(t *testing.T) {
+	for _, answer := range []string{"\n", "n\n", "no\n", "yes please\n"} {
+		stateDir := t.TempDir()
+		writeStateTree(t, stateDir)
+		refusal := fmt.Errorf("refusal")
+
+		if err := startFresh(answer, stateDir, refusal); err != refusal {
+			t.Fatalf("%q: err = %v, want the refusal unchanged", answer, err)
+		}
+		if _, err := os.Stat(stateDir); err != nil {
+			t.Fatalf("%q: state directory was removed: %v", answer, err)
+		}
+	}
+}
+
+// TestOfferFreshStartWithoutTerminal checks the path scripts take: a
+// pipe on standard input means no question, and the refusal names the
+// cleanup command. Prompting here would hang the test on the empty
+// pipe, so passing is also proof the question is never asked.
+func TestOfferFreshStartWithoutTerminal(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		r.Close()
+		w.Close()
+	})
+	swapStdin(t, r)
+
+	refusal := fmt.Errorf("state directory cannot be reused")
+	err = offerFreshStart("/state/api", 7443, refusal)
+	if err == nil {
+		t.Fatal("expected a refusal without a terminal")
+	}
+	for _, want := range []string{"state directory cannot be reused", "coreshift cleanup --port 7443"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal missing %q:\n%v", want, err)
+		}
+	}
+}
+
+// TestOfferFreshStartDeclinesOnEOF checks that an interactive question
+// cut short, such as by Ctrl-D, counts as no. The null device passes the
+// terminal check but answers EOF.
+func TestOfferFreshStartDeclinesOnEOF(t *testing.T) {
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { devNull.Close() })
+	swapStdin(t, devNull)
+
+	refusal := fmt.Errorf("state directory cannot be reused")
+	if err := offerFreshStart(t.TempDir(), defaultAPIPort, refusal); err != refusal {
+		t.Fatalf("err = %v, want the refusal unchanged", err)
+	}
+}
+
 func readFile(t *testing.T, dir, name string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(dir, name))
