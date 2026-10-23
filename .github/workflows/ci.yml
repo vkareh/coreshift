@@ -101,3 +101,43 @@ jobs:
             exit 1
           fi
           echo "The latest release reached ready and shut down cleanly."
+
+  container-smoke:
+    if: github.event_name == 'push' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: make build
+
+      - name: Smoke-test container mode
+        env:
+          PULL_SECRET: ${{ secrets.PULL_SECRET }}
+        run: |
+          if [ -z "$PULL_SECRET" ]; then
+            echo "PULL_SECRET repository secret is not configured; skipping container smoke test"
+            exit 0
+          fi
+          secret="$RUNNER_TEMP/pull-secret"
+          printf '%s' "$PULL_SECRET" > "$secret"
+          export XDG_STATE_HOME="$RUNNER_TEMP/container-state"
+          export XDG_CACHE_HOME="$RUNNER_TEMP/container-cache"
+          ./coreshift create cluster --pull-secret "$secret" --version 4.22.19
+          state="$XDG_STATE_HOME/coreshift/api"
+          curl --fail --silent --show-error \
+            --cacert "$state/ca.crt" \
+            --cert "$state/admin.crt" \
+            --key "$state/admin.key" \
+            https://127.0.0.1:6443/api/v1/namespaces > /dev/null
+          ready=$(./coreshift get clusters | awk '$1 == "coreshift" { print $4 }')
+          test "$ready" = ready
+          ./coreshift delete cluster
+          test -d "$state"
