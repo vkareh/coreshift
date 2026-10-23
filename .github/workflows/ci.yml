@@ -84,7 +84,7 @@ jobs:
           export XDG_STATE_HOME="$RUNNER_TEMP/drift-state"
           export XDG_CACHE_HOME="$RUNNER_TEMP/drift-cache"
           log="$RUNNER_TEMP/drift.log"
-          ./coreshift api --pull-secret "$secret" --port 16443 >"$log" 2>&1 &
+          ./coreshift run cluster --pull-secret "$secret" --port 16443 >"$log" 2>&1 &
           pid=$!
           # Up to 45 minutes: a fresh cache means a full payload pull.
           for _ in {1..90}; do
