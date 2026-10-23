@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/pem"
@@ -868,13 +869,19 @@ func containerFailure(container, stateDir string, err error) error {
 // failure error includes, matching the supervisor's per-child tail.
 const containerLogTailLines = 20
 
-// containerLogTail returns the last lines of the container's log output.
+// containerLogTail returns the last lines of the container's log output,
+// standard error included: refusals land there.
 func containerLogTail(container string) string {
-	out, err := exec.Command("podman", "logs", container).Output()
-	if err != nil {
+	// Both streams go to one buffer; the command shares a single pipe
+	// for identical writers, so the copy is merged and race-free.
+	var out bytes.Buffer
+	cmd := exec.Command("podman", "logs", container)
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if cmd.Run() != nil && out.Len() == 0 {
 		return ""
 	}
-	return tailText(string(out), containerLogTailLines)
+	return tailText(out.String(), containerLogTailLines)
 }
 
 // stateConflictHint names the create-side remedies when the container's
