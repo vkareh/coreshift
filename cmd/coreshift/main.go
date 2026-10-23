@@ -4,20 +4,24 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
 	"io"
 	"io/fs"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -130,6 +134,7 @@ func newRootCommand() *cobra.Command {
 	}
 	root.AddCommand(newRunCommand())
 	root.AddCommand(newCreateCommand())
+	root.AddCommand(newGetCommand())
 	root.AddCommand(newCleanupCommand())
 	root.AddCommand(newVersionCommand())
 	return root
@@ -689,7 +694,7 @@ func runCreate(ctx context.Context, name string, port int, fresh bool, imagePath
 	if err != nil {
 		return err
 	}
-	container := "coreshift-" + name
+	container := clusterContainerPrefix + name
 	if err := refuseIfContainerExists(container); err != nil {
 		return err
 	}
@@ -937,6 +942,196 @@ func tailText(text string, lines int) string {
 		all = all[len(all)-lines:]
 	}
 	return strings.Join(all, "\n")
+}
+
+// clusterContainerPrefix prepends a cluster's name to name its container.
+const clusterContainerPrefix = "coreshift-"
+
+// newGetCommand builds the parent of everything gettable. It takes a noun
+// naming what to get; with no noun, or an unknown one, it prints the list
+// and fails.
+func newGetCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "get",
+		Short: "Get CoreShift-managed things",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := cmd.Help(); err != nil {
+				return err
+			}
+			if len(args) == 0 {
+				return nil
+			}
+			return fmt.Errorf("unknown thing to get: %s", args[0])
+		},
+	}
+	cmd.AddCommand(newGetClustersCommand())
+	cmd.AddCommand(newGetKubeconfigCommand())
+	return cmd
+}
+
+// newGetClustersCommand builds the command that lists the clusters with
+// their name, published port, recorded release, and readiness.
+func newGetClustersCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:          "clusters",
+		Short:        "List clusters",
+		SilenceUsage: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runGetClusters()
+		},
+	}
+}
+
+// runGetClusters lists the clusters. Readiness is a live probe of each
+// cluster's API server, not the container's running state, so a booting
+// or wedged cluster shows as not ready.
+func runGetClusters() error {
+	if _, err := exec.LookPath("podman"); err != nil {
+		return fmt.Errorf("podman is required to list clusters: %w", err)
+	}
+	containers, err := clusterContainers()
+	if err != nil {
+		return err
+	}
+	if len(containers) == 0 {
+		fmt.Println("No clusters")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(w, "NAME\tPORT\tRELEASE\tREADY")
+	for _, container := range containers {
+		name := strings.TrimPrefix(container, clusterContainerPrefix)
+		port, err := containerPort(container)
+		if err != nil {
+			return err
+		}
+		stateDir, err := apiStateDir(port)
+		if err != nil {
+			return err
+		}
+		release := stateRelease(stateDir)
+		if release == "" {
+			release = "-"
+		}
+		ready := "not ready"
+		if clusterReady(port) {
+			ready = "ready"
+		}
+		fmt.Fprintf(w, "%s\t%d\t%s\t%s\n", name, port, release, ready)
+	}
+	return w.Flush()
+}
+
+// newGetKubeconfigCommand builds the command that prints the path to a
+// cluster's admin kubeconfig.
+func newGetKubeconfigCommand() *cobra.Command {
+	var name string
+	cmd := &cobra.Command{
+		Use:          "kubeconfig",
+		Short:        "Print the path to a cluster's admin kubeconfig",
+		SilenceUsage: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runGetKubeconfig(name)
+		},
+	}
+	cmd.Flags().StringVar(&name, "name", "coreshift", "name of the cluster")
+	return cmd
+}
+
+// runGetKubeconfig prints the path to the named cluster's admin
+// kubeconfig.
+func runGetKubeconfig(name string) error {
+	if _, err := exec.LookPath("podman"); err != nil {
+		return fmt.Errorf("podman is required to find a cluster's kubeconfig: %w", err)
+	}
+	stateDir, err := clusterStateDir(name)
+	if err != nil {
+		return err
+	}
+	fmt.Println(filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
+	return nil
+}
+
+// clusterContainers returns the names of the cluster containers, sorted:
+// every container named coreshift-* is one.
+func clusterContainers() ([]string, error) {
+	out, err := exec.Command("podman", "ps", "-a", "--format", "{{.Names}}").Output()
+	if err != nil {
+		return nil, fmt.Errorf("list containers: %w", err)
+	}
+	var containers []string
+	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.HasPrefix(name, clusterContainerPrefix) {
+			containers = append(containers, name)
+		}
+	}
+	slices.Sort(containers)
+	return containers, nil
+}
+
+// clusterStateDir returns the named cluster's state directory, refusing
+// when no cluster with that name exists. The port the cluster's container
+// publishes decides the directory, the same resolution every other
+// command uses.
+func clusterStateDir(name string) (string, error) {
+	container := clusterContainerPrefix + name
+	if exec.Command("podman", "container", "exists", container).Run() != nil {
+		return "", fmt.Errorf("no cluster named %s", name)
+	}
+	port, err := containerPort(container)
+	if err != nil {
+		return "", err
+	}
+	return apiStateDir(port)
+}
+
+// containerPort returns the port a cluster container publishes its API
+// on. The create command publishes it as an identity mapping, so the host
+// port is the port the cluster runs on.
+func containerPort(container string) (int, error) {
+	out, err := exec.Command("podman", "inspect", "--format",
+		"{{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{.HostPort}}{{end}}{{end}}",
+		container).Output()
+	if err != nil {
+		return 0, fmt.Errorf("inspect container %s: %w", container, err)
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, fmt.Errorf("read %s's published port: %w", container, err)
+	}
+	return port, nil
+}
+
+// stateRelease returns the release image reference recorded in a state
+// directory, or an empty string when it records none.
+func stateRelease(stateDir string) string {
+	release, err := os.ReadFile(filepath.Join(stateDir, releaseMarkerFilename))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(release))
+}
+
+// readyProbeTimeout bounds the readiness probe of a cluster's API server.
+const readyProbeTimeout = 3 * time.Second
+
+// clusterReady reports whether a cluster's API server answers its health
+// endpoint. The probe is live with a short timeout, so a booting or
+// wedged control plane shows as not ready whatever its container's
+// running state says. TLS is not verified: reaching a healthy API server
+// is the question, not whose certificate it serves.
+func clusterReady(port int) bool {
+	client := &http.Client{
+		Timeout: readyProbeTimeout,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+	}
+	resp, err := client.Get(apiServerURL(port) + "/healthz")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode == http.StatusOK
 }
 
 // newCleanupCommand builds the command that removes CoreShift's on-disk
