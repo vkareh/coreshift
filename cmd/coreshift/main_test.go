@@ -9,10 +9,12 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -418,7 +420,7 @@ func TestRootWithoutArgumentsPrintsHelp(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"run", "cleanup", "version"} {
+	for _, want := range []string{"run", "create", "cleanup", "version"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("help missing %q:\n%s", want, out.String())
 		}
@@ -455,6 +457,140 @@ func TestRunUnknownNounPrintsHelp(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "cluster") {
 		t.Fatalf("run help missing the cluster noun:\n%s", out.String())
+	}
+}
+
+// TestCreateWithoutNounPrintsHelp checks that bare create prints the list
+// of creatable things and succeeds.
+func TestCreateWithoutNounPrintsHelp(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand()
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"create"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "cluster") {
+		t.Fatalf("create help missing the cluster noun:\n%s", out.String())
+	}
+}
+
+// TestCreateUnknownNounPrintsHelp checks that an unknown noun fails after
+// printing the list of creatable things.
+func TestCreateUnknownNounPrintsHelp(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand()
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"create", "bogus"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("err = %v, want the unknown noun refused", err)
+	}
+	if !strings.Contains(out.String(), "cluster") {
+		t.Fatalf("create help missing the cluster noun:\n%s", out.String())
+	}
+}
+
+// TestCreateCommandFlagDefaults checks that the creation flags are
+// accepted and come with the documented defaults.
+func TestCreateCommandFlagDefaults(t *testing.T) {
+	hostArch, err := releaseArch(runtime.GOARCH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := newCreateClusterCommand()
+	for name, want := range map[string]string{
+		"name":          "coreshift",
+		"image":         "",
+		"port":          "6443",
+		"fresh":         "false",
+		"registry":      "quay.io/openshift-release-dev/ocp-release",
+		"arch":          hostArch,
+		"release-image": "",
+		"version":       "",
+	} {
+		if flag := cmd.Flags().Lookup(name); flag == nil {
+			t.Fatalf("flag --%s is not defined", name)
+		} else if flag.DefValue != want {
+			t.Fatalf("--%s default = %q, want %q", name, flag.DefValue, want)
+		}
+	}
+}
+
+// TestPodmanRunArgs checks the podman command line that starts a cluster
+// container: the loopback identity mapping for the API port, the XDG
+// environment pointing at the bind-mounted state and cache roots, the
+// read-only pull secret, and the release flags and port passed through to
+// the run inside.
+func TestPodmanRunArgs(t *testing.T) {
+	release := releaseOptions{
+		image:    "reg.example/ocp-release:4.22.8-x86_64",
+		registry: "quay.io/openshift-release-dev/ocp-release",
+		arch:     "x86_64",
+	}
+	got := podmanRunArgs("coreshift-dev", 7443, "/state/root", "/cache/root", "/secret/pull-secret", "localhost/coreshift:v1", release)
+	want := []string{
+		"run", "--detach",
+		"--name", "coreshift-dev",
+		"--publish", "127.0.0.1:7443:7443",
+		"--env", "XDG_STATE_HOME=/var/lib/coreshift/state",
+		"--env", "XDG_CACHE_HOME=/var/lib/coreshift/cache",
+		"--volume", "/state/root:/var/lib/coreshift/state/coreshift:z",
+		"--volume", "/cache/root:/var/lib/coreshift/cache/coreshift:z",
+		"--volume", "/secret/pull-secret:/etc/coreshift/pull-secret:ro,z",
+		"localhost/coreshift:v1",
+		"--pull-secret=/etc/coreshift/pull-secret",
+		"--port=7443",
+		"--release-image=reg.example/ocp-release:4.22.8-x86_64",
+		"--version=",
+		"--registry=quay.io/openshift-release-dev/ocp-release",
+		"--arch=x86_64",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("podman args = %q\nwant %q", got, want)
+	}
+}
+
+// TestRefuseIfPortBusy checks that a port something already listens on is
+// refused, naming the port.
+func TestRefuseIfPortBusy(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listener.Close() })
+	port := listener.Addr().(*net.TCPAddr).Port
+
+	err = refuseIfPortBusy(port)
+	if err == nil || !strings.Contains(err.Error(), strconv.Itoa(port)) {
+		t.Fatalf("err = %v, want a refusal naming port %d", err, port)
+	}
+}
+
+// TestStateConflictHint checks that a container log showing the state
+// directory refusing reuse gains the create-side remedies, and that an
+// ordinary failure gains none.
+func TestStateConflictHint(t *testing.T) {
+	refusal := "Error: state directory /state/api was created by release 4.22.8 and cannot be reused by 4.19.3"
+	hint := stateConflictHint(refusal)
+	for _, want := range []string{"--fresh", "--port"} {
+		if !strings.Contains(hint, want) {
+			t.Fatalf("hint = %q, want it to name %s", hint, want)
+		}
+	}
+	if hint := stateConflictHint("Error: etcd exited: boom"); hint != "" {
+		t.Fatalf("hint = %q, want none for an ordinary failure", hint)
+	}
+}
+
+func TestTailText(t *testing.T) {
+	if got := tailText("a\nb\nc\n", 2); got != "b\nc" {
+		t.Fatalf("tailText = %q, want the last two lines", got)
+	}
+	if got := tailText("a\n", 5); got != "a" {
+		t.Fatalf("tailText = %q, want all of a short text", got)
 	}
 }
 
