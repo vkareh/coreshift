@@ -75,6 +75,24 @@ func TestExtractCachedRejectsInvalidReference(t *testing.T) {
 	}
 }
 
+// TestCacheRootEmptyVariableStaysBelowHome pins the default location:
+// an empty XDG cache variable counts as unset by the base-directory
+// convention, so the cache root stays where existing installs keep it,
+// below the home directory.
+func TestCacheRootEmptyVariableStaysBelowHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", "")
+
+	got, err := CacheRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, ".cache", "coreshift"); got != want {
+		t.Fatalf("cache root = %q, want %q", got, want)
+	}
+}
+
 // cacheRootForTest returns the cache root expected for the current
 // XDG_CACHE_HOME, mirroring cacheRoot without its error handling.
 func cacheRootForTest(t *testing.T) string {
