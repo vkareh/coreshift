@@ -359,6 +359,72 @@ func TestIsControlPlaneArgs(t *testing.T) {
 	}
 }
 
+// TestRootWithoutArgumentsPrintsHelp checks that bare coreshift prints
+// the command list instead of running anything.
+func TestRootWithoutArgumentsPrintsHelp(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand()
+	root.SetOut(&out)
+	root.SetErr(&out)
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"run", "cleanup", "version"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("help missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+// TestRunWithoutNounPrintsHelp checks that bare run prints the list of
+// runnable things and succeeds.
+func TestRunWithoutNounPrintsHelp(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand()
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"run"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "cluster") {
+		t.Fatalf("run help missing the cluster noun:\n%s", out.String())
+	}
+}
+
+// TestRunUnknownNounPrintsHelp checks that an unknown noun fails after
+// printing the list of runnable things.
+func TestRunUnknownNounPrintsHelp(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand()
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"run", "bogus"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("err = %v, want the unknown noun refused", err)
+	}
+	if !strings.Contains(out.String(), "cluster") {
+		t.Fatalf("run help missing the cluster noun:\n%s", out.String())
+	}
+}
+
+// TestVersionCommandPrintsVersion checks that the version subcommand
+// prints the version the binary was built with.
+func TestVersionCommandPrintsVersion(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand()
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"version"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(out.String()); got != version {
+		t.Fatalf("version output = %q, want %q", got, version)
+	}
+}
+
 // TestClusterCommandResolutionFlagDefaults checks that the release
 // resolution flags are accepted and come with the documented defaults.
 func TestClusterCommandResolutionFlagDefaults(t *testing.T) {
