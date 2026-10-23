@@ -1122,7 +1122,7 @@ const readyProbeTimeout = 3 * time.Second
 // is the question, not whose certificate it serves.
 func clusterReady(port int) bool {
 	client := &http.Client{
-		Timeout: readyProbeTimeout,
+		Timeout:   readyProbeTimeout,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 	}
 	resp, err := client.Get(apiServerURL(port) + "/healthz")
