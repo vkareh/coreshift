@@ -31,6 +31,7 @@ import (
 	"github.com/vkareh/coreshift/internal/scc"
 	"github.com/vkareh/coreshift/internal/supervisor"
 	"github.com/vkareh/coreshift/pkg/image"
+	"golang.org/x/term"
 	clientcmd "k8s.io/client-go/tools/clientcmd"
 )
 
@@ -1253,11 +1254,11 @@ func parseYesNo(answer string) bool {
 }
 
 // stdinIsTerminal reports whether standard input is an interactive
-// terminal. Pipes and redirected files answer no, so scripts never see
-// a prompt.
+// terminal. Pipes and character devices such as the null device that
+// detached containers wire to standard input answer no, so scripts and
+// containers never see a prompt.
 func stdinIsTerminal() bool {
-	info, err := os.Stdin.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // ensureCertificates generates the certificate and kubeconfig set into
