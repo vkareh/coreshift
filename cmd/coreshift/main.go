@@ -79,6 +79,20 @@ const (
 // defaultAPIPort is the port the API server listens on unless overridden.
 const defaultAPIPort = 6443
 
+// containerEnv marks execution inside the minted container image, whose
+// Containerfile sets it.
+const containerEnv = "CORESHIFT_CONTAINER"
+
+// apiBindAddress is the address the API server listens on: every
+// interface inside a container, where a published port must reach it,
+// and loopback only on the host.
+func apiBindAddress() string {
+	if os.Getenv(containerEnv) != "" {
+		return "0.0.0.0"
+	}
+	return "127.0.0.1"
+}
+
 // apiServerURL returns the endpoint clients use to reach the API server
 // listening on the given port.
 func apiServerURL(port int) string {
@@ -311,8 +325,8 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 			Path: kubeBinaries["kube-apiserver"],
 			Args: []string{
 				"--etcd-servers=http://127.0.0.1:2379",
-				"--secure-port=" + strconv.Itoa(port),
-				"--bind-address=127.0.0.1",
+			"--secure-port=" + strconv.Itoa(port),
+			"--bind-address=" + apiBindAddress(),
 				"--tls-cert-file=" + filepath.Join(stateDir, certgen.APIServerCertFilename),
 				"--tls-private-key-file=" + filepath.Join(stateDir, certgen.APIServerKeyFilename),
 				"--client-ca-file=" + filepath.Join(stateDir, certgen.CACertFilename),
@@ -1216,7 +1230,7 @@ func writeKubeAPIServerConfig(stateDir, oauthMetadataFile string, port int) (str
   "apiVersion": "kubecontrolplane.config.openshift.io/v1",
   "kind": "KubeAPIServerConfig",
   "servingInfo": {
-    "bindAddress": "127.0.0.1:%d"
+    "bindAddress": "%s:%d"
   },
   "servicesSubnet": "172.30.0.0/16",
   "serviceAccountPublicKeyFiles": [
@@ -1226,7 +1240,7 @@ func writeKubeAPIServerConfig(stateDir, oauthMetadataFile string, port int) (str
     "oauthMetadataFile": %q
   }
 }
-`, port, filepath.Join(stateDir, certgen.SAPubFilename), oauthMetadataFile)
+`, apiBindAddress(), port, filepath.Join(stateDir, certgen.SAPubFilename), oauthMetadataFile)
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		return "", fmt.Errorf("write kube-apiserver config: %w", err)
 	}

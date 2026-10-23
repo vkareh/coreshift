@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -173,6 +174,36 @@ func TestGeneratedFilesFollowAPIPort(t *testing.T) {
 	}
 	if config := string(readFile(t, stateDir, "kube-apiserver-config.json")); !strings.Contains(config, fmt.Sprintf("127.0.0.1:%d", port)) {
 		t.Fatalf("kube-apiserver config does not follow the port:\n%s", config)
+	}
+}
+
+// TestKubeAPIServerConfigBindsAllInterfacesInContainer checks that the
+// API server's serving address follows where it runs: every interface
+// inside a container, so a published port reaches it, and loopback only
+// on the host.
+func TestKubeAPIServerConfigBindsAllInterfacesInContainer(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv(containerEnv, "1")
+
+	if _, err := writeKubeAPIServerConfig(stateDir, filepath.Join(stateDir, "oauth-metadata.json"), defaultAPIPort); err != nil {
+		t.Fatal(err)
+	}
+	if config := string(readFile(t, stateDir, "kube-apiserver-config.json")); !strings.Contains(config, "0.0.0.0:"+strconv.Itoa(defaultAPIPort)) {
+		t.Fatalf("kube-apiserver config does not bind all interfaces:\n%s", config)
+	}
+}
+
+// TestKubeAPIServerConfigBindsLoopbackOnHost checks that host mode, with
+// the container variable unset, keeps binding loopback only.
+func TestKubeAPIServerConfigBindsLoopbackOnHost(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv(containerEnv, "")
+
+	if _, err := writeKubeAPIServerConfig(stateDir, filepath.Join(stateDir, "oauth-metadata.json"), defaultAPIPort); err != nil {
+		t.Fatal(err)
+	}
+	if config := string(readFile(t, stateDir, "kube-apiserver-config.json")); !strings.Contains(config, "127.0.0.1:"+strconv.Itoa(defaultAPIPort)) {
+		t.Fatalf("kube-apiserver config does not bind loopback:\n%s", config)
 	}
 }
 
