@@ -8,17 +8,17 @@ openshift-apiserver, oauth-apiserver, oauth-server,
 openshift-controller-manager, cluster-policy-controller) is built from real,
 version-matched upstream OpenShift components, not reimplementations.
 
-CoreShift ships two ways to get a real control plane running: `coreshift api`,
-a bare-process mode with no container runtime dependency, fast to boot,
-control-plane-only — and `coreshift up`, a podman-based mode running the full
-stack including a real joined worker, CNI, DNS, and ingress. Both are backed by
-convenience up/down/status commands that apply, wait for the API to become
-healthy, and tear down — useful for CI pipelines and local development where
-a quick, disposable, real OpenShift API is needed for validation (RBAC/SCC
-checks, API compatibility testing, admission/defaulting behavior) without the
-cost and complexity of a full cluster.
+CoreShift ships two ways to get a real control plane running: `coreshift
+run cluster`, a bare-process mode with no container runtime dependency, fast to
+boot, control-plane-only — and `coreshift up`, a podman-based mode running the
+full stack including a real joined worker, CNI, DNS, and ingress. Both are
+backed by convenience up/down/status commands that apply, wait for the API to
+become healthy, and tear down — useful for CI pipelines and local development
+where a quick, disposable, real OpenShift API is needed for validation
+(RBAC/SCC checks, API compatibility testing, admission/defaulting behavior)
+without the cost and complexity of a full cluster.
 
-| | `coreshift api` | `coreshift up` (podman) |
+| | `coreshift run cluster` | `coreshift up` (podman) |
 |---|---|---|
 | Control plane | Real | Real |
 | RBAC/SCC/admission | Real | Real |
@@ -31,9 +31,10 @@ cost and complexity of a full cluster.
 `coreshift render` sits underneath both — a scope-agnostic YAML artifact usable
 by podman, kubectl, or other tooling.
 
-## The `api` command
+## The `run cluster` command
 
-`coreshift api` runs a real OpenShift control plane as ordinary processes on
+`coreshift run cluster` runs a real OpenShift control plane as ordinary
+processes on
 the host. The component binaries are extracted from a real upstream OpenShift
 release image and started directly — no containers, no cluster install. etcd,
 kube-apiserver, kube-controller-manager, and kube-scheduler run alongside the
@@ -55,7 +56,7 @@ the host is modified outside the directories listed below.
 
 ```
 make build
-./coreshift api --pull-secret ~/pull-secret
+./coreshift run cluster --pull-secret ~/pull-secret
 ```
 
 The first run pulls the release image and its component images; later runs
@@ -154,7 +155,7 @@ One honest caveat: in a full cluster the authentication operator watches the
 OAuth object and rolls the OAuth server live when it changes. Here the
 identity providers are rendered into the OAuth server at startup, so changes
 take effect on the next restart. Once the objects above are in place, restart
-`coreshift api`, then log in with the command from the ready summary:
+`coreshift run cluster`, then log in with the command from the ready summary:
 
 ```
 oc login https://127.0.0.1:6443 --certificate-authority=/home/you/.local/state/coreshift/api/ca.crt -u developer -p password
@@ -167,21 +168,21 @@ of them set, the newest stable release for the machine's architecture is
 resolved from the registry:
 
 ```
-./coreshift api --pull-secret ~/pull-secret
+./coreshift run cluster --pull-secret ~/pull-secret
 ```
 
 `--version X.Y` pins a minor: the newest patch release of that stream is
 resolved.
 
 ```
-./coreshift api --pull-secret ~/pull-secret --version 4.22
+./coreshift run cluster --pull-secret ~/pull-secret --version 4.22
 ```
 
 Pinning exact comes in two strengths. `--version X.Y.Z` resolves exactly
 that version from the registry:
 
 ```
-./coreshift api --pull-secret ~/pull-secret --version 4.22.8
+./coreshift run cluster --pull-secret ~/pull-secret --version 4.22.8
 ```
 
 `--release-image` pins the image reference itself and skips all registry
@@ -190,14 +191,14 @@ reproducible bit for bit, or when the registry cannot be reached for
 resolution:
 
 ```
-./coreshift api --pull-secret ~/pull-secret --release-image quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64
+./coreshift run cluster --pull-secret ~/pull-secret --release-image quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64
 ```
 
 `--registry` resolves from a private mirror, any v2-compliant repository,
 instead of the default `quay.io/openshift-release-dev/ocp-release`:
 
 ```
-./coreshift api --pull-secret ~/pull-secret --registry mirror.corp.example/openshift-release-dev/ocp-release
+./coreshift run cluster --pull-secret ~/pull-secret --registry mirror.corp.example/openshift-release-dev/ocp-release
 ```
 
 `--arch` defaults to the machine's architecture, as `uname -m` reports it;
@@ -205,14 +206,21 @@ pass e.g. `--arch aarch64` to resolve a payload for another architecture.
 It combines freely with `--version` and `--registry`. The startup output
 names the release image the run resolved.
 
-### `api` or `up`
+### `cluster` or `up`
 
-The comparison table above is the short answer. Use `api` when an OpenShift
-API is what you need — CI gating, PR checks, and operator dev loops — where
-its bare-process, seconds-to-boot nature is the fit. Use `up`, the
-container-based mode, when workloads have to actually run against a real
-node, CNI, DNS, and ingress. If the question is only "does it behave like
-OpenShift at the API level," `api` answers it faster and cheaper.
+The comparison table above is the short answer. Use `run cluster` when an
+OpenShift API is what you need — CI gating, PR checks, and operator dev
+loops — where its bare-process, seconds-to-boot nature is the fit. Use `up`,
+the container-based mode, when workloads have to actually run against a
+real node, CNI, DNS, and ingress. If the question is only "does it behave
+like OpenShift at the API level," `run cluster` answers it faster and
+cheaper.
+
+## The `version` command
+
+`coreshift version` prints the version the binary was built with, derived
+from git at build time. The container image minted from the binary is
+tagged with the same string.
 
 ## The `cleanup` command
 
