@@ -1,0 +1,16 @@
+# The base is pinned by digest. It must run the control plane binaries,
+# which are dynamically linked against glibc, and carry CA certificates
+# so the run inside the container can pull the release payload from its
+# registry; this is the smallest generally-available image doing both.
+# README.md records the candidates that were ruled out.
+FROM gcr.io/distroless/cc-debian12@sha256:e5d81ddde149641e2a9ba55be4545bc125c67de07508b03ba4c22e6eb0ded5aa
+
+# The running binary is the only file the build context carries; the
+# gpgme libraries it needs are embedded in it and written out at boot.
+COPY coreshift /usr/local/bin/coreshift
+
+# Marks in-container execution: the API server binds every interface so
+# a published port reaches it.
+ENV CORESHIFT_CONTAINER=1
+
+ENTRYPOINT ["/usr/local/bin/coreshift", "run", "cluster"]
