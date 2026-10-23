@@ -832,10 +832,12 @@ func TestOfferFreshStartWithoutTerminal(t *testing.T) {
 	}
 }
 
-// TestOfferFreshStartDeclinesOnEOF checks that an interactive question
-// cut short, such as by Ctrl-D, counts as no. The null device passes the
-// terminal check but answers EOF.
-func TestOfferFreshStartDeclinesOnEOF(t *testing.T) {
+// TestOfferFreshStartWithoutTerminalOnNullDevice checks that the null
+// device counts as no terminal although it is a character device:
+// detached containers wire it to standard input, and a refusing run
+// inside one must take the scripted path instead of printing a question
+// nobody can answer into its log.
+func TestOfferFreshStartWithoutTerminalOnNullDevice(t *testing.T) {
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -844,8 +846,14 @@ func TestOfferFreshStartDeclinesOnEOF(t *testing.T) {
 	swapStdin(t, devNull)
 
 	refusal := fmt.Errorf("state directory cannot be reused")
-	if err := offerFreshStart(t.TempDir(), defaultAPIPort, refusal); err != refusal {
-		t.Fatalf("err = %v, want the refusal unchanged", err)
+	err = offerFreshStart("/state/api", 7443, refusal)
+	if err == nil {
+		t.Fatal("expected a refusal without a terminal")
+	}
+	for _, want := range []string{"state directory cannot be reused", "coreshift cleanup --port 7443"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal missing %q:\n%v", want, err)
+		}
 	}
 }
 

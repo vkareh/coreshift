@@ -5,6 +5,7 @@ go 1.24
 require (
 	github.com/google/go-containerregistry v0.20.6
 	github.com/spf13/cobra v1.10.1
+	golang.org/x/term v0.21.0
 	k8s.io/api v0.31.9
 	k8s.io/apiextensions-apiserver v0.31.9
 	k8s.io/apimachinery v0.31.9
@@ -56,7 +57,6 @@ require (
 	golang.org/x/oauth2 v0.30.0 // indirect
 	golang.org/x/sync v0.15.0 // indirect
 	golang.org/x/sys v0.33.0 // indirect
-	golang.org/x/term v0.21.0 // indirect
 	golang.org/x/text v0.16.0 // indirect
 	golang.org/x/time v0.3.0 // indirect
 	google.golang.org/protobuf v1.36.3 // indirect
