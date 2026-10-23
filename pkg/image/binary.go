@@ -9,29 +9,17 @@ import (
 )
 
 // ExtractBinary copies binaryPath from an unpacked image filesystem into
-// targetDirectory. Optional extra library paths are copied into the same
-// directory, providing an extension point for binaries with non-host
-// dependencies.
-func ExtractBinary(filesystemRoot, binaryPath, targetDirectory string, extraLibraries ...[]string) error {
-	if len(extraLibraries) > 1 {
-		return fmt.Errorf("at most one extra library list is supported")
-	}
+// targetDirectory.
+func ExtractBinary(filesystemRoot, binaryPath, targetDirectory string) error {
 	if err := os.MkdirAll(targetDirectory, 0o755); err != nil {
 		return fmt.Errorf("create target directory: %w", err)
 	}
-
-	paths := []string{binaryPath}
-	if len(extraLibraries) == 1 {
-		paths = append(paths, extraLibraries[0]...)
+	source, err := imagePath(filesystemRoot, binaryPath)
+	if err != nil {
+		return err
 	}
-	for _, sourcePath := range paths {
-		source, err := imagePath(filesystemRoot, sourcePath)
-		if err != nil {
-			return err
-		}
-		if err := copyFile(source, filepath.Join(targetDirectory, filepath.Base(sourcePath))); err != nil {
-			return fmt.Errorf("extract %q: %w", sourcePath, err)
-		}
+	if err := copyFile(source, filepath.Join(targetDirectory, filepath.Base(binaryPath))); err != nil {
+		return fmt.Errorf("extract %q: %w", binaryPath, err)
 	}
 	return nil
 }

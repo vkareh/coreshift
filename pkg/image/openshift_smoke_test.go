@@ -5,8 +5,9 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"testing"
+
+	"github.com/vkareh/coreshift/internal/gpgme"
 )
 
 // TestExtractOpenShiftComponentsSmoke resolves each OpenShift API layer
@@ -58,12 +59,16 @@ func TestExtractOpenShiftComponentsSmoke(t *testing.T) {
 	if len(binaries) != len(openshiftComponents) {
 		t.Fatalf("got %d binaries, want %d", len(binaries), len(openshiftComponents))
 	}
+	// openshift-controller-manager links beyond glibc; the gpgme
+	// libraries are embedded in the binary, written out here, and the
+	// loader is pointed there.
+	gpgmeDir := t.TempDir()
+	if err := gpgme.Ensure(gpgmeDir); err != nil {
+		t.Fatal(err)
+	}
 	for component, path := range binaries {
-		// openshift-controller-manager links beyond glibc; its bundled
-		// shared libraries are extracted next to the binary, so the
-		// loader is pointed there.
 		cmd := exec.Command(path, "--help")
-		cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH="+filepath.Dir(path))
+		cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH="+gpgmeDir)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("%s --help: %v\n%s", component, err, out)
 		}
