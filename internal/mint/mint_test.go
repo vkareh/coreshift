@@ -41,7 +41,10 @@ func TestBuildContextWritesBinaryAndContainerfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"FROM gcr.io/distroless/cc-debian12@sha256:",
+		"FROM registry.access.redhat.com/ubi10/ubi-minimal@sha256:",
+		"FROM registry.access.redhat.com/ubi10/ubi-micro@sha256:",
+		"COPY --from=certificates /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+		"ENV SSL_CERT_FILE=",
 		"COPY coreshift /usr/local/bin/coreshift",
 		"ENV CORESHIFT_CONTAINER=1",
 		`ENTRYPOINT ["/usr/local/bin/coreshift", "run", "cluster"]`,
