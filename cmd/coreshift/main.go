@@ -28,7 +28,9 @@ import (
 	clientcmd "k8s.io/client-go/tools/clientcmd"
 )
 
-var version = "dev"
+// version is the binary's version, set at build time from git; it tags
+// the container images built from the binary.
+var version = "unknown"
 
 // defaultReleaseRepository is the repository the release image is
 // resolved from unless an exact image is pinned.
@@ -101,16 +103,48 @@ var aggregatedServers = []aggregation.Server{
 
 func newRootCommand() *cobra.Command {
 	root := &cobra.Command{
-		Use:     "coreshift",
-		Short:   "Run a lightweight OpenShift control plane",
-		Version: version,
+		Use:   "coreshift",
+		Short: "Run a lightweight OpenShift control plane",
 	}
-	root.AddCommand(newAPICommand())
+	root.AddCommand(newRunCommand())
 	root.AddCommand(newCleanupCommand())
+	root.AddCommand(newVersionCommand())
 	return root
 }
 
-func newAPICommand() *cobra.Command {
+// newRunCommand builds the parent of everything runnable. It takes a
+// noun naming what to run; today only cluster exists. With no noun, or
+// an unknown one, it prints the list and fails.
+func newRunCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "run",
+		Short: "Run a CoreShift-managed thing",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.Help()
+			if len(args) == 0 {
+				return nil
+			}
+			return fmt.Errorf("unknown thing to run: %s", args[0])
+		},
+	}
+	cmd.AddCommand(newClusterCommand())
+	return cmd
+}
+
+// newVersionCommand builds the command that prints the version the
+// binary was built with. Container images built from the binary are
+// tagged with it, so it comes from a variable set at build time.
+func newVersionCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print the CoreShift version",
+		Run: func(_ *cobra.Command, _ []string) {
+			fmt.Println(version)
+		},
+	}
+}
+
+func newClusterCommand() *cobra.Command {
 	var pullSecretPath string
 	var port int
 	var verbose bool
@@ -122,7 +156,7 @@ func newAPICommand() *cobra.Command {
 		panic(err)
 	}
 	cmd := &cobra.Command{
-		Use:   "api",
+		Use:   "cluster",
 		Short: "Run the OpenShift API control plane",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runAPI(cmd.Context(), pullSecretPath, port, verbose, release)
@@ -677,7 +711,7 @@ func isControlPlaneArgs(args []string, stateDir, cacheDir string) bool {
 	if len(args) == 0 {
 		return false
 	}
-	if filepath.Base(args[0]) == "coreshift" && len(args) > 1 && args[1] == "api" {
+	if filepath.Base(args[0]) == "coreshift" && len(args) > 2 && args[1] == "run" && args[2] == "cluster" {
 		return true
 	}
 	for _, arg := range args {
