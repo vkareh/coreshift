@@ -12,32 +12,19 @@ import (
 // the kube components they do not share an image: each ships in its own
 // release component image, resolved by name.
 type openshiftComponent struct {
-	component      string
-	path           string
-	extraLibraries []string
+	component string
+	path      string
 }
 
 // openshiftComponents lists the OpenShift API layer components and their
-// binary paths inside their images, in extraction order.
-//
-// Most of these binaries link only against glibc, like the kube binaries.
-// openshift-controller-manager also links against the gpgme stack used for
-// image signature verification, so those libraries are copied alongside it
-// and it must run with LD_LIBRARY_PATH pointing at the extraction
-// directory.
+// binary paths inside their images, in extraction order. openshift-
+// controller-manager links against the gpgme libraries beyond glibc;
+// those are embedded in the coreshift binary instead of extracted here.
 var openshiftComponents = []openshiftComponent{
 	{component: "openshift-apiserver", path: "/usr/bin/openshift-apiserver"},
 	{component: "oauth-apiserver", path: "/usr/bin/oauth-apiserver"},
 	{component: "oauth-server", path: "/usr/bin/oauth-server"},
-	{
-		component: "openshift-controller-manager",
-		path:      "/usr/bin/openshift-controller-manager",
-		extraLibraries: []string{
-			"/usr/lib64/libgpgme.so.11",
-			"/usr/lib64/libgpg-error.so.0",
-			"/usr/lib64/libassuan.so.0",
-		},
-	},
+	{component: "openshift-controller-manager", path: "/usr/bin/openshift-controller-manager"},
 	{component: "cluster-policy-controller", path: "/usr/bin/cluster-policy-controller"},
 }
 
@@ -105,11 +92,11 @@ func (c *Client) extractOpenShiftComponent(ctx context.Context, releaseRoot stri
 	return filepath.Join(dir, filepath.Base(component.path)), nil
 }
 
-// extractOpenShiftBinary copies one component's binary, plus any shared
-// libraries it links beyond glibc, from its unpacked image filesystem into
-// targetDirectory and returns the extracted binary path.
+// extractOpenShiftBinary copies one component's binary from its unpacked
+// image filesystem into targetDirectory and returns the extracted binary
+// path.
 func extractOpenShiftBinary(component openshiftComponent, filesystemRoot, targetDirectory string) (string, error) {
-	if err := ExtractBinary(filesystemRoot, component.path, targetDirectory, component.extraLibraries); err != nil {
+	if err := ExtractBinary(filesystemRoot, component.path, targetDirectory); err != nil {
 		return "", fmt.Errorf("extract %s: %w", component.component, err)
 	}
 	return filepath.Join(targetDirectory, filepath.Base(component.path)), nil

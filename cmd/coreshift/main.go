@@ -19,6 +19,7 @@ import (
 	"github.com/vkareh/coreshift/internal/aggregation"
 	"github.com/vkareh/coreshift/internal/certgen"
 	"github.com/vkareh/coreshift/internal/crd"
+	"github.com/vkareh/coreshift/internal/gpgme"
 	"github.com/vkareh/coreshift/internal/oauth"
 	"github.com/vkareh/coreshift/internal/oauthclient"
 	"github.com/vkareh/coreshift/internal/rbac"
@@ -235,6 +236,10 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 		"openshift-apiserver", "oauth-apiserver", "oauth-server", "openshift-controller-manager", "cluster-policy-controller")
 	if err != nil {
 		return fmt.Errorf("extract openshift components: %w", err)
+	}
+	gpgmeDir, err := ensureGpgmeDir()
+	if err != nil {
+		return err
 	}
 
 	schedulerConfig, err := writeSchedulerConfig(stateDir)
@@ -493,9 +498,9 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 				"--kubeconfig=" + filepath.Join(stateDir, certgen.OpenShiftControllerManagerKubeconfigFilename),
 				"--namespace=default",
 			},
-			// The binary links against the gpgme libraries extracted
-			// alongside it in its cache directory.
-			Env: append(os.Environ(), "LD_LIBRARY_PATH="+filepath.Dir(openShiftBinaries["openshift-controller-manager"]), "POD_NAMESPACE=default"),
+			// The binary links against the gpgme libraries embedded in
+			// this binary and written into the image cache.
+			Env: append(os.Environ(), "LD_LIBRARY_PATH="+gpgmeDir, "POD_NAMESPACE=default"),
 		},
 		{
 			Name: "cluster-policy-controller",
@@ -526,6 +531,21 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 		},
 	}
 	return sup.Run(ctx, processes)
+}
+
+// ensureGpgmeDir writes the embedded gpgme libraries into the image
+// cache and returns their directory, which openshift-controller-manager
+// runs with as its library search path.
+func ensureGpgmeDir() (string, error) {
+	cacheRoot, err := image.CacheRoot()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(cacheRoot, "gpgme")
+	if err := gpgme.Ensure(dir); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 // prepareState writes the certificate set into stateDir and points the

@@ -36,32 +36,6 @@ func TestExtractBinary(t *testing.T) {
 	}
 }
 
-func TestExtractBinaryExtraLibraries(t *testing.T) {
-	filesystem := t.TempDir()
-	target := t.TempDir()
-	binary := filepath.Join(filesystem, "usr", "bin", "app")
-	library := filepath.Join(filesystem, "lib", "libexample.so")
-	if err := os.MkdirAll(filepath.Dir(binary), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(library), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(binary, []byte("binary"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(library, []byte("library"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := ExtractBinary(filesystem, "/usr/bin/app", target, []string{"/lib/libexample.so"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(target, "libexample.so")); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestExtractBinaryRejectsEscape(t *testing.T) {
 	if err := ExtractBinary(t.TempDir(), "../../etcd", t.TempDir()); err == nil {
 		t.Fatal("expected path escape error")

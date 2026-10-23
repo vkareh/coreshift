@@ -32,37 +32,24 @@ func writeImageFiles(t *testing.T, root string, paths ...string) {
 	}
 }
 
-func TestExtractOpenShiftBinaryCopiesExtraLibraries(t *testing.T) {
+func TestExtractOpenShiftBinaryLeavesLibrariesBehind(t *testing.T) {
 	root := t.TempDir()
 	writeImageFiles(t, root,
 		"/usr/bin/openshift-controller-manager",
 		"/usr/lib64/libgpgme.so.11",
-		"/usr/lib64/libgpg-error.so.0",
-		"/usr/lib64/libassuan.so.0",
 	)
 	target := t.TempDir()
 
-	path, err := extractOpenShiftBinary(findOpenShiftComponent(t, "openshift-controller-manager"), root, target)
-	if err != nil {
+	if _, err := extractOpenShiftBinary(findOpenShiftComponent(t, "openshift-controller-manager"), root, target); err != nil {
 		t.Fatal(err)
 	}
 
-	if want := filepath.Join(target, "openshift-controller-manager"); path != want {
-		t.Fatalf("path = %q, want %q", path, want)
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, name := range []string{
-		"openshift-controller-manager",
-		"libgpgme.so.11",
-		"libgpg-error.so.0",
-		"libassuan.so.0",
-	} {
-		content, err := os.ReadFile(filepath.Join(target, name))
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		if string(content) != name {
-			t.Fatalf("%s content = %q, want %q", name, content, name)
-		}
+	if len(entries) != 1 || entries[0].Name() != "openshift-controller-manager" {
+		t.Fatalf("target has %v, want only the binary; the gpgme libraries are embedded in the binary", entries)
 	}
 }
 
