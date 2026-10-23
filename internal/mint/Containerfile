@@ -1,9 +1,14 @@
-# The base is pinned by digest. It must run the control plane binaries,
-# which are dynamically linked against glibc, and carry CA certificates
-# so the run inside the container can pull the release payload from its
-# registry; this is the smallest generally-available image doing both.
-# README.md records the candidates that were ruled out.
-FROM gcr.io/distroless/cc-debian12@sha256:e5d81ddde149641e2a9ba55be4545bc125c67de07508b03ba4c22e6eb0ded5aa
+# The bases are pinned by digest and stay inside Red Hat's UBI family;
+# README.md records how they were chosen. The final stage is micro, the
+# smallest variant: it runs the control plane binaries, dynamically
+# linked against glibc, but ships no CA certificates, so the build
+# copies the bundle from the larger stage and points the standard SSL
+# environment variable at it; the Go binaries then trust the release
+# registry they pull from at run time.
+FROM registry.access.redhat.com/ubi10/ubi-minimal@sha256:ab67cd02caf8706e34a695a1432ebe965934f6128ec352a6c3f4048b43a4fb5e AS certificates
+FROM registry.access.redhat.com/ubi10/ubi-micro@sha256:1c105e547de5d9e0bc20d06ebabee73b20bc6bba994c50ae3e207684fd8bef2b
+COPY --from=certificates /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+ENV SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
 # The running binary is the only file the build context carries; the
 # gpgme libraries it needs are embedded in it and written out at boot.

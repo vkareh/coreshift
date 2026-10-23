@@ -233,21 +233,28 @@ entirely, while a rebuilt or dirty binary gets a fresh tag. Minting is a
 mechanism, not a command: the cluster-creation command of the podman
 mode calls it; until that arrives, it is driven by hand.
 
-The base image is `gcr.io/distroless/cc-debian12`, pinned by digest. Two
-things were required of it, and candidates were verified live rather
-than assumed. The control plane binaries are dynamically linked against
-glibc, so nothing can run in a from-scratch image, and alpine's musl
-runs none of the nine children either. The run inside the container also
-pulls the release payload from its registry, which needs CA certificates
-on top of glibc: busybox:glibc and ubi9/ubi-micro are smaller and run
-all nine children, but ship no certificates, so a run inside them cannot
-fetch its release. distroless cc-debian12 is the smallest
-generally-available image where all nine children run and release pulls
-work, proven by a control plane boot inside the minted image; the next
-bigger images carrying certificates, ubi9-minimal and fedora-minimal,
-are four to six times its size. The gpgme libraries
-openshift-controller-manager needs are embedded in the binary itself and
-written out at boot, so the image carries nothing but the binary.
+The image is built in two stages, both from Red Hat's UBI family and
+pinned by digest. The final stage is ubi10/ubi-micro, the micro variant
+of the latest UBI major line: the control plane binaries are dynamically
+linked against glibc, and RHEL 9-built binaries run on ubi10's newer
+glibc, verified live by running all nine children in the image rather
+than assumed. The micro variant ships no CA certificates, which is what
+once pushed the choice outside Red Hat's ecosystem to distroless
+cc-debian12: a run inside a micro UBI cannot pull its release payload,
+because the registry connection fails TLS. That gap is now closed
+inside the family instead: the build copies the CA bundle from a
+ubi10/ubi-minimal stage and points the standard SSL certificate
+environment variable at it, so the Go binaries doing registry pulls,
+the coreshift binary and the children alike, trust the registry. The
+bundle comes from the larger stage at mint time, so it stays current
+with nothing checked into the repository, while the final image keeps
+roughly the size of the distroless build, the binary dominating either
+way. The choice was proven by a control plane boot inside the minted
+image with a cold cache: the in-container release pull worked and the
+control plane reached ready through the published port. The gpgme
+libraries openshift-controller-manager needs are embedded in the binary
+itself and written out at boot, so the image carries nothing but the
+binary and the certificate bundle.
 
 ## The `cleanup` command
 
