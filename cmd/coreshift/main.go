@@ -134,6 +134,7 @@ func newRootCommand() *cobra.Command {
 	}
 	root.AddCommand(newRunCommand())
 	root.AddCommand(newCreateCommand())
+	root.AddCommand(newDeleteCommand())
 	root.AddCommand(newGetCommand())
 	root.AddCommand(newCleanupCommand())
 	root.AddCommand(newVersionCommand())
@@ -946,6 +947,77 @@ func tailText(text string, lines int) string {
 
 // clusterContainerPrefix prepends a cluster's name to name its container.
 const clusterContainerPrefix = "coreshift-"
+
+// newDeleteCommand builds the parent of everything deletable. It takes a
+// noun naming what to delete; today only cluster exists. With no noun, or
+// an unknown one, it prints the list and fails.
+func newDeleteCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete a CoreShift-managed thing",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := cmd.Help(); err != nil {
+				return err
+			}
+			if len(args) == 0 {
+				return nil
+			}
+			return fmt.Errorf("unknown thing to delete: %s", args[0])
+		},
+	}
+	cmd.AddCommand(newDeleteClusterCommand())
+	return cmd
+}
+
+// newDeleteClusterCommand builds the command that deletes a cluster: its
+// container is stopped, torn down in reverse order like a host-mode
+// shutdown, and removed, while its state directory is kept.
+func newDeleteClusterCommand() *cobra.Command {
+	var name string
+	cmd := &cobra.Command{
+		Use:          "cluster",
+		Short:        "Delete a cluster, stopping its container and keeping its state",
+		SilenceUsage: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runDelete(name)
+		},
+	}
+	cmd.Flags().StringVar(&name, "name", "coreshift", "name of the cluster to delete")
+	return cmd
+}
+
+// containerStopSeconds is how long the delete command's stop waits for
+// the container to exit after its stop signal. The signal triggers the
+// same reverse-order teardown host mode runs; a healthy one takes tens of
+// seconds, and the timeout only bounds a wedged container.
+const containerStopSeconds = 120
+
+// runDelete deletes a cluster: its container is stopped and removed. The
+// state directory is deliberately kept, because deleting a cluster
+// destroys nothing; data destruction belongs to the cleanup command
+// alone.
+func runDelete(name string) error {
+	if _, err := exec.LookPath("podman"); err != nil {
+		return fmt.Errorf("podman is required to delete clusters: %w", err)
+	}
+	stateDir, err := clusterStateDir(name)
+	if err != nil {
+		return err
+	}
+	container := clusterContainerPrefix + name
+	fmt.Printf("Stopping container %s\n", container)
+	stop := exec.Command("podman", "stop", "--timeout", strconv.Itoa(containerStopSeconds), container)
+	stop.Stderr = os.Stderr
+	if err := stop.Run(); err != nil {
+		return fmt.Errorf("stop container: %w", err)
+	}
+	if err := exec.Command("podman", "rm", container).Run(); err != nil {
+		return fmt.Errorf("remove container: %w", err)
+	}
+	fmt.Printf("Deleted cluster %s\n", name)
+	fmt.Printf("State kept at %s; coreshift cleanup removes it\n", stateDir)
+	return nil
+}
 
 // newGetCommand builds the parent of everything gettable. It takes a noun
 // naming what to get; with no noun, or an unknown one, it prints the list
