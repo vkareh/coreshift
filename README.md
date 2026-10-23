@@ -8,35 +8,49 @@ openshift-apiserver, oauth-apiserver, oauth-server,
 openshift-controller-manager, cluster-policy-controller) is built from real,
 version-matched upstream OpenShift components, not reimplementations.
 
-CoreShift ships two ways to get a real control plane running: `coreshift
-run cluster`, a bare-process mode with no container runtime dependency, fast to
-boot, control-plane-only — and `coreshift up`, a podman-based mode running the
-full stack including a real joined worker, CNI, DNS, and ingress. Both are
-backed by convenience up/down/status commands that apply, wait for the API to
-become healthy, and tear down — useful for CI pipelines and local development
-where a quick, disposable, real OpenShift API is needed for validation
-(RBAC/SCC checks, API compatibility testing, admission/defaulting behavior)
-without the cost and complexity of a full cluster.
+CoreShift runs the same real control plane two ways. `coreshift run
+cluster` runs it here in this terminal, as ordinary processes on the host,
+with no container runtime involved. `coreshift create cluster` runs it in
+a podman container that CoreShift builds, starts, and leaves running in
+the background. Both take the same release flags, both leave state that
+survives, and both give a quick, disposable, real OpenShift API for
+validation — RBAC/SCC checks, API compatibility testing, admission and
+defaulting behavior — without the cost and complexity of a full cluster.
 
-| | `coreshift run cluster` | `coreshift up` (podman) |
+The command names follow one rule: run means here in this terminal;
+create means in a managed container; delete removes the container and
+keeps the data; cleanup destroys the data.
+
+| | `coreshift run cluster` | `coreshift create cluster` |
 |---|---|---|
 | Control plane | Real | Real |
 | RBAC/SCC/admission | Real | Real |
-| Runtime dependency | None (bare process) | podman/docker |
-| Boot time | Seconds | Longer (real containers, real join) |
-| Workloads actually run | No | Yes |
-| Real node/CNI/DNS/ingress | No | Yes |
-| Best for | CI gating, PR checks, operator dev loop | Local dev, demos, "does it really work" |
+| Runtime dependency | None (bare processes) | podman |
+| Lifecycle | Foreground; Ctrl-C stops it | Background container; `delete cluster` stops it |
+| Several clusters at once | No (the components share fixed ports) | Yes; one per `--name` and `--port` |
+| Best for | Machines without a container runtime; CI gating, PR checks | Clusters that outlive the terminal; side-by-side clusters |
 
-`coreshift render` sits underneath both — a scope-agnostic YAML artifact usable
-by podman, kubectl, or other tooling.
+## The commands
+
+- `coreshift run cluster`: run the control plane in this terminal.
+- `coreshift create cluster`: run it in a managed container and wait for
+  it to be ready.
+- `coreshift delete cluster [--name]`: stop a cluster's container and
+  remove it, keeping the state.
+- `coreshift get clusters`: list the clusters with their port, release,
+  and live readiness.
+- `coreshift get kubeconfig [--name]`: print the path to a cluster's
+  admin kubeconfig.
+- `coreshift cleanup`: remove state directories and, with `--cache`, the
+  shared image cache.
+- `coreshift version`: print the version the binary was built with.
 
 ## The `run cluster` command
 
 `coreshift run cluster` runs a real OpenShift control plane as ordinary
-processes on
-the host. The component binaries are extracted from a real upstream OpenShift
-release image and started directly — no containers, no cluster install. etcd,
+processes on the host. The component binaries are extracted from a real
+upstream OpenShift release image and started directly — no containers, no
+cluster install. etcd,
 kube-apiserver, kube-controller-manager, and kube-scheduler run alongside the
 full OpenShift API layer: openshift-apiserver, oauth-apiserver, oauth-server,
 openshift-controller-manager, and cluster-policy-controller. Everything
@@ -155,7 +169,9 @@ One honest caveat: in a full cluster the authentication operator watches the
 OAuth object and rolls the OAuth server live when it changes. Here the
 identity providers are rendered into the OAuth server at startup, so changes
 take effect on the next restart. Once the objects above are in place, restart
-`coreshift run cluster`, then log in with the command from the ready summary:
+the control plane — `coreshift run cluster` again in host mode, or
+`coreshift delete cluster` followed by `coreshift create cluster` in container
+mode — then log in with the command from the ready summary:
 
 ```
 oc login https://127.0.0.1:6443 --certificate-authority=/home/you/.local/state/coreshift/api/ca.crt -u developer -p password
@@ -206,15 +222,150 @@ pass e.g. `--arch aarch64` to resolve a payload for another architecture.
 It combines freely with `--version` and `--registry`. The startup output
 names the release image the run resolved.
 
-### `cluster` or `up`
+`coreshift create cluster` takes the same four flags and passes them
+through to the run inside the container.
 
-The comparison table above is the short answer. Use `run cluster` when an
-OpenShift API is what you need — CI gating, PR checks, and operator dev
-loops — where its bare-process, seconds-to-boot nature is the fit. Use `up`,
-the container-based mode, when workloads have to actually run against a
-real node, CNI, DNS, and ingress. If the question is only "does it behave
-like OpenShift at the API level," `run cluster` answers it faster and
-cheaper.
+## The `create cluster` command
+
+`coreshift create cluster` runs the control plane in a container: it mints
+the container image from the running binary (or takes one with `--image`),
+starts a detached container named `coreshift-<name>`, streams the boot
+output while polling readiness from the host, and prints the same ready
+summary as host mode. The container keeps running in the background when
+the command returns; closing the terminal does not stop it. The API is
+published on `127.0.0.1:<port>` only, so exposing it to the network stays
+an explicit act.
+
+### Prerequisites
+
+- a Go toolchain (1.24 or newer) to build the `coreshift` binary
+- a registry pull secret: the JSON file from the Red Hat Hybrid Cloud
+  Console, with credentials for the release image registry
+- podman, which every container-mode command uses; docker is not
+  supported. When podman is missing, each command fails with a clear error
+  naming it, such as `podman is required to create clusters`.
+
+### Quickstart
+
+```
+make build
+./coreshift create cluster --pull-secret ~/pull-secret
+```
+
+The first create builds the container image, and a cold cache makes the
+container pull the whole release payload before booting, so the first run
+is slow; the readiness wait allows half an hour for it. When the control
+plane is ready, the summary matches host mode plus one line:
+
+```
+Control plane ready
+  API endpoint: https://127.0.0.1:6443
+  Kubeconfig:   /home/you/.local/state/coreshift/api/admin.kubeconfig
+  Log in with:  oc login https://127.0.0.1:6443 --certificate-authority=/home/you/.local/state/coreshift/api/ca.crt -u <username> -p <password>
+Container coreshift is running in the background
+```
+
+Log in with `oc` as described in [Logging in](#logging-in); the restart it
+asks for is `coreshift delete cluster` followed by `coreshift create
+cluster`. Then check what is running, and stop it without losing the data:
+
+```
+./coreshift get clusters
+./coreshift delete cluster
+```
+
+`delete` prints where the state was kept, and the next create on the same
+port picks it back up.
+
+### Flags
+
+- `--pull-secret` (required): path to the pull secret JSON file.
+- `--port`: the port the API is published on, 6443 by default. Like host
+  mode, a non-default port gets its own state directory. Create refuses a
+  port something already listens on.
+- `--name`: the cluster's name, `coreshift` by default; the container is
+  called `coreshift-<name>`. Create refuses a taken name, so a second
+  cluster needs its own name and port.
+- `--fresh`: remove the state directory before starting, without asking.
+  This is the container-mode answer to a state directory that refuses
+  reuse because a different release created it.
+- `--image`: the container image to run the cluster in, minted from the
+  running binary when not given; see
+  [The container image](#the-container-image).
+- The release flags are the same as host mode's — `--version`,
+  `--release-image`, `--registry`, `--arch` — and are passed through to
+  the run inside the container; see
+  [Choosing the release](#choosing-the-release).
+
+### Where things live
+
+The container bind-mounts the host's state and cache roots into itself,
+so everything lands exactly where host mode puts it, and the modes share
+it: a release cached for one is cached for the other, and a host-mode run
+on the same port reuses a cluster's certificates and data.
+
+- State directory: `~/.local/state/coreshift/api/` by default
+  (`$XDG_STATE_HOME/coreshift/api`), with `/<port>` appended for a
+  non-default port — the same directories as host mode.
+- Child logs: one file per child under the `logs` folder of the state
+  directory, written through the bind mount.
+- Cached images: `~/.cache/coreshift/`, shared by everything; see
+  [Cache](#cache).
+- The container's own boot output: kept by podman; `podman logs
+  coreshift-<name>` replays it, and the create command streams it live
+  while it waits.
+
+### When a boot fails
+
+A container that exits before the control plane becomes ready fails the
+create: the error quotes the tail of the container's log, points at the
+full logs in the state directory, and the container is removed while the
+state is kept. Ctrl-C during the wait aborts the same way. A failure
+caused by the state directory refusing reuse says so and names `--fresh`
+and a different `--port` as the remedies.
+
+## `run cluster` or `create cluster`
+
+Use `run cluster` on machines without a container runtime — it needs
+nothing but the Go toolchain — and whenever the control plane belongs to
+one terminal or one CI step: it runs in the foreground and stops on
+Ctrl-C. Use `create cluster` when podman is available and the cluster
+should outlive the terminal, or when several clusters have to run side by
+side, each with its own name and port. Both answer the question "does it
+behave like OpenShift at the API level" equally well; neither runs
+workloads, since there is no node, CNI, DNS, or ingress in either mode.
+
+## The `delete cluster` command
+
+`coreshift delete cluster` stops the named cluster's container and removes
+it. Stopping the container tears the control plane down in reverse startup
+order, like a host-mode shutdown. The state directory is deliberately
+kept — deleting a cluster destroys nothing — and the command prints where
+the state is, with `coreshift cleanup` named as the way to remove it.
+
+```
+./coreshift delete cluster
+```
+
+`--name` selects a cluster other than the default `coreshift`.
+
+## The `get` command
+
+`coreshift get clusters` lists the clusters: name, published port,
+recorded release, and readiness. Readiness is a live probe of each
+cluster's API server rather than the container's running state, so a
+booting or wedged cluster shows as not ready. With no clusters it prints
+`No clusters`.
+
+`coreshift get kubeconfig` prints the path to the named cluster's admin
+kubeconfig — the same file host mode writes — and refuses when no cluster
+with that name exists. It resolves the right state directory for a cluster
+on a non-default port:
+
+```
+./coreshift get kubeconfig
+/home/you/.local/state/coreshift/api/admin.kubeconfig
+```
 
 ## The `version` command
 
@@ -224,14 +375,14 @@ tagged with the same string, plus a short digest of the binary's content.
 
 ## The container image
 
-The podman mode runs the control plane inside a container image that
+Container mode runs the control plane inside a container image that
 CoreShift builds itself from the running binary, with podman; nothing is
 published to a registry, and docker is not supported. The tag combines
 the binary's version with a short digest of the binary's content, so an
 unchanged binary maps to the image already built and skips the build
 entirely, while a rebuilt or dirty binary gets a fresh tag. Minting is a
-mechanism, not a command: the cluster-creation command of the podman
-mode calls it; until that arrives, it is driven by hand.
+mechanism, not a command: `coreshift create cluster` calls it, and its
+`--image` flag skips it by naming an image to run instead.
 
 The image is built in two stages, both from Red Hat's UBI family and
 pinned by digest. The final stage is ubi10/ubi-micro, the micro variant
@@ -261,6 +412,8 @@ binary and the certificate bundle.
 `coreshift cleanup` removes the state directory of the default port, so the
 next run starts fresh: new certificates, empty etcd, nothing seeded. There
 is no confirmation prompt; the command is explicit and safe for scripts.
+Both modes keep their state in the same directories, so cleanup also
+removes a container-mode cluster's state.
 
 ```
 ./coreshift cleanup
@@ -283,7 +436,8 @@ data out from under it.
 
 Extracted control plane binaries and the release image's manifest of
 component image references are cached under `~/.cache/coreshift/`
-(`$XDG_CACHE_HOME/coreshift`), keyed by image digest. A second run of the
+(`$XDG_CACHE_HOME/coreshift`), keyed by image digest and shared by
+everything regardless of mode or port. A second run of the
 same pinned release pulls nothing from the registry and starts straight
 from the cache. Run `coreshift cleanup --cache` to clear it.
 
