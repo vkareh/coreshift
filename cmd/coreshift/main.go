@@ -6,13 +6,17 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -20,6 +24,7 @@ import (
 	"github.com/vkareh/coreshift/internal/certgen"
 	"github.com/vkareh/coreshift/internal/crd"
 	"github.com/vkareh/coreshift/internal/gpgme"
+	"github.com/vkareh/coreshift/internal/mint"
 	"github.com/vkareh/coreshift/internal/oauth"
 	"github.com/vkareh/coreshift/internal/oauthclient"
 	"github.com/vkareh/coreshift/internal/rbac"
@@ -122,6 +127,7 @@ func newRootCommand() *cobra.Command {
 		Short: "Run a lightweight OpenShift control plane",
 	}
 	root.AddCommand(newRunCommand())
+	root.AddCommand(newCreateCommand())
 	root.AddCommand(newCleanupCommand())
 	root.AddCommand(newVersionCommand())
 	return root
@@ -175,6 +181,10 @@ func newClusterCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cluster",
 		Short: "Run the OpenShift API control plane",
+		// Failures carry their own report, and container mode surfaces
+		// this command's errors as the container's log; a usage dump
+		// after them would bury it.
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runAPI(cmd.Context(), pullSecretPath, port, verbose, release)
 		},
@@ -583,6 +593,309 @@ func printReadySummary(stateDir string, port int) {
 	fmt.Printf("  Kubeconfig:   %s\n", filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
 	fmt.Printf("  Log in with:  oc login %s --certificate-authority=%s -u <username> -p <password>\n",
 		endpoint, filepath.Join(stateDir, certgen.CACertFilename))
+}
+
+// newCreateCommand builds the parent of everything creatable. It takes a
+// noun naming what to create; today only cluster exists. With no noun,
+// or an unknown one, it prints the list and fails.
+func newCreateCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a CoreShift-managed thing in a podman container",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := cmd.Help(); err != nil {
+				return err
+			}
+			if len(args) == 0 {
+				return nil
+			}
+			return fmt.Errorf("unknown thing to create: %s", args[0])
+		},
+	}
+	cmd.AddCommand(newCreateClusterCommand())
+	return cmd
+}
+
+// newCreateClusterCommand builds the command that runs the control plane
+// in a podman container: it mints or takes the container image, starts
+// the container, waits for readiness through the published port, and
+// leaves the container running in the background.
+func newCreateClusterCommand() *cobra.Command {
+	var pullSecretPath, name, imagePath string
+	var port int
+	var fresh bool
+	var release releaseOptions
+	defaultArch, err := releaseArch(runtime.GOARCH)
+	if err != nil {
+		panic(err)
+	}
+	cmd := &cobra.Command{
+		Use:          "cluster",
+		Short:        "Create the OpenShift API control plane in a podman container",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runCreate(cmd.Context(), name, port, fresh, imagePath, pullSecretPath, release)
+		},
+	}
+	cmd.Flags().StringVar(&pullSecretPath, "pull-secret", "", "path to a Red Hat pull secret with credentials for the release image registry (required)")
+	cmd.Flags().IntVar(&port, "port", defaultAPIPort, "port the API server is published on")
+	cmd.Flags().StringVar(&name, "name", "coreshift", "name of the cluster; its container is called coreshift-<name>")
+	cmd.Flags().BoolVar(&fresh, "fresh", false, "remove the state directory before starting")
+	cmd.Flags().StringVar(&imagePath, "image", "", "container image holding coreshift itself that the cluster runs in, minted from this binary when not given")
+	cmd.Flags().StringVar(&release.image, "release-image", "", "exact OpenShift payload release image to build the control plane from, e.g. quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64")
+	cmd.Flags().StringVar(&release.version, "version", "", "OpenShift version to run, X.Y or X.Y.Z; defaults to the newest release")
+	cmd.Flags().StringVar(&release.registry, "registry", defaultReleaseRepository, "repository to resolve the release image from")
+	cmd.Flags().StringVar(&release.arch, "arch", defaultArch, "architecture of the release payload, as uname -m reports it")
+	if err := cmd.MarkFlagRequired("pull-secret"); err != nil {
+		panic(err) // the flag is defined above
+	}
+	return cmd
+}
+
+// The container's XDG homes, and where the pull secret is mounted. The
+// host's state and cache roots are bind-mounted onto the .../coreshift
+// paths the run inside derives from its XDG environment, so
+// container-side state lands exactly where the host expects to find the
+// kubeconfig and CA.
+const (
+	containerStateHome  = "/var/lib/coreshift/state"
+	containerCacheHome  = "/var/lib/coreshift/cache"
+	containerPullSecret = "/etc/coreshift/pull-secret"
+)
+
+// runCreate creates a cluster container and waits for it to be ready. It
+// refuses a taken container name or a busy port before touching anything,
+// mints the container image from the running binary unless --image names
+// one, starts the container detached, streams its boot output, and polls
+// readiness from the host. On success the container keeps running; on any
+// failure it is removed while the state is kept.
+func runCreate(ctx context.Context, name string, port int, fresh bool, imagePath, pullSecretPath string, release releaseOptions) error {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if _, err := exec.LookPath("podman"); err != nil {
+		return fmt.Errorf("podman is required to create clusters: %w", err)
+	}
+	pullSecretPath, err := filepath.Abs(pullSecretPath)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(pullSecretPath); err != nil {
+		return fmt.Errorf("read pull secret: %w", err)
+	}
+	stateDir, err := apiStateDir(port)
+	if err != nil {
+		return err
+	}
+	container := "coreshift-" + name
+	if err := refuseIfContainerExists(container); err != nil {
+		return err
+	}
+	if err := refuseIfPortBusy(port); err != nil {
+		return err
+	}
+	if fresh {
+		if _, err := os.Stat(stateDir); err == nil {
+			if _, err := removeStateDir(stateDir); err != nil {
+				return err
+			}
+		}
+	}
+	imageRef := imagePath
+	if imageRef == "" {
+		if imageRef, err = mint.Image(ctx, version); err != nil {
+			return err
+		}
+	}
+	stateRoot, err := stateRoot()
+	if err != nil {
+		return err
+	}
+	cacheRoot, err := image.CacheRoot()
+	if err != nil {
+		return err
+	}
+	for _, dir := range []string{stateRoot, cacheRoot} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create %s: %w", dir, err)
+		}
+	}
+
+	fmt.Printf("Starting container %s\n", container)
+	args := podmanRunArgs(container, port, stateRoot, cacheRoot, pullSecretPath, imageRef, release)
+	run := exec.CommandContext(ctx, "podman", args...)
+	run.Stdout = io.Discard // the detached run only prints the container ID
+	run.Stderr = os.Stderr
+	if err := run.Run(); err != nil {
+		return fmt.Errorf("start container: %w", err)
+	}
+	return streamUntilReady(ctx, container, stateDir, port)
+}
+
+// podmanRunArgs builds the podman command line that starts the cluster
+// container: detached and named, the API port published as an identity
+// mapping on loopback only (bare port publishing would bind every
+// interface, and exposing the API to the network must stay an explicit
+// act), the state and cache roots bind-mounted, the pull secret mounted
+// read-only, and the release flags and port passed through to the run
+// inside. The image's entrypoint is `coreshift run cluster`, so the
+// arguments after the image reference land on it.
+func podmanRunArgs(container string, port int, stateRoot, cacheRoot, pullSecretPath, imageRef string, release releaseOptions) []string {
+	return []string{
+		"run", "--detach",
+		"--name", container,
+		"--publish", fmt.Sprintf("127.0.0.1:%d:%d", port, port),
+		"--env", "XDG_STATE_HOME=" + containerStateHome,
+		"--env", "XDG_CACHE_HOME=" + containerCacheHome,
+		// Shared relabeling, because host-mode runs and further
+		// cluster containers keep using the same directories.
+		"--volume", stateRoot + ":" + containerStateHome + "/coreshift:z",
+		"--volume", cacheRoot + ":" + containerCacheHome + "/coreshift:z",
+		"--volume", pullSecretPath + ":" + containerPullSecret + ":ro,z",
+		imageRef,
+		"--pull-secret=" + containerPullSecret,
+		"--port=" + strconv.Itoa(port),
+		"--release-image=" + release.image,
+		"--version=" + release.version,
+		"--registry=" + release.registry,
+		"--arch=" + release.arch,
+	}
+}
+
+// refuseIfContainerExists refuses to create a container whose name is
+// taken, so a second create cannot disturb an existing cluster.
+func refuseIfContainerExists(container string) error {
+	if exec.Command("podman", "container", "exists", container).Run() == nil {
+		return fmt.Errorf("container %s already exists; use --name to create another cluster, or remove the container first", container)
+	}
+	return nil
+}
+
+// refuseIfPortBusy refuses to publish the API port when something on the
+// host already listens on loopback. The mapping publishes loopback only,
+// so that is the only address that can collide.
+func refuseIfPortBusy(port int) error {
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return fmt.Errorf("port %d is already in use; use --port to publish the API on another one", port)
+	}
+	return listener.Close()
+}
+
+// streamUntilReady follows the container's boot output while polling the
+// control plane's readiness from the host. Following ends when the
+// container stops, so a container that dies before becoming ready is a
+// failure; a readiness wait that succeeds prints the ready summary and
+// leaves the container running.
+func streamUntilReady(ctx context.Context, container, stateDir string, port int) error {
+	logs := exec.CommandContext(ctx, "podman", "logs", "--follow", container)
+	logs.Stdout = os.Stdout
+	logs.Stderr = os.Stderr
+	if err := logs.Start(); err != nil {
+		return fmt.Errorf("stream container output: %w", err)
+	}
+	logsDone := make(chan error, 1)
+	go func() { logsDone <- logs.Wait() }()
+	ready := make(chan error, 1)
+	go func() { ready <- waitContainerReady(ctx, stateDir) }()
+
+	select {
+	case err := <-ready:
+		_ = logs.Process.Kill()
+		<-logsDone
+		if err != nil {
+			return containerFailure(container, stateDir, err)
+		}
+		printReadySummary(stateDir, port)
+		fmt.Printf("Container %s is running in the background\n", container)
+		return nil
+	case <-logsDone:
+		return containerFailure(container, stateDir,
+			fmt.Errorf("container %s exited before the control plane became ready", container))
+	}
+}
+
+// containerReadyTimeout bounds the whole readiness wait of a created
+// cluster. A cold image cache makes the container's first boot pull the
+// release payload for a long time before anything answers, so the budget
+// is generous; Ctrl-C cancels the wait.
+const containerReadyTimeout = 30 * time.Minute
+
+// waitContainerReady waits for the created cluster's readiness from the
+// host: first for the kubeconfig the container's boot writes into the
+// bind-mounted state directory, then for the control plane's readiness
+// through the published port, the same wait host mode runs after boot.
+func waitContainerReady(ctx context.Context, stateDir string) error {
+	ctx, cancel := context.WithTimeout(ctx, containerReadyTimeout)
+	defer cancel()
+	kubeconfig := filepath.Join(stateDir, certgen.AdminKubeconfigFilename)
+	for {
+		if _, err := os.Stat(kubeconfig); err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+	if err := aggregation.WaitReady(ctx, kubeconfig, aggregatedServers); err != nil {
+		return fmt.Errorf("control plane not ready: %w", err)
+	}
+	return nil
+}
+
+// containerFailure reports a cluster container that did not become ready:
+// the error carries the tail of the container's log and the state
+// directory's full logs, a state-directory conflict gains the create-side
+// remedies, and the container is removed while the state is kept.
+func containerFailure(container, stateDir string, err error) error {
+	tail := containerLogTail(container)
+	if hint := stateConflictHint(tail); hint != "" {
+		err = fmt.Errorf("%w\n%s", err, hint)
+	}
+	if tail != "" {
+		err = fmt.Errorf("%w\n\nrecent log output:\n%s\n\nfull log: %s", err, tail, filepath.Join(stateDir, "logs"))
+	}
+	if rmErr := exec.Command("podman", "rm", "--force", container).Run(); rmErr != nil {
+		err = fmt.Errorf("%w\nremoving the container failed; remove %s by hand", err, container)
+	}
+	return err
+}
+
+// containerLogTailLines is how many lines of the container's log output a
+// failure error includes, matching the supervisor's per-child tail.
+const containerLogTailLines = 20
+
+// containerLogTail returns the last lines of the container's log output.
+func containerLogTail(container string) string {
+	out, err := exec.Command("podman", "logs", container).Output()
+	if err != nil {
+		return ""
+	}
+	return tailText(string(out), containerLogTailLines)
+}
+
+// stateConflictHint names the create-side remedies when the container's
+// log shows the state directory refusing reuse. The run inside cannot ask
+// questions without a terminal, so its own hint names host-mode commands
+// that do not apply here.
+func stateConflictHint(logTail string) string {
+	for _, mark := range []string{"cannot be reused by", "before releases were recorded in it"} {
+		if strings.Contains(logTail, mark) {
+			return "Use --fresh to remove the state directory and start fresh, or a different --port to get a separate one"
+		}
+	}
+	return ""
+}
+
+// tailText returns the last lines of text.
+func tailText(text string, lines int) string {
+	all := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	if len(all) > lines {
+		all = all[len(all)-lines:]
+	}
+	return strings.Join(all, "\n")
 }
 
 // newCleanupCommand builds the command that removes CoreShift's on-disk
