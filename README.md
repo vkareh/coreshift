@@ -220,7 +220,34 @@ cheaper.
 
 `coreshift version` prints the version the binary was built with, derived
 from git at build time. The container image minted from the binary is
-tagged with the same string.
+tagged with the same string, plus a short digest of the binary's content.
+
+## The container image
+
+The podman mode runs the control plane inside a container image that
+CoreShift builds itself from the running binary, with podman; nothing is
+published to a registry, and docker is not supported. The tag combines
+the binary's version with a short digest of the binary's content, so an
+unchanged binary maps to the image already built and skips the build
+entirely, while a rebuilt or dirty binary gets a fresh tag. Minting is a
+mechanism, not a command: the cluster-creation command of the podman
+mode calls it; until that arrives, it is driven by hand.
+
+The base image is `gcr.io/distroless/cc-debian12`, pinned by digest. Two
+things were required of it, and candidates were verified live rather
+than assumed. The control plane binaries are dynamically linked against
+glibc, so nothing can run in a from-scratch image, and alpine's musl
+runs none of the nine children either. The run inside the container also
+pulls the release payload from its registry, which needs CA certificates
+on top of glibc: busybox:glibc and ubi9/ubi-micro are smaller and run
+all nine children, but ship no certificates, so a run inside them cannot
+fetch its release. distroless cc-debian12 is the smallest
+generally-available image where all nine children run and release pulls
+work, proven by a control plane boot inside the minted image; the next
+bigger images carrying certificates, ubi9-minimal and fedora-minimal,
+are four to six times its size. The gpgme libraries
+openshift-controller-manager needs are embedded in the binary itself and
+written out at boot, so the image carries nothing but the binary.
 
 ## The `cleanup` command
 
