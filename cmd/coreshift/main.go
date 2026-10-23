@@ -784,11 +784,13 @@ func refuseIfPortBusy(port int) error {
 	return listener.Close()
 }
 
-// streamUntilReady follows the container's boot output while polling the
-// control plane's readiness from the host. Following ends when the
-// container stops, so a container that dies before becoming ready is a
-// failure; a readiness wait that succeeds prints the ready summary and
-// leaves the container running.
+// streamUntilReady follows the container's boot output while waiting for
+// the control plane's readiness from the host. The follower is only
+// output: it can end for its own reasons, such as a closed pipe, without
+// the container being any less alive. Its state is polled instead, and a
+// container that stops before becoming ready is a failure; a readiness
+// wait that succeeds prints the ready summary and leaves the container
+// running.
 func streamUntilReady(ctx context.Context, container, stateDir string, port int) error {
 	logs := exec.CommandContext(ctx, "podman", "logs", "--follow", container)
 	logs.Stdout = os.Stdout
@@ -796,25 +798,56 @@ func streamUntilReady(ctx context.Context, container, stateDir string, port int)
 	if err := logs.Start(); err != nil {
 		return fmt.Errorf("stream container output: %w", err)
 	}
-	logsDone := make(chan error, 1)
-	go func() { logsDone <- logs.Wait() }()
 	ready := make(chan error, 1)
 	go func() { ready <- waitContainerReady(ctx, stateDir) }()
+	dead := make(chan struct{}, 1)
+	go func() {
+		for {
+			running, err := containerRunning(container)
+			if err == nil && !running {
+				dead <- struct{}{}
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second):
+			}
+		}
+	}()
 
 	select {
 	case err := <-ready:
-		_ = logs.Process.Kill()
-		<-logsDone
+		stopStreaming(logs)
 		if err != nil {
 			return containerFailure(container, stateDir, err)
 		}
 		printReadySummary(stateDir, port)
 		fmt.Printf("Container %s is running in the background\n", container)
 		return nil
-	case <-logsDone:
+	case <-dead:
+		stopStreaming(logs)
 		return containerFailure(container, stateDir,
 			fmt.Errorf("container %s exited before the control plane became ready", container))
 	}
+}
+
+// stopStreaming stops following the container's log and waits for the
+// follower to end, so later boot output cannot interleave with the ready
+// summary or a failure report.
+func stopStreaming(logs *exec.Cmd) {
+	_ = logs.Process.Kill()
+	_ = logs.Wait()
+}
+
+// containerRunning reports whether the cluster container is running. A
+// failed inspect, such as under a busy podman, is retried by the caller.
+func containerRunning(container string) (bool, error) {
+	out, err := exec.Command("podman", "inspect", "--format", "{{.State.Running}}", container).Output()
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(out)) == "true", nil
 }
 
 // containerReadyTimeout bounds the whole readiness wait of a created
