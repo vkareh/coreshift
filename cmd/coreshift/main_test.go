@@ -424,7 +424,7 @@ func TestRootWithoutArgumentsPrintsHelp(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"run", "create", "get", "cleanup", "version"} {
+	for _, want := range []string{"run", "create", "delete", "get", "cleanup", "version"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("help missing %q:\n%s", want, out.String())
 		}
@@ -1136,10 +1136,116 @@ func TestGetCommandsRequirePodman(t *testing.T) {
 	}
 }
 
+// TestDeleteRequiresPodman checks that the delete command fails naming
+// podman when it is missing.
+func TestDeleteRequiresPodman(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	err := runDelete("dev")
+	if err == nil || !strings.Contains(err.Error(), "podman") {
+		t.Fatalf("err = %v, want an error naming podman", err)
+	}
+}
+
 // TestGetKubeconfigFlagDefaults checks that the kubeconfig getter comes
 // with the documented default.
 func TestGetKubeconfigFlagDefaults(t *testing.T) {
 	cmd := newGetKubeconfigCommand()
+	if flag := cmd.Flags().Lookup("name"); flag == nil {
+		t.Fatal("flag --name is not defined")
+	} else if flag.DefValue != "coreshift" {
+		t.Fatalf("--name default = %q, want coreshift", flag.DefValue)
+	}
+}
+
+// TestDeleteWithoutNounPrintsHelp checks that bare delete prints the list
+// of deletable things and succeeds.
+func TestDeleteWithoutNounPrintsHelp(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand()
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"delete"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "cluster") {
+		t.Fatalf("delete help missing the cluster noun:\n%s", out.String())
+	}
+}
+
+// TestDeleteUnknownNounPrintsHelp checks that an unknown noun fails after
+// printing the list of deletable things.
+func TestDeleteUnknownNounPrintsHelp(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand()
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"delete", "bogus"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("err = %v, want the unknown noun refused", err)
+	}
+	if !strings.Contains(out.String(), "cluster") {
+		t.Fatalf("delete help missing the cluster noun:\n%s", out.String())
+	}
+}
+
+// TestRunDeleteStopsAndRemovesKeepingState checks the delete contract:
+// the container is stopped with a timeout generous enough for the control
+// plane's teardown and then removed, while the state directory and its
+// release marker are left intact.
+func TestRunDeleteStopsAndRemovesKeepingState(t *testing.T) {
+	writeFakePodman(t)
+	setContainers(t, "coreshift-dev")
+	setContainerPort(t, "coreshift-dev", 7443)
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	stateDir, err := apiStateDir(7443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeStateTree(t, stateDir)
+
+	var delErr error
+	out := captureStdout(t, func() { delErr = runDelete("dev") })
+	if delErr != nil {
+		t.Fatal(delErr)
+	}
+	calls := podmanCalls(t)
+	want := []string{
+		"container exists coreshift-dev",
+		"inspect --format {{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{.HostPort}}{{end}}{{end}} coreshift-dev",
+		"stop --timeout 120 coreshift-dev",
+		"rm coreshift-dev",
+	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("podman calls = %q\nwant %q", calls, want)
+	}
+	if !strings.Contains(out, "State kept at "+stateDir) {
+		t.Fatalf("output = %q, want the kept state named", out)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, releaseMarkerFilename)); err != nil {
+		t.Fatal("delete removed the state directory")
+	}
+}
+
+// TestRunDeleteMissingCluster checks that deleting a missing cluster is
+// refused plainly, with nothing stopped or removed.
+func TestRunDeleteMissingCluster(t *testing.T) {
+	writeFakePodman(t)
+	err := runDelete("nope")
+	if err == nil || !strings.Contains(err.Error(), "no cluster named nope") {
+		t.Fatalf("err = %v, want a plain refusal", err)
+	}
+	if calls := podmanCalls(t); len(calls) != 1 || calls[0] != "container exists coreshift-nope" {
+		t.Fatalf("podman calls = %q, want only the existence check", calls)
+	}
+}
+
+// TestDeleteClusterFlagDefaults checks that the delete command comes with
+// the documented default.
+func TestDeleteClusterFlagDefaults(t *testing.T) {
+	cmd := newDeleteClusterCommand()
 	if flag := cmd.Flags().Lookup("name"); flag == nil {
 		t.Fatal("flag --name is not defined")
 	} else if flag.DefValue != "coreshift" {
