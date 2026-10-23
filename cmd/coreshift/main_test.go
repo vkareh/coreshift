@@ -340,8 +340,9 @@ func TestIsControlPlaneArgs(t *testing.T) {
 		args []string
 		want bool
 	}{
-		{[]string{"./coreshift", "api", "--pull-secret", "secret"}, true},
-		{[]string{"/usr/local/bin/coreshift", "api"}, true},
+		{[]string{"./coreshift", "run", "cluster", "--pull-secret", "secret"}, true},
+		{[]string{"/usr/local/bin/coreshift", "run", "cluster"}, true},
+		{[]string{"./coreshift", "run"}, false},
 		{[]string{"./coreshift", "cleanup"}, false},
 		{[]string{"./coreshift"}, false},
 		{[]string{"etcd", "--data-dir=" + state + "/api/etcd-data"}, true},
@@ -358,14 +359,14 @@ func TestIsControlPlaneArgs(t *testing.T) {
 	}
 }
 
-// TestAPICommandResolutionFlagDefaults checks that the release
+// TestClusterCommandResolutionFlagDefaults checks that the release
 // resolution flags are accepted and come with the documented defaults.
-func TestAPICommandResolutionFlagDefaults(t *testing.T) {
+func TestClusterCommandResolutionFlagDefaults(t *testing.T) {
 	hostArch, err := releaseArch(runtime.GOARCH)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := newAPICommand()
+	cmd := newClusterCommand()
 	for name, want := range map[string]string{
 		"version":       "",
 		"release-image": "",
