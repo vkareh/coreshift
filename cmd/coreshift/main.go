@@ -120,7 +120,9 @@ func newRunCommand() *cobra.Command {
 		Use:   "run",
 		Short: "Run a CoreShift-managed thing",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cmd.Help()
+			if err := cmd.Help(); err != nil {
+				return err
+			}
 			if len(args) == 0 {
 				return nil
 			}
