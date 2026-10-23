@@ -200,6 +200,24 @@ func TestAPIStateDirPerPort(t *testing.T) {
 	}
 }
 
+// TestStateRootEmptyVariableStaysBelowHome pins the default location:
+// an empty XDG state variable counts as unset by the base-directory
+// convention, so the state root stays where existing installs keep it,
+// below the home directory.
+func TestStateRootEmptyVariableStaysBelowHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", "")
+
+	got, err := stateRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, ".local", "state", "coreshift"); got != want {
+		t.Fatalf("state root = %q, want %q", got, want)
+	}
+}
+
 // writeStateTree fills a state directory with a marker file, the way a
 // run does, so cleanup has something to measure and remove.
 func writeStateTree(t *testing.T, dir string) {
