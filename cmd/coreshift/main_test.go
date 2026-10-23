@@ -8,8 +8,12 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -420,7 +424,7 @@ func TestRootWithoutArgumentsPrintsHelp(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"run", "create", "cleanup", "version"} {
+	for _, want := range []string{"run", "create", "get", "cleanup", "version"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("help missing %q:\n%s", want, out.String())
 		}
@@ -883,4 +887,262 @@ func pemDecode(t *testing.T, data []byte) *pem.Block {
 		t.Fatal("data is not PEM encoded")
 	}
 	return block
+}
+
+// writeFakePodman writes a podman stand-in into a directory of its own and
+// prepends it to PATH. It records every call, one line per call, in the
+// file named by PODMAN_LOG; the containers named in PODMAN_CONTAINERS,
+// one per line, are the ones that exist and the ones ps lists, and
+// inspect answers with the per-container port file from PODMAN_PORTS.
+func writeFakePodman(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	script := `#!/bin/sh
+echo "$@" >> "$PODMAN_LOG"
+if [ "$1" = "container" ]; then
+	grep -qx "$3" "$PODMAN_CONTAINERS"
+	exit $?
+fi
+if [ "$1" = "ps" ]; then
+	cat "$PODMAN_CONTAINERS"
+	exit 0
+fi
+if [ "$1" = "inspect" ]; then
+	eval "container=\${$#}"
+	cat "$PODMAN_PORTS/$container"
+	exit 0
+fi
+exit 0
+`
+	path := filepath.Join(dir, "podman")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	t.Setenv("PODMAN_LOG", filepath.Join(t.TempDir(), "calls"))
+	t.Setenv("PODMAN_CONTAINERS", filepath.Join(t.TempDir(), "containers"))
+	t.Setenv("PODMAN_PORTS", t.TempDir())
+}
+
+// setContainers makes the fake podman report exactly these containers as
+// existing.
+func setContainers(t *testing.T, names ...string) {
+	t.Helper()
+	if err := os.WriteFile(os.Getenv("PODMAN_CONTAINERS"), []byte(strings.Join(names, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// setContainerPort makes the fake podman answer inspect for container
+// with port.
+func setContainerPort(t *testing.T, container string, port int) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(os.Getenv("PODMAN_PORTS"), container), []byte(strconv.Itoa(port)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// podmanCalls returns the calls the fake podman recorded.
+func podmanCalls(t *testing.T) []string {
+	t.Helper()
+	data, err := os.ReadFile(os.Getenv("PODMAN_LOG"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+}
+
+// captureStdout returns everything printed to standard output while run
+// runs.
+func captureStdout(t *testing.T, run func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	defer func() {
+		os.Stdout = old
+		r.Close()
+	}()
+	printed := make(chan string, 1)
+	go func() {
+		data, _ := io.ReadAll(r)
+		printed <- string(data)
+	}()
+	run()
+	w.Close()
+	return <-printed
+}
+
+// TestGetWithoutNounPrintsHelp checks that bare get prints the list of
+// gettable things and succeeds.
+func TestGetWithoutNounPrintsHelp(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand()
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"get"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"clusters", "kubeconfig"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("get help missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+// TestGetUnknownNounPrintsHelp checks that an unknown noun fails after
+// printing the list of gettable things.
+func TestGetUnknownNounPrintsHelp(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCommand()
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"get", "bogus"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("err = %v, want the unknown noun refused", err)
+	}
+	if !strings.Contains(out.String(), "clusters") {
+		t.Fatalf("get help missing the clusters noun:\n%s", out.String())
+	}
+}
+
+// TestRunGetClustersEmpty checks that an empty cluster list is reported
+// plainly.
+func TestRunGetClustersEmpty(t *testing.T) {
+	writeFakePodman(t)
+	var err error
+	out := captureStdout(t, func() { err = runGetClusters() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "No clusters") {
+		t.Fatalf("output = %q, want the empty list reported", out)
+	}
+}
+
+// TestRunGetClustersListsClusters checks the row each cluster gets: its
+// name, the port its container publishes, the release its state directory
+// records, and readiness from a live probe, so a cluster with nothing
+// answering on its port shows as not ready and one without a state
+// directory yet shows an unknown release.
+func TestRunGetClustersListsClusters(t *testing.T) {
+	writeFakePodman(t)
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyPort, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setContainers(t, "coreshift-booting", "coreshift-early", "coreshift-ready")
+	setContainerPort(t, "coreshift-booting", 17443)
+	setContainerPort(t, "coreshift-early", 18443)
+	setContainerPort(t, "coreshift-ready", readyPort)
+	for _, port := range []int{17443, readyPort} {
+		stateDir, err := apiStateDir(port)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeStateTree(t, stateDir)
+	}
+
+	out := captureStdout(t, func() { err = runGetClusters() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("output has %d lines, want a header and three clusters:\n%s", len(lines), out)
+	}
+	rowFor := func(name string) []string {
+		for _, line := range lines {
+			if fields := strings.Fields(line); len(fields) > 0 && fields[0] == name {
+				return fields
+			}
+		}
+		t.Fatalf("no row for %s in:\n%s", name, out)
+		return nil
+	}
+	// The release reference carries no spaces, so the fields from the
+	// third on are the readiness column.
+	readiness := func(row []string) string { return strings.Join(row[3:], " ") }
+	if got := rowFor("booting"); len(got) < 4 || got[1] != "17443" || got[2] != "reg.example/ocp-release:4.22.8-x86_64" || readiness(got) != "not ready" {
+		t.Fatalf("booting row = %q, want its port, release, and not ready", got)
+	}
+	if got := rowFor("early"); len(got) < 4 || got[1] != "18443" || got[2] != "-" || readiness(got) != "not ready" {
+		t.Fatalf("early row = %q, want its port, an unknown release, and not ready", got)
+	}
+	if got := rowFor("ready"); len(got) != 4 || got[1] != strconv.Itoa(readyPort) || got[3] != "ready" {
+		t.Fatalf("ready row = %q, want its port and ready", got)
+	}
+}
+
+func TestRunGetKubeconfigPrintsPath(t *testing.T) {
+	writeFakePodman(t)
+	setContainers(t, "coreshift-dev")
+	setContainerPort(t, "coreshift-dev", 7443)
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+
+	var err error
+	out := captureStdout(t, func() { err = runGetKubeconfig("dev") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(base, "coreshift", "api", "7443", certgen.AdminKubeconfigFilename)
+	if got := strings.TrimSpace(out); got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+// TestRunGetKubeconfigMissingCluster checks that a missing cluster is
+// refused plainly.
+func TestRunGetKubeconfigMissingCluster(t *testing.T) {
+	writeFakePodman(t)
+	err := runGetKubeconfig("nope")
+	if err == nil || !strings.Contains(err.Error(), "no cluster named nope") {
+		t.Fatalf("err = %v, want a plain refusal", err)
+	}
+}
+
+// TestGetCommandsRequirePodman checks that the get commands fail naming
+// podman when it is missing.
+func TestGetCommandsRequirePodman(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	for name, run := range map[string]func() error{
+		"get clusters":   func() error { return runGetClusters() },
+		"get kubeconfig": func() error { return runGetKubeconfig("dev") },
+	} {
+		err := run()
+		if err == nil || !strings.Contains(err.Error(), "podman") {
+			t.Fatalf("%s: err = %v, want an error naming podman", name, err)
+		}
+	}
+}
+
+// TestGetKubeconfigFlagDefaults checks that the kubeconfig getter comes
+// with the documented default.
+func TestGetKubeconfigFlagDefaults(t *testing.T) {
+	cmd := newGetKubeconfigCommand()
+	if flag := cmd.Flags().Lookup("name"); flag == nil {
+		t.Fatal("flag --name is not defined")
+	} else if flag.DefValue != "coreshift" {
+		t.Fatalf("--name default = %q, want coreshift", flag.DefValue)
+	}
 }
