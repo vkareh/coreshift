@@ -292,6 +292,9 @@ port picks it back up.
 - `--image`: the container image to run the cluster in, minted from the
   running binary when not given; see
   [The container image](#the-container-image).
+- `--verbose`: stream the image build's output to the terminal. Without
+  it the build is quiet, and a failed build quotes the recent tail of
+  its captured output and names the file the full output is kept in.
 - The release flags are the same as host mode's — `--version`,
   `--release-image`, `--registry`, `--arch` — and are passed through to
   the run inside the container; see
@@ -383,6 +386,12 @@ unchanged binary maps to the image already built and skips the build
 entirely, while a rebuilt or dirty binary gets a fresh tag. Minting is a
 mechanism, not a command: `coreshift create cluster` calls it, and its
 `--image` flag skips it by naming an image to run instead.
+
+The build is quiet like the control plane: one progress line names the
+image being built, and a success prints nothing more. A failed build
+quotes the recent tail of the captured output and names the file the
+full output is kept in, under the image cache; `--verbose` streams the
+build tool's output live instead.
 
 The image is built in two stages, both from Red Hat's UBI family and
 pinned by digest. The final stage is ubi10/ubi-micro, the micro variant

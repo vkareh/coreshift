@@ -631,7 +631,7 @@ func newCreateCommand() *cobra.Command {
 func newCreateClusterCommand() *cobra.Command {
 	var pullSecretPath, name, imagePath string
 	var port int
-	var fresh bool
+	var fresh, verbose bool
 	var release releaseOptions
 	defaultArch, err := releaseArch(runtime.GOARCH)
 	if err != nil {
@@ -642,13 +642,14 @@ func newCreateClusterCommand() *cobra.Command {
 		Short:        "Create the OpenShift API control plane in a podman container",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runCreate(cmd.Context(), name, port, fresh, imagePath, pullSecretPath, release)
+			return runCreate(cmd.Context(), name, port, fresh, verbose, imagePath, pullSecretPath, release)
 		},
 	}
 	cmd.Flags().StringVar(&pullSecretPath, "pull-secret", "", "path to a Red Hat pull secret with credentials for the release image registry (required)")
 	cmd.Flags().IntVar(&port, "port", defaultAPIPort, "port the API server is published on")
 	cmd.Flags().StringVar(&name, "name", "coreshift", "name of the cluster; its container is called coreshift-<name>")
 	cmd.Flags().BoolVar(&fresh, "fresh", false, "remove the state directory before starting")
+	cmd.Flags().BoolVar(&verbose, "verbose", false, "stream the image build's output to the terminal")
 	cmd.Flags().StringVar(&imagePath, "image", "", "container image holding coreshift itself that the cluster runs in, minted from this binary when not given")
 	cmd.Flags().StringVar(&release.image, "release-image", "", "exact OpenShift payload release image to build the control plane from, e.g. quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64")
 	cmd.Flags().StringVar(&release.version, "version", "", "OpenShift version to run, X.Y or X.Y.Z; defaults to the newest release")
@@ -677,7 +678,7 @@ const (
 // one, starts the container detached, streams its boot output, and polls
 // readiness from the host. On success the container keeps running; on any
 // failure it is removed while the state is kept.
-func runCreate(ctx context.Context, name string, port int, fresh bool, imagePath, pullSecretPath string, release releaseOptions) error {
+func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, imagePath, pullSecretPath string, release releaseOptions) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -711,7 +712,7 @@ func runCreate(ctx context.Context, name string, port int, fresh bool, imagePath
 	}
 	imageRef := imagePath
 	if imageRef == "" {
-		if imageRef, err = mint.Image(ctx, version); err != nil {
+		if imageRef, err = mint.Image(ctx, version, verbose); err != nil {
 			return err
 		}
 	}

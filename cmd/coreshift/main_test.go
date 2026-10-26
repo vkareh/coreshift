@@ -510,6 +510,7 @@ func TestCreateCommandFlagDefaults(t *testing.T) {
 		"image":         "",
 		"port":          "6443",
 		"fresh":         "false",
+		"verbose":       "false",
 		"registry":      "quay.io/openshift-release-dev/ocp-release",
 		"arch":          hostArch,
 		"release-image": "",
