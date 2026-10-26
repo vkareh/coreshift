@@ -1021,18 +1021,21 @@ func newDeleteCommand() *cobra.Command {
 
 // newDeleteClusterCommand builds the command that deletes a cluster: its
 // container is stopped, torn down in reverse order like a host-mode
-// shutdown, and removed, while its state directory is kept.
+// shutdown, and removed, while its state directory is kept unless the
+// cleanup flag asks for its removal too.
 func newDeleteClusterCommand() *cobra.Command {
 	var name string
+	var cleanup bool
 	cmd := &cobra.Command{
 		Use:          "cluster",
 		Short:        "Delete a cluster, stopping its container and keeping its state",
 		SilenceUsage: true,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return runDelete(name)
+			return runDelete(name, cleanup)
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "coreshift", "name of the cluster to delete")
+	cmd.Flags().BoolVar(&cleanup, "cleanup", false, "also remove the cluster's state directory")
 	return cmd
 }
 
@@ -1043,10 +1046,10 @@ func newDeleteClusterCommand() *cobra.Command {
 const containerStopSeconds = 120
 
 // runDelete deletes a cluster: its container is stopped and removed. The
-// state directory is deliberately kept, because deleting a cluster
-// destroys nothing; data destruction belongs to the cleanup command
-// alone.
-func runDelete(name string) error {
+// state directory is kept, because deleting a cluster destroys nothing;
+// the cleanup flag opts into removing it too, with the same removal the
+// cleanup command uses.
+func runDelete(name string, cleanup bool) error {
 	if _, err := exec.LookPath("podman"); err != nil {
 		return fmt.Errorf("podman is required to delete clusters: %w", err)
 	}
@@ -1065,6 +1068,15 @@ func runDelete(name string) error {
 		return fmt.Errorf("remove container: %w", err)
 	}
 	fmt.Printf("Deleted cluster %s\n", name)
+	if cleanup {
+		if _, err := os.Stat(stateDir); err == nil {
+			if _, err := removeStateDir(stateDir); err != nil {
+				return err
+			}
+		}
+		fmt.Printf("State removed at %s\n", stateDir)
+		return nil
+	}
 	fmt.Printf("State kept at %s; coreshift cleanup removes it\n", stateDir)
 	return nil
 }

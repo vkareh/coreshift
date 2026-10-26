@@ -1442,7 +1442,7 @@ func TestGetCommandsRequirePodman(t *testing.T) {
 // podman when it is missing.
 func TestDeleteRequiresPodman(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	err := runDelete("dev")
+	err := runDelete("dev", false)
 	if err == nil || !strings.Contains(err.Error(), "podman") {
 		t.Fatalf("err = %v, want an error naming podman", err)
 	}
@@ -1509,7 +1509,7 @@ func TestRunDeleteStopsAndRemovesKeepingState(t *testing.T) {
 	writeStateTree(t, stateDir)
 
 	var delErr error
-	out := captureStdout(t, func() { delErr = runDelete("dev") })
+	out := captureStdout(t, func() { delErr = runDelete("dev", false) })
 	if delErr != nil {
 		t.Fatal(delErr)
 	}
@@ -1531,26 +1531,73 @@ func TestRunDeleteStopsAndRemovesKeepingState(t *testing.T) {
 	}
 }
 
-// TestRunDeleteMissingCluster checks that deleting a missing cluster is
-// refused plainly, with nothing stopped or removed.
-func TestRunDeleteMissingCluster(t *testing.T) {
+// TestRunDeleteCleanupRemovesState checks the cleanup flag's contract:
+// the same stop-and-remove happens, and the state directory is removed
+// with the same removal the cleanup command uses, with the removal said
+// plainly in the output.
+func TestRunDeleteCleanupRemovesState(t *testing.T) {
 	writeFakePodman(t)
-	err := runDelete("nope")
-	if err == nil || !strings.Contains(err.Error(), "no cluster named nope") {
-		t.Fatalf("err = %v, want a plain refusal", err)
+	setContainers(t, "coreshift-dev")
+	setContainerPort(t, "coreshift-dev", 7443)
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	stateDir, err := apiStateDir(7443)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if calls := podmanCalls(t); len(calls) != 1 || calls[0] != "container exists coreshift-nope" {
-		t.Fatalf("podman calls = %q, want only the existence check", calls)
+	writeStateTree(t, stateDir)
+
+	var delErr error
+	out := captureStdout(t, func() { delErr = runDelete("dev", true) })
+	if delErr != nil {
+		t.Fatal(delErr)
+	}
+	calls := podmanCalls(t)
+	want := []string{
+		"container exists coreshift-dev",
+		"inspect --format {{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{.HostPort}}{{end}}{{end}} coreshift-dev",
+		"stop --timeout 120 coreshift-dev",
+		"rm coreshift-dev",
+	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("podman calls = %q\nwant %q", calls, want)
+	}
+	if !strings.Contains(out, "State removed at "+stateDir) {
+		t.Fatalf("output = %q, want the removed state named", out)
+	}
+	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+		t.Fatal("state directory still exists after cleanup")
+	}
+}
+
+// TestRunDeleteMissingCluster checks that deleting a missing cluster is
+// refused plainly, with nothing stopped or removed, with and without the
+// cleanup flag.
+func TestRunDeleteMissingCluster(t *testing.T) {
+	for _, cleanup := range []bool{false, true} {
+		writeFakePodman(t)
+		err := runDelete("nope", cleanup)
+		if err == nil || !strings.Contains(err.Error(), "no cluster named nope") {
+			t.Fatalf("cleanup=%v: err = %v, want a plain refusal", cleanup, err)
+		}
+		if calls := podmanCalls(t); len(calls) != 1 || calls[0] != "container exists coreshift-nope" {
+			t.Fatalf("cleanup=%v: podman calls = %q, want only the existence check", cleanup, calls)
+		}
 	}
 }
 
 // TestDeleteClusterFlagDefaults checks that the delete command comes with
-// the documented default.
+// the documented defaults.
 func TestDeleteClusterFlagDefaults(t *testing.T) {
 	cmd := newDeleteClusterCommand()
 	if flag := cmd.Flags().Lookup("name"); flag == nil {
 		t.Fatal("flag --name is not defined")
 	} else if flag.DefValue != "coreshift" {
 		t.Fatalf("--name default = %q, want coreshift", flag.DefValue)
+	}
+	if flag := cmd.Flags().Lookup("cleanup"); flag == nil {
+		t.Fatal("flag --cleanup is not defined")
+	} else if flag.DefValue != "false" {
+		t.Fatalf("--cleanup default = %q, want false", flag.DefValue)
 	}
 }
