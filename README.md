@@ -107,14 +107,20 @@ there the next time.
   runs. A non-default port uses `~/.local/state/coreshift/api/<port>/`
   instead, so runs on different ports never share certificates or data.
   Run `coreshift cleanup` to start over. Each directory records the release
-  image that created it and refuses to boot a different release against it,
-  because etcd data only works with the release that wrote it; run on
+  image that created it. A newer patch of the same minor stream reuses the
+  directory and upgrades it in place, the same move a real OpenShift cluster
+  makes on a patch update; a different minor stream, or an older patch,
+  refuses, because etcd data only moves forward within its stream. Run on
   another port to keep both. On a terminal the refusal offers to remove the
   directory and start fresh; everything in it is lost, including anything
   created through the API, and only an explicit yes goes ahead. Without a
   terminal the refusal names `coreshift cleanup` as the way to remove the
   directory from a script. Directories with etcd data from before this
-  record existed get the same treatment, for the same reason.
+  record existed get the same treatment, for the same reason. A run with
+  no release flags reuses the release the directory records instead of
+  floating to the newest, and prints a one-line note when a newer patch of
+  that stream exists, since the directory can be upgraded in place with
+  `--version`.
 - Image cache: `~/.cache/coreshift/`, shared by all runs regardless of port;
   see [Cache](#cache).
 
@@ -181,7 +187,11 @@ oc login https://127.0.0.1:6443 --certificate-authority=/home/you/.local/state/c
 
 Four flags pick the release; the defaults cover the common case. With none
 of them set, the newest stable release for the machine's architecture is
-resolved from the registry:
+resolved from the registry — unless the state directory already records a
+release, which then boots again as-is: a warm re-create, not a surprise
+upgrade. When the registry holds a newer patch of that release's stream,
+the run says so in one line and names `--version` as the flag that
+upgrades the state in place:
 
 ```
 ./coreshift run cluster --pull-secret ~/pull-secret
@@ -231,10 +241,17 @@ through to the run inside the container.
 the container image from the running binary (or takes one with `--image`),
 starts a detached container named `coreshift-<name>`, streams the boot
 output while polling readiness from the host, and prints the same ready
-summary as host mode. The container keeps running in the background when
-the command returns; closing the terminal does not stop it. The API is
-published on `127.0.0.1:<port>` only, so exposing it to the network stays
-an explicit act.
+summary as host mode. Before building or starting anything it reads the
+state directory's recorded release and applies the same reuse rule host
+mode applies: a newer patch of the same minor stream upgrades in place
+with no question, while a cross-stream move or a patch downgrade is
+refused up front — on a terminal with the same default-no fresh-start
+question `run cluster` asks, without one with the `--fresh` remedy — so a
+doomed run fails before an image is minted. State data that records no
+release is refused as the leftovers of a deleted cluster. The container
+keeps running in the background when the command returns; closing the
+terminal does not stop it. The API is published on `127.0.0.1:<port>`
+only, so exposing it to the network stays an explicit act.
 
 ### Prerequisites
 
@@ -288,7 +305,7 @@ port picks it back up.
   cluster needs its own name and port.
 - `--fresh`: remove the state directory before starting, without asking.
   This is the container-mode answer to a state directory that refuses
-  reuse because a different release created it.
+  reuse: a cross-stream move or a patch downgrade.
 - `--image`: the container image to run the cluster in, minted from the
   running binary when not given; see
   [The container image](#the-container-image).
