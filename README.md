@@ -389,23 +389,20 @@ pinned by digest. The final stage is ubi10/ubi-micro, the micro variant
 of the latest UBI major line: the control plane binaries are dynamically
 linked against glibc, and RHEL 9-built binaries run on ubi10's newer
 glibc, verified live by running all nine children in the image rather
-than assumed. The micro variant ships no CA certificates, which is what
-once pushed the choice outside Red Hat's ecosystem to distroless
-cc-debian12: a run inside a micro UBI cannot pull its release payload,
-because the registry connection fails TLS. That gap is now closed
-inside the family instead: the build copies the CA bundle from a
-ubi10/ubi-minimal stage and points the standard SSL certificate
-environment variable at it, so the Go binaries doing registry pulls,
-the coreshift binary and the children alike, trust the registry. The
-bundle comes from the larger stage at mint time, so it stays current
-with nothing checked into the repository, while the final image keeps
-roughly the size of the distroless build, the binary dominating either
-way. The choice was proven by a control plane boot inside the minted
-image with a cold cache: the in-container release pull worked and the
-control plane reached ready through the published port. The gpgme
-libraries openshift-controller-manager needs are embedded in the binary
-itself and written out at boot, so the image carries nothing but the
-binary and the certificate bundle.
+than assumed. The micro variant ships no CA certificates, so a run
+inside it cannot pull its release payload: the registry connection
+fails TLS. The build closes that gap inside the family by copying the
+CA bundle from a ubi10/ubi-minimal stage and pointing the standard SSL
+certificate environment variable at it, so the Go binaries doing
+registry pulls, the coreshift binary and the children alike, trust the
+registry. The bundle comes from the larger stage at mint time, so it
+stays current with nothing checked into the repository, while the final
+image stays micro-sized. The choice was proven by a control plane boot
+inside the minted image with a cold cache: the in-container release
+pull worked and the control plane reached ready through the published
+port. The gpgme libraries openshift-controller-manager needs are
+embedded in the binary itself and written out at boot, so the image
+carries nothing but the binary and the certificate bundle.
 
 ## The `cleanup` command
 
