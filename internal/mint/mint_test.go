@@ -3,6 +3,7 @@ package mint
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,8 +58,9 @@ func TestBuildContextWritesBinaryAndContainerfile(t *testing.T) {
 
 // writeFakePodman writes a podman stand-in into a directory of its own
 // and prepends that directory to PATH. It records every call, one line
-// per call, in the file named by PODMAN_LOG and answers the image-exists
-// check with existsStatus.
+// per call, in the file named by PODMAN_LOG, answers the image-exists
+// check with existsStatus, and answers a build with two lines of output
+// and the exit status named by PODMAN_BUILD_STATUS, zero when unset.
 func writeFakePodman(t *testing.T, existsStatus int) {
 	t.Helper()
 	dir := t.TempDir()
@@ -66,6 +68,11 @@ func writeFakePodman(t *testing.T, existsStatus int) {
 echo "$@" >> "$PODMAN_LOG"
 if [ "$1" = "image" ]; then
 	exit %d
+fi
+if [ "$1" = "build" ]; then
+	echo "step 1/2: FROM scratch"
+	echo "step 2/2: COPY coreshift /usr/local/bin/coreshift" >&2
+	exit "${PODMAN_BUILD_STATUS:-0}"
 fi
 exit 0
 `, existsStatus)
@@ -108,7 +115,7 @@ func wantedRef(t *testing.T, version string) string {
 func TestImageSkipsBuildWhenTagExists(t *testing.T) {
 	writeFakePodman(t, 0)
 
-	ref, err := Image(context.Background(), "test")
+	ref, err := Image(context.Background(), "test", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +130,7 @@ func TestImageSkipsBuildWhenTagExists(t *testing.T) {
 func TestImageBuildsWhenTagMissing(t *testing.T) {
 	writeFakePodman(t, 1)
 
-	ref, err := Image(context.Background(), "test")
+	ref, err := Image(context.Background(), "test", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,11 +149,107 @@ func TestImageBuildsWhenTagMissing(t *testing.T) {
 	}
 }
 
+// TestImageBuildQuietOnSuccess checks that a successful build prints
+// only the progress line: the build tool's output is captured, not
+// shown.
+func TestImageBuildQuietOnSuccess(t *testing.T) {
+	writeFakePodman(t, 1)
+
+	var err error
+	stdout, stderr := captureStd(t, func() { _, err = Image(context.Background(), "test", false) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "Building container image " + wantedRef(t, "test") + "\n"; stdout != want {
+		t.Fatalf("stdout = %q, want only the progress line %q", stdout, want)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want nothing from the build tool", stderr)
+	}
+}
+
+// TestImageBuildVerboseStreamsLive checks that a verbose build forwards
+// the build tool's output live.
+func TestImageBuildVerboseStreamsLive(t *testing.T) {
+	writeFakePodman(t, 1)
+
+	var err error
+	_, stderr := captureStd(t, func() { _, err = Image(context.Background(), "test", true) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"step 1/2", "step 2/2"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("verbose stderr missing %q:\n%s", want, stderr)
+		}
+	}
+}
+
+// TestImageBuildFailureShowsTailAndLog checks that a failed build
+// reports the recent tail of its captured output and where the full log
+// lives, keeping the log there.
+func TestImageBuildFailureShowsTailAndLog(t *testing.T) {
+	writeFakePodman(t, 1)
+	t.Setenv("PODMAN_BUILD_STATUS", "1")
+	cacheBase := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheBase)
+
+	_, err := Image(context.Background(), "test", false)
+	if err == nil {
+		t.Fatal("expected the build to fail")
+	}
+	log := filepath.Join(cacheBase, "coreshift", "build.log")
+	for _, want := range []string{"recent log output:", "step 2/2", "full log: " + log} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error missing %q:\n%v", want, err)
+		}
+	}
+	kept, readErr := os.ReadFile(log)
+	if readErr != nil || !strings.Contains(string(kept), "step 1/2") {
+		t.Fatalf("kept log = %q, %v, want the full build output", kept, readErr)
+	}
+}
+
 func TestImageRequiresPodman(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
-	_, err := Image(context.Background(), "test")
+	_, err := Image(context.Background(), "test", false)
 	if err == nil || !strings.Contains(err.Error(), "podman") {
 		t.Fatalf("err = %v, want an error naming podman", err)
 	}
+}
+
+// captureStd returns everything printed to standard output and standard
+// error while run runs.
+func captureStd(t *testing.T, run func()) (string, string) {
+	t.Helper()
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outW, errW
+	defer func() {
+		os.Stdout, os.Stderr = oldOut, oldErr
+	}()
+	stdout := make(chan string, 1)
+	stderr := make(chan string, 1)
+	go func() {
+		data, _ := io.ReadAll(outR)
+		outR.Close()
+		stdout <- string(data)
+	}()
+	go func() {
+		data, _ := io.ReadAll(errR)
+		errR.Close()
+		stderr <- string(data)
+	}()
+	run()
+	outW.Close()
+	errW.Close()
+	return <-stdout, <-stderr
 }
