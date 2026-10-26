@@ -201,7 +201,7 @@ func newClusterCommand() *cobra.Command {
 	cmd.Flags().IntVar(&port, "port", defaultAPIPort, "port the API server listens on")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "stream child process logs to the terminal")
 	cmd.Flags().StringVar(&release.image, "release-image", "", "exact release image reference to run, e.g. quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64")
-	cmd.Flags().StringVar(&release.version, "version", "", "OpenShift version to run, X.Y or X.Y.Z; defaults to the newest release")
+	cmd.Flags().StringVar(&release.version, "version", "", "OpenShift version to run, X.Y or X.Y.Z; defaults to the newest release, or the release recorded in the state directory")
 	cmd.Flags().StringVar(&release.registry, "registry", defaultReleaseRepository, "repository to resolve the release image from")
 	cmd.Flags().StringVar(&release.arch, "arch", defaultArch, "architecture of the release payload, as uname -m reports it")
 	if err := cmd.MarkFlagRequired("pull-secret"); err != nil {
@@ -234,11 +234,14 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 	}
 
 	fmt.Println("Preparing release image")
-	releaseRef, err := client.ResolveRelease(ctx, release.registry, release.version, release.arch, release.image)
+	releaseRef, note, err := bootRelease(ctx, client, release, stateDir)
 	if err != nil {
 		return fmt.Errorf("resolve release image: %w", err)
 	}
 	fmt.Printf("  Release image: %s\n", releaseRef)
+	if note != "" {
+		fmt.Println(note)
+	}
 	if err := ensureReleaseMarker(stateDir, releaseRef); err != nil {
 		if err := offerFreshStart(stateDir, port, err); err != nil {
 			return err
@@ -652,7 +655,7 @@ func newCreateClusterCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "stream the image build's output to the terminal")
 	cmd.Flags().StringVar(&imagePath, "image", "", "container image holding coreshift itself that the cluster runs in, minted from this binary when not given")
 	cmd.Flags().StringVar(&release.image, "release-image", "", "exact OpenShift payload release image to build the control plane from, e.g. quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64")
-	cmd.Flags().StringVar(&release.version, "version", "", "OpenShift version to run, X.Y or X.Y.Z; defaults to the newest release")
+	cmd.Flags().StringVar(&release.version, "version", "", "OpenShift version to run, X.Y or X.Y.Z; defaults to the newest release, or the release recorded in the state directory")
 	cmd.Flags().StringVar(&release.registry, "registry", defaultReleaseRepository, "repository to resolve the release image from")
 	cmd.Flags().StringVar(&release.arch, "arch", defaultArch, "architecture of the release payload, as uname -m reports it")
 	if err := cmd.MarkFlagRequired("pull-secret"); err != nil {
@@ -1183,6 +1186,44 @@ func stateRelease(stateDir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(release))
+}
+
+// bootRelease returns the release image reference this run boots, with a
+// note to print under it. An explicitly requested release resolves as
+// before; with none requested and a state directory recording a release,
+// the recorded one boots again — a warm re-create, not a surprise
+// upgrade — and the registry is still checked for a newer patch of its
+// stream to mention in the note.
+func bootRelease(ctx context.Context, client *image.Client, release releaseOptions, stateDir string) (string, string, error) {
+	recorded := stateRelease(stateDir)
+	if release.image == "" && release.version == "" && recorded != "" {
+		return recorded, newerReleaseNote(ctx, client, release, recorded), nil
+	}
+	ref, err := client.ResolveRelease(ctx, release.registry, release.version, release.arch, release.image)
+	return ref, "", err
+}
+
+// newerReleaseNote returns a one-line note naming the newest patch of the
+// recorded release's stream when the registry holds a newer one, saying
+// the state directory can be upgraded in place and with which flag. The
+// check is best effort: without an answer from the registry the warm
+// re-create proceeds without a note.
+func newerReleaseNote(ctx context.Context, client *image.Client, release releaseOptions, recorded string) string {
+	version, ok := image.ParseRefVersion(recorded)
+	if !ok {
+		return ""
+	}
+	tags, err := client.ListTags(ctx, release.registry)
+	if err != nil {
+		return ""
+	}
+	stream := fmt.Sprintf("%d.%d", version.Major, version.Minor)
+	newest, err := image.SelectRelease(image.ReleaseVersions(tags, release.arch), release.arch, stream)
+	if err != nil || newest.Version.Compare(version) <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("  A newer release, %s, exists; this state can be upgraded in place with --version %s",
+		newest.Version, newest.Version)
 }
 
 // readyProbeTimeout bounds the readiness probe of a cluster's API server.
