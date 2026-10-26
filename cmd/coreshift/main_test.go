@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -26,6 +28,7 @@ import (
 
 	"github.com/vkareh/coreshift/internal/certgen"
 	"github.com/vkareh/coreshift/internal/oauth"
+	"github.com/vkareh/coreshift/pkg/image"
 	clientcmd "k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
@@ -787,6 +790,114 @@ func TestEnsureReleaseMarkerExactMatchWithoutVersion(t *testing.T) {
 	}
 	if got := string(readFile(t, stateDir, releaseMarkerFilename)); got != "reg.example/ocp-release:nightly" {
 		t.Fatalf("refusal overwrote the marker, now %q", got)
+	}
+}
+
+// writeMarker records a release image reference in a state directory, the
+// way a boot does.
+func writeMarker(t *testing.T, stateDir, releaseRef string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(stateDir, releaseMarkerFilename), []byte(releaseRef), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// newTagRegistry serves a minimal v2 registry listing the given tags, so
+// release resolution can be exercised without a real one. It returns a
+// repository reference pointing at the fake registry.
+func newTagRegistry(t *testing.T, tags ...string) string {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v2/repo/tags/list", func(w http.ResponseWriter, _ *http.Request) {
+		page, err := json.Marshal(map[string][]string{"tags": tags})
+		if err != nil {
+			t.Errorf("marshal tags: %v", err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(page)
+	})
+	mux.HandleFunc("/v2/", func(w http.ResponseWriter, _ *http.Request) {})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 127.0.0.1 would be reached over https; localhost keeps it http.
+	return "localhost:" + parsed.Port() + "/repo"
+}
+
+// TestBootReleaseReusesRecordedRelease checks the warm re-create: with no
+// release requested and a state directory recording one, the recorded
+// reference boots again instead of the registry's newest, and the
+// registry is still checked for a newer patch of its stream to mention.
+func TestBootReleaseReusesRecordedRelease(t *testing.T) {
+	stateDir := t.TempDir()
+	writeMarker(t, stateDir, "reg.example/ocp-release:4.22.8-x86_64")
+	repo := newTagRegistry(t, "4.22.8-x86_64", "4.22.11-x86_64")
+	release := releaseOptions{registry: repo, arch: "x86_64"}
+
+	ref, note, err := bootRelease(context.Background(), &image.Client{}, release, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref != "reg.example/ocp-release:4.22.8-x86_64" {
+		t.Fatalf("ref = %q, want the recorded release", ref)
+	}
+	for _, want := range []string{"4.22.11", "--version 4.22.11"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("note = %q, want it to name the newer release and the flag that upgrades:\n%s", note, note)
+		}
+	}
+}
+
+// TestBootReleaseNoteOnlyForNewerPatch checks that the note stays quiet
+// when the recorded release is the stream's newest, and when only
+// another minor stream is newer, which cannot upgrade in place.
+func TestBootReleaseNoteOnlyForNewerPatch(t *testing.T) {
+	for name, tags := range map[string][]string{
+		"recorded is newest":   {"4.22.8-x86_64", "4.22.11-x86_64"},
+		"only another stream":  {"4.22.11-x86_64", "4.23.0-x86_64"},
+		"registry unreachable": nil,
+	} {
+		stateDir := t.TempDir()
+		writeMarker(t, stateDir, "reg.example/ocp-release:4.22.11-x86_64")
+		var repo string
+		if tags != nil {
+			repo = newTagRegistry(t, tags...)
+		} else {
+			repo = "localhost:1/repo" // nothing listens there
+		}
+		release := releaseOptions{registry: repo, arch: "x86_64"}
+
+		_, note, err := bootRelease(context.Background(), &image.Client{}, release, stateDir)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if note != "" {
+			t.Fatalf("%s: note = %q, want none", name, note)
+		}
+	}
+}
+
+// TestBootReleaseRequestedReleaseWins checks that an explicitly requested
+// version still resolves from the registry, even with a recorded release.
+func TestBootReleaseRequestedReleaseWins(t *testing.T) {
+	stateDir := t.TempDir()
+	writeMarker(t, stateDir, "reg.example/ocp-release:4.22.8-x86_64")
+	repo := newTagRegistry(t, "4.22.8-x86_64", "4.22.11-x86_64")
+	release := releaseOptions{registry: repo, version: "4.22.11", arch: "x86_64"}
+
+	ref, note, err := bootRelease(context.Background(), &image.Client{}, release, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := repo + ":4.22.11-x86_64"; ref != want {
+		t.Fatalf("ref = %q, want %q", ref, want)
+	}
+	if note != "" {
+		t.Fatalf("note = %q, want none for an explicitly requested release", note)
 	}
 }
 
