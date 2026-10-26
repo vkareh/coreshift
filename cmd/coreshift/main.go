@@ -676,9 +676,10 @@ const (
 )
 
 // runCreate creates a cluster container and waits for it to be ready. It
-// refuses a taken container name or a busy port before touching anything,
-// mints the container image from the running binary unless --image names
-// one, starts the container detached, streams its boot output, and polls
+// refuses a taken container name, a busy port, or a state directory that
+// cannot run the requested release before touching anything, mints the
+// container image from the running binary unless --image names one,
+// starts the container detached, streams its boot output, and polls
 // readiness from the host. On success the container keeps running; on any
 // failure it is removed while the state is kept.
 func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, imagePath, pullSecretPath string, release releaseOptions) error {
@@ -712,6 +713,9 @@ func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, 
 				return err
 			}
 		}
+	}
+	if err := checkCreateState(ctx, stateDir, release, pullSecretPath); err != nil {
+		return err
 	}
 	imageRef := imagePath
 	if imageRef == "" {
@@ -772,6 +776,48 @@ func podmanRunArgs(container string, port int, stateRoot, cacheRoot, pullSecretP
 		"--registry=" + release.registry,
 		"--arch=" + release.arch,
 	}
+}
+
+// checkCreateState refuses a create whose state directory cannot run the
+// release the cluster would boot, before an image is minted or a
+// container started. It resolves the requested release the same way the
+// run inside will and applies the marker's reuse rule to it, so only a
+// cross-stream move or a patch downgrade is a conflict. State data with
+// no recorded release is a deleted cluster's leftovers. On a terminal a
+// conflict asks the same default-no fresh-start question run cluster
+// asks; without one it refuses naming --fresh.
+func checkCreateState(ctx context.Context, stateDir string, release releaseOptions, pullSecretPath string) error {
+	recorded := stateRelease(stateDir)
+	if recorded == "" {
+		if _, err := os.Stat(filepath.Join(stateDir, "etcd-data")); err == nil {
+			return offerCreateFreshStart(stateDir, fmt.Errorf(
+				"state directory %s holds data left over from a deleted cluster, with no release recorded\n"+
+					"etcd data only works with the release that created it.\n"+
+					"Use --fresh to remove it and start fresh, or a different --port to get a separate one", stateDir))
+		}
+		return nil
+	}
+	if release.image == "" && release.version == "" {
+		// Nothing requested: the run inside reuses the recorded release.
+		return nil
+	}
+	pullSecret, err := os.ReadFile(pullSecretPath)
+	if err != nil {
+		return fmt.Errorf("read pull secret: %w", err)
+	}
+	client, err := image.NewClient(pullSecret)
+	if err != nil {
+		return err
+	}
+	releaseRef, err := client.ResolveRelease(ctx, release.registry, release.version, release.arch, release.image)
+	if err != nil {
+		return err
+	}
+	if releaseReuse(recorded, releaseRef) {
+		return nil
+	}
+	return offerCreateFreshStart(stateDir, stateRefusal(stateDir, recorded, releaseRef,
+		"Use --fresh to remove it and start fresh, or a different --port to get a separate one"))
 }
 
 // refuseIfContainerExists refuses to create a container whose name is
@@ -1598,8 +1644,23 @@ func stateRefusal(stateDir, recorded, releaseRef, remedy string) error {
 // other answer returns the refusal. Without a terminal it does not ask
 // and returns the refusal with a hint at the cleanup command.
 func offerFreshStart(stateDir string, port int, refusal error) error {
+	return askFreshStart(stateDir, refusal,
+		fmt.Sprintf("To remove it without a prompt, run: coreshift cleanup --port %d", port))
+}
+
+// offerCreateFreshStart offers the same for a create, whose scripted
+// remedy is its own --fresh flag rather than the cleanup command.
+func offerCreateFreshStart(stateDir string, refusal error) error {
+	return askFreshStart(stateDir, refusal, "To remove it without a prompt, run create cluster with --fresh")
+}
+
+// askFreshStart prints a refusal and asks whether to remove the state
+// directory and start fresh. With a terminal an explicit yes removes the
+// directory and returns nil; any other answer returns the refusal.
+// Without a terminal no question is asked, and the refusal gains hint.
+func askFreshStart(stateDir string, refusal error, hint string) error {
 	if !stdinIsTerminal() {
-		return fmt.Errorf("%w\nTo remove it without a prompt, run: coreshift cleanup --port %d", refusal, port)
+		return fmt.Errorf("%w\n%s", refusal, hint)
 	}
 	fmt.Println(refusal.Error())
 	fmt.Println()

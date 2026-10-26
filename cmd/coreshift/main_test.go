@@ -1033,6 +1033,136 @@ func TestOfferFreshStartWithoutTerminalOnNullDevice(t *testing.T) {
 	}
 }
 
+// noTerminal points standard input at a pipe, so fresh-start offers take
+// the scripted path instead of asking a question.
+func noTerminal(t *testing.T) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	swapStdin(t, r)
+	t.Cleanup(func() { w.Close() })
+}
+
+// writePullSecret writes a minimal pull secret and returns its path.
+func writePullSecret(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "pull-secret")
+	if err := os.WriteFile(path, []byte(`{"auths":{"quay.io":{"auth":"dXNlcjpwYXNz"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestCheckCreateStateAcceptsCompatibleReleases checks the pre-flight's
+// accepting side: a same-stream newer patch resolves and upgrades in
+// place with no question, an exact image pin compares by the same rule,
+// and an empty state directory or an unrequested release is no conflict.
+func TestCheckCreateStateAcceptsCompatibleReleases(t *testing.T) {
+	repo := newTagRegistry(t, "4.22.8-x86_64", "4.22.9-x86_64")
+	secret := writePullSecret(t)
+	for name, tc := range map[string]struct {
+		marker  string
+		release releaseOptions
+	}{
+		"newer patch of same stream": {
+			marker:  "reg.example/ocp-release:4.22.8-x86_64",
+			release: releaseOptions{registry: repo, version: "4.22.9", arch: "x86_64"},
+		},
+		"pinned newer patch of same stream": {
+			marker:  "reg.example/ocp-release:4.22.8-x86_64",
+			release: releaseOptions{image: "reg.example/ocp-release:4.22.9-x86_64"},
+		},
+		"pinned recorded release": {
+			marker:  "reg.example/ocp-release:nightly",
+			release: releaseOptions{image: "reg.example/ocp-release:nightly"},
+		},
+		"no release requested": {
+			marker:  "reg.example/ocp-release:4.22.8-x86_64",
+			release: releaseOptions{registry: repo, arch: "x86_64"},
+		},
+	} {
+		stateDir := t.TempDir()
+		writeMarker(t, stateDir, tc.marker)
+		if err := checkCreateState(context.Background(), stateDir, tc.release, secret); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+
+	fresh := t.TempDir()
+	if err := checkCreateState(context.Background(), fresh, releaseOptions{registry: repo, version: "4.22.9", arch: "x86_64"}, secret); err != nil {
+		t.Fatalf("empty state directory: %v", err)
+	}
+}
+
+// TestCheckCreateStateRefusesConflicts checks the pre-flight's refusals,
+// which must arrive before any image is minted: a downgrade and a
+// cross-stream move against a recorded release, and a pinned image the
+// recorded one cannot run.
+func TestCheckCreateStateRefusesConflicts(t *testing.T) {
+	repo := newTagRegistry(t, "4.19.3-x86_64", "4.22.8-x86_64", "4.22.9-x86_64")
+	secret := writePullSecret(t)
+	for name, tc := range map[string]struct {
+		marker  string
+		release releaseOptions
+	}{
+		"patch downgrade": {
+			marker:  "reg.example/ocp-release:4.22.9-x86_64",
+			release: releaseOptions{registry: repo, version: "4.22.8", arch: "x86_64"},
+		},
+		"cross-stream move": {
+			marker:  "reg.example/ocp-release:4.22.9-x86_64",
+			release: releaseOptions{registry: repo, version: "4.19.3", arch: "x86_64"},
+		},
+		"pinned image from another stream": {
+			marker:  "reg.example/ocp-release:4.22.9-x86_64",
+			release: releaseOptions{image: "reg.example/ocp-release:4.19.3-x86_64"},
+		},
+		"pinned image without a version": {
+			marker:  "reg.example/ocp-release:nightly",
+			release: releaseOptions{image: "reg.example/ocp-release:4.22.9-x86_64"},
+		},
+	} {
+		noTerminal(t)
+		stateDir := t.TempDir()
+		writeMarker(t, stateDir, tc.marker)
+
+		err := checkCreateState(context.Background(), stateDir, tc.release, secret)
+		if err == nil {
+			t.Fatalf("%s: expected a refusal", name)
+		}
+		for _, want := range []string{"cannot be reused", "newer patch", "--fresh"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("%s: refusal missing %q:\n%v", name, want, err)
+			}
+		}
+		if _, statErr := os.Stat(filepath.Join(stateDir, releaseMarkerFilename)); statErr != nil {
+			t.Fatalf("%s: refusal removed the state directory: %v", name, statErr)
+		}
+	}
+}
+
+// TestCheckCreateStateRefusesUntrackedLeftovers checks the plain naming
+// of state data that records no release: a deleted cluster's leftovers.
+func TestCheckCreateStateRefusesUntrackedLeftovers(t *testing.T) {
+	noTerminal(t)
+	stateDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(stateDir, "etcd-data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := checkCreateState(context.Background(), stateDir, releaseOptions{}, writePullSecret(t))
+	if err == nil {
+		t.Fatal("expected a refusal for untracked state data")
+	}
+	for _, want := range []string{"left over from a deleted cluster", "--fresh"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal missing %q:\n%v", want, err)
+		}
+	}
+}
+
 func readFile(t *testing.T, dir, name string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(dir, name))
