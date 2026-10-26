@@ -730,6 +730,66 @@ func TestEnsureReleaseMarkerRefusesDifferentRelease(t *testing.T) {
 	}
 }
 
+// TestEnsureReleaseMarkerUpgradesPatchInPlace checks the relaxed rule's
+// accepting side: a newer patch of the same minor stream reuses the
+// directory, recording the upgrade, the same move a real cluster makes.
+func TestEnsureReleaseMarkerUpgradesPatchInPlace(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.8-x86_64"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.9-x86_64"); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(readFile(t, stateDir, releaseMarkerFilename)); got != "reg.example/ocp-release:4.22.9-x86_64" {
+		t.Fatalf("marker = %q, want the upgrading release recorded", got)
+	}
+}
+
+// TestEnsureReleaseMarkerRefusesPatchDowngrade checks that a same-stream
+// older patch still refuses, stating the rule.
+func TestEnsureReleaseMarkerRefusesPatchDowngrade(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.9-x86_64"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.8-x86_64")
+	if err == nil {
+		t.Fatal("expected a refusal for a patch downgrade")
+	}
+	for _, want := range []string{"4.22.9", "4.22.8", "newer patch", stateDir} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal missing %q:\n%v", want, err)
+		}
+	}
+	if got := string(readFile(t, stateDir, releaseMarkerFilename)); got != "reg.example/ocp-release:4.22.9-x86_64" {
+		t.Fatalf("refusal overwrote the marker, now %q", got)
+	}
+}
+
+// TestEnsureReleaseMarkerExactMatchWithoutVersion checks the fallback for
+// references carrying no parseable version: only an exact match reuses
+// the directory, as before, rather than guessing at an upgrade.
+func TestEnsureReleaseMarkerExactMatchWithoutVersion(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:nightly"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:nightly"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.9-x86_64")
+	if err == nil {
+		t.Fatal("expected a refusal without a parseable version to compare")
+	}
+	if got := string(readFile(t, stateDir, releaseMarkerFilename)); got != "reg.example/ocp-release:nightly" {
+		t.Fatalf("refusal overwrote the marker, now %q", got)
+	}
+}
+
 func TestEnsureReleaseMarkerRefusesUntrackedEtcdData(t *testing.T) {
 	stateDir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(stateDir, "etcd-data"), 0o755); err != nil {

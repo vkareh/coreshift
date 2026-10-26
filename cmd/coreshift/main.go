@@ -1483,26 +1483,33 @@ func stateRoot() (string, error) {
 }
 
 // releaseMarkerFilename records which release image created the state
-// directory's etcd data. etcd data only works with the release that
-// wrote it, so the marker is checked before anything starts.
+// directory's etcd data. etcd data only moves within the release's minor
+// stream, so the marker is checked before anything starts: a newer patch
+// of the stream upgrades the directory in place, anything else refuses.
 const releaseMarkerFilename = "release-image"
 
 // ensureReleaseMarker refuses to reuse a state directory whose etcd data
-// is incompatible with the release this run resolved: one written by
-// another release, or one from before markers existed. A fresh directory
-// gains a marker naming the resolved release.
+// cannot run the release this run resolved, and records the release on a
+// fresh directory. A newer patch of the same minor stream reuses the
+// directory as an in-place upgrade, the same move a real OpenShift
+// cluster makes on a patch update; anything else refuses.
 func ensureReleaseMarker(stateDir, releaseRef string) error {
 	marker := filepath.Join(stateDir, releaseMarkerFilename)
 	recorded, err := os.ReadFile(marker)
 	if err == nil {
 		created := strings.TrimSpace(string(recorded))
-		if created == releaseRef {
+		if releaseReuse(created, releaseRef) {
+			if created == releaseRef {
+				return nil
+			}
+			// An in-place upgrade: the marker moves to the new release.
+			if err := os.WriteFile(marker, []byte(releaseRef), 0o644); err != nil {
+				return fmt.Errorf("write release marker: %w", err)
+			}
 			return nil
 		}
-		return fmt.Errorf("state directory %s was created by release %s and cannot be reused by %s\n"+
-			"etcd data only works with the release that created it.\n"+
-			"Use a different --port to get a separate state directory, or remove %s to start fresh",
-			stateDir, created, releaseRef, stateDir)
+		return stateRefusal(stateDir, created, releaseRef,
+			fmt.Sprintf("Use a different --port to get a separate state directory, or remove %s to start fresh", stateDir))
 	}
 	if !os.IsNotExist(err) {
 		return fmt.Errorf("read release marker: %w", err)
@@ -1517,6 +1524,30 @@ func ensureReleaseMarker(stateDir, releaseRef string) error {
 		return fmt.Errorf("write release marker: %w", err)
 	}
 	return nil
+}
+
+// releaseReuse reports whether a state directory recorded as created by
+// recorded can boot releaseRef: the same reference, or a newer patch of
+// the same minor stream, which upgrades the directory in place like a
+// real cluster's patch update. References carrying no parseable version
+// fall back to exact match rather than guessing.
+func releaseReuse(recorded, releaseRef string) bool {
+	if recorded == releaseRef {
+		return true
+	}
+	have, haveVersion := image.ParseRefVersion(recorded)
+	want, wantVersion := image.ParseRefVersion(releaseRef)
+	return haveVersion && wantVersion &&
+		want.Major == have.Major && want.Minor == have.Minor &&
+		want.Compare(have) >= 0
+}
+
+// stateRefusal is the error for a state directory that cannot run a
+// release, stating the reuse rule and the mode's remedy.
+func stateRefusal(stateDir, recorded, releaseRef, remedy string) error {
+	return fmt.Errorf("state directory %s was created by release %s and cannot be reused by %s\n"+
+		"Only a newer patch of the same minor stream can upgrade it in place.\n%s",
+		stateDir, recorded, releaseRef, remedy)
 }
 
 // offerFreshStart offers to remove a state directory that refused reuse.
