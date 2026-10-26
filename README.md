@@ -369,6 +369,12 @@ the state is, with `coreshift cleanup` named as the way to remove it.
 
 `--name` selects a cluster other than the default `coreshift`.
 
+`--cleanup` opts into destroying the data as well: once the container is
+down, the state directory is removed with the same removal the cleanup
+command uses, while the shared image cache is kept either way. The
+command says in one line whether the state was kept or removed, and
+where.
+
 ## The `get` command
 
 `coreshift get clusters` lists the clusters: name, published port,
