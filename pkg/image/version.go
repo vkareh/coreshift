@@ -47,6 +47,21 @@ func ReleaseVersions(tags []string, arch string) []Version {
 	return versions
 }
 
+// ParseRefVersion returns the version a release image reference carries
+// in its tag, e.g. 4.22.19 for
+// "quay.io/openshift-release-dev/ocp-release:4.22.19-x86_64". Digest
+// references and tags without a plain X.Y.Z version report false.
+func ParseRefVersion(ref string) (Version, bool) {
+	if i := strings.LastIndex(ref, ":"); i >= 0 {
+		ref = ref[i+1:]
+	}
+	numbers, _, found := strings.Cut(ref, "-")
+	if !found {
+		return Version{}, false
+	}
+	return parseVersion(numbers)
+}
+
 // parseVersion parses "major.minor.patch" accepting plain digits only,
 // so variants like "4.10.0-rc.1" fail instead of parsing as a version.
 func parseVersion(numbers string) (Version, bool) {

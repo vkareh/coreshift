@@ -62,3 +62,28 @@ func TestVersionCompareOrdersHighestLast(t *testing.T) {
 		t.Fatalf("highest = %v, want 4.22.11", highest)
 	}
 }
+
+// TestParseRefVersion checks the version a release image reference
+// carries in its tag: registry hosts with ports and both default and
+// custom repositories parse, while stream tags, candidates, and digest
+// references report none.
+func TestParseRefVersion(t *testing.T) {
+	for _, tc := range []struct {
+		ref  string
+		want Version
+		ok   bool
+	}{
+		{"quay.io/openshift-release-dev/ocp-release:4.22.19-x86_64", Version{Major: 4, Minor: 22, Patch: 19}, true},
+		{"localhost:5000/ocp-release:4.19.3-aarch64", Version{Major: 4, Minor: 19, Patch: 3}, true},
+		{"quay.io/openshift-release-dev/ocp-release:4.22-x86_64", Version{}, false},
+		{"quay.io/openshift-release-dev/ocp-release:4.23.0-rc.0-x86_64", Version{Major: 4, Minor: 23, Patch: 0}, true},
+		{"quay.io/openshift-release-dev/ocp-release@sha256:0123abcd", Version{}, false},
+		{"quay.io/openshift-release-dev/ocp-release", Version{}, false},
+		{"assembly.2cf84f371b1e75c22a37c0e4b0d0f5d5", Version{}, false},
+	} {
+		v, ok := ParseRefVersion(tc.ref)
+		if ok != tc.ok || v != tc.want {
+			t.Errorf("ParseRefVersion(%q) = %v, %v, want %v, %v", tc.ref, v, ok, tc.want, tc.ok)
+		}
+	}
+}
