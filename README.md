@@ -86,7 +86,9 @@ there the next time.
   something else already occupies 6443. A non-default port gets its own state
   directory, but etcd and the other components always listen on the same
   fixed ports, so this is for avoiding a port collision, not for running two
-  instances side by side.
+  instances side by side. The reserved ports, refused up front, are 2379,
+  2380 (etcd), 8443, 8444, 8445, 8446, and 10357 (the OpenShift
+  components).
 - `--verbose`: stream each child's logs live to the terminal, prefixed with
   the child's name. By default child logs are captured to one file per child
   under the `logs` folder of the state directory.
@@ -299,7 +301,8 @@ port picks it back up.
 - `--pull-secret` (required): path to the pull secret JSON file.
 - `--port`: the port the API is published on, 6443 by default. Like host
   mode, a non-default port gets its own state directory. Create refuses a
-  port something already listens on.
+  port something already listens on, and one of the control plane's
+  reserved ports listed under host mode.
 - `--name`: the cluster's name, `coreshift` by default; the container is
   called `coreshift-<name>`. Create refuses a taken name, so a second
   cluster needs its own name and port.
