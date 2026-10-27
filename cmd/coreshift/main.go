@@ -76,16 +76,46 @@ func releaseArch(goArch string) (string, error) {
 	return arch, nil
 }
 
-// Local ports of the aggregated API servers. kube-apiserver reaches them
-// through the aggregation layer; the ports appear both in the server flags
-// and in the endpoints the aggregation wiring registers.
+// Local ports of the control plane's children, fixed whatever --port the
+// API server takes: etcd's client and peer ports, the ports of the
+// aggregated API servers kube-apiserver reaches through the aggregation
+// layer, and the controllers' health endpoints. The ports appear both in
+// the children's flags and configs and in the endpoints the aggregation
+// wiring registers.
 const (
+	etcdClientPort                 = 2379
+	etcdPeerPort                   = 2380
 	openShiftAPIServerPort         = 8443
 	oauthAPIServerPort             = 8444
 	oauthServerPort                = 8445
 	openShiftControllerManagerPort = 8446
 	clusterPolicyControllerPort    = 10357
 )
+
+// The etcd endpoints built from the ports above, so they cannot drift.
+var (
+	etcdClientURL = "http://127.0.0.1:" + strconv.Itoa(etcdClientPort)
+	etcdPeerURL   = "http://127.0.0.1:" + strconv.Itoa(etcdPeerPort)
+)
+
+// reservedPorts are the children's ports from above, which the API server
+// must not take: inside a container it binds every interface, so the
+// collision would surface only as a confusing failure late in the boot.
+var reservedPorts = []int{
+	etcdClientPort, etcdPeerPort,
+	openShiftAPIServerPort, oauthAPIServerPort, oauthServerPort,
+	openShiftControllerManagerPort, clusterPolicyControllerPort,
+}
+
+// refuseReservedPort refuses an API port a control-plane child listens
+// on, naming the reserved set so a neighboring port can be picked. It
+// runs before any certificate, image, or state work.
+func refuseReservedPort(port int) error {
+	if !slices.Contains(reservedPorts, port) {
+		return nil
+	}
+	return fmt.Errorf("port %d is reserved for the control plane's own components; the reserved ports are %v; pick a neighboring port", port, reservedPorts)
+}
 
 // defaultAPIPort is the port the API server listens on unless overridden.
 const defaultAPIPort = 6443
@@ -211,6 +241,9 @@ func newClusterCommand() *cobra.Command {
 }
 
 func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, release releaseOptions) error {
+	if err := refuseReservedPort(port); err != nil {
+		return err
+	}
 	if verbose {
 		// Image cache messages are quiet by default; verbose runs show
 		// them again, like the live child logs.
@@ -336,16 +369,16 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 			Path: etcdPath,
 			Args: []string{
 				"--data-dir=" + filepath.Join(stateDir, "etcd-data"),
-				"--listen-client-urls=http://127.0.0.1:2379",
-				"--advertise-client-urls=http://127.0.0.1:2379",
-				"--listen-peer-urls=http://127.0.0.1:2380",
+				"--listen-client-urls=" + etcdClientURL,
+				"--advertise-client-urls=" + etcdClientURL,
+				"--listen-peer-urls=" + etcdPeerURL,
 			},
 		},
 		{
 			Name: "kube-apiserver",
 			Path: kubeBinaries["kube-apiserver"],
 			Args: []string{
-				"--etcd-servers=http://127.0.0.1:2379",
+				"--etcd-servers=" + etcdClientURL,
 			"--secure-port=" + strconv.Itoa(port),
 			"--bind-address=" + apiBindAddress(),
 				"--tls-cert-file=" + filepath.Join(stateDir, certgen.APIServerCertFilename),
@@ -468,7 +501,7 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 				"--kubeconfig=" + filepath.Join(stateDir, certgen.OAuthAPIServerKubeconfigFilename),
 				"--authentication-kubeconfig=" + filepath.Join(stateDir, certgen.OAuthAPIServerKubeconfigFilename),
 				"--authorization-kubeconfig=" + filepath.Join(stateDir, certgen.OAuthAPIServerKubeconfigFilename),
-				"--etcd-servers=http://127.0.0.1:2379",
+				"--etcd-servers=" + etcdClientURL,
 				"--api-audiences=https://kubernetes.default.svc.cluster.local",
 				"--tls-cert-file=" + filepath.Join(stateDir, certgen.ServiceServingCertFilename),
 				"--tls-private-key-file=" + filepath.Join(stateDir, certgen.ServiceServingKeyFilename),
@@ -676,13 +709,16 @@ const (
 )
 
 // runCreate creates a cluster container and waits for it to be ready. It
-// refuses a taken container name, a busy port, or a state directory that
-// cannot run the requested release before touching anything, mints the
-// container image from the running binary unless --image names one,
-// starts the container detached, streams its boot output, and polls
-// readiness from the host. On success the container keeps running; on any
-// failure it is removed while the state is kept.
+// refuses a reserved or otherwise taken port, a taken container name, or a
+// state directory that cannot run the requested release before touching
+// anything, mints the container image from the running binary unless
+// --image names one, starts the container detached, streams its boot
+// output, and polls readiness from the host. On success the container
+// keeps running; on any failure it is removed while the state is kept.
 func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, imagePath, pullSecretPath string, release releaseOptions) error {
+	if err := refuseReservedPort(port); err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -1845,13 +1881,14 @@ apiServerArguments:
   - ""
 storageConfig:
   urls:
-  - http://127.0.0.1:2379
+  - %s
 kubeClientConfig:
   kubeConfig: %s
 `, advertiseAddress, openShiftAPIServerPort,
 		filepath.Join(stateDir, certgen.ServiceServingCertFilename),
 		filepath.Join(stateDir, certgen.ServiceServingKeyFilename),
 		filepath.Join(stateDir, certgen.CACertFilename),
+		etcdClientURL,
 		filepath.Join(stateDir, certgen.OpenShiftAPIServerKubeconfigFilename))
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		return "", fmt.Errorf("write openshift-apiserver config: %w", err)
