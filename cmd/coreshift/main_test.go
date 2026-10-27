@@ -561,6 +561,53 @@ func TestPodmanRunArgs(t *testing.T) {
 	}
 }
 
+// TestRefuseReservedPort checks that every port a control-plane child
+// listens on is refused with the full reserved set named, and that any
+// other port, the default one included, passes.
+func TestRefuseReservedPort(t *testing.T) {
+	for _, port := range reservedPorts {
+		err := refuseReservedPort(port)
+		if err == nil {
+			t.Fatalf("port %d: expected a refusal", port)
+		}
+		for _, reserved := range reservedPorts {
+			if !strings.Contains(err.Error(), strconv.Itoa(reserved)) {
+				t.Fatalf("port %d: refusal does not name reserved port %d:\n%v", port, reserved, err)
+			}
+		}
+	}
+	for _, port := range []int{defaultAPIPort, 8447} {
+		if err := refuseReservedPort(port); err != nil {
+			t.Fatalf("port %d: unexpected refusal: %v", port, err)
+		}
+	}
+}
+
+// TestRunClusterRefusesReservedPort checks that run cluster refuses a
+// reserved port before anything else: a pull secret path that does not
+// exist still yields the port refusal, not a read error.
+func TestRunClusterRefusesReservedPort(t *testing.T) {
+	root := newRootCommand()
+	root.SetArgs([]string{"run", "cluster", "--pull-secret", "/nonexistent", "--port", strconv.Itoa(oauthServerPort)})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("err = %v, want a reserved-port refusal", err)
+	}
+}
+
+// TestCreateClusterRefusesReservedPort checks that create cluster refuses
+// a reserved port before anything else: with no podman on PATH and no
+// pull secret to read, the port refusal is still the one that arrives.
+func TestCreateClusterRefusesReservedPort(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	root := newRootCommand()
+	root.SetArgs([]string{"create", "cluster", "--pull-secret", "/nonexistent", "--port", strconv.Itoa(etcdClientPort)})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("err = %v, want a reserved-port refusal", err)
+	}
+}
+
 // TestRefuseIfPortBusy checks that a port something already listens on is
 // refused, naming the port.
 func TestRefuseIfPortBusy(t *testing.T) {
@@ -696,6 +743,28 @@ func TestWriteOAuthServerConfigRendersProviders(t *testing.T) {
       file: ` + file + "\n"
 	if !strings.Contains(config, want) {
 		t.Fatalf("config missing provider stanza, want:\n%s\ngot:\n%s", want, config)
+	}
+}
+
+// TestWriteOpenShiftAPIServerConfigContents checks that the config serves
+// on the advertise address with the shared service-serving certificate
+// and stores to the local etcd, so the constants cannot drift from what
+// the config carries.
+func TestWriteOpenShiftAPIServerConfigContents(t *testing.T) {
+	stateDir := t.TempDir()
+	path, err := writeOpenShiftAPIServerConfig(stateDir, "10.1.2.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := string(readFile(t, stateDir, filepath.Base(path)))
+	for _, want := range []string{
+		fmt.Sprintf("10.1.2.3:%d", openShiftAPIServerPort),
+		filepath.Join(stateDir, certgen.ServiceServingCertFilename),
+		"- " + etcdClientURL,
+	} {
+		if !strings.Contains(config, want) {
+			t.Fatalf("config missing %q:\n%s", want, config)
+		}
 	}
 }
 
