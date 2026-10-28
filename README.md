@@ -5,8 +5,9 @@ without a full cluster install — no VM, no kubelet, no proprietary tooling
 required to actually run it. The control plane (etcd, kube-apiserver,
 kube-controller-manager, kube-scheduler, plus the full OpenShift API layer:
 openshift-apiserver, oauth-apiserver, oauth-server,
-openshift-controller-manager, cluster-policy-controller) is built from real,
-version-matched upstream OpenShift components, not reimplementations.
+openshift-controller-manager, cluster-policy-controller, and the
+cluster-machine-approver) is built from real, version-matched upstream
+OpenShift components, not reimplementations.
 
 CoreShift runs the same real control plane two ways. `coreshift run
 cluster` runs it here in this terminal, as ordinary processes on the host,
@@ -53,7 +54,8 @@ upstream OpenShift release image and started directly — no containers, no
 cluster install. etcd,
 kube-apiserver, kube-controller-manager, and kube-scheduler run alongside the
 full OpenShift API layer: openshift-apiserver, oauth-apiserver, oauth-server,
-openshift-controller-manager, and cluster-policy-controller. Everything
+openshift-controller-manager, cluster-policy-controller, and
+cluster-machine-approver. Everything
 listens on the host, and `oc` talks to the API server like it would to any
 cluster.
 

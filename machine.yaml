@@ -1,0 +1,6 @@
+apiVersion: machine.openshift.io/v1beta1
+kind: Machine
+metadata:
+  name: worker-1
+  namespace: default
+spec: {}
