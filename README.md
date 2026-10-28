@@ -387,6 +387,100 @@ or its node never registers — the error quotes the tail of the
 container's log, the container is removed, and the cluster's state is
 kept.
 
+### Quickstart
+
+With a cluster running in either mode — in host mode, leave the `run
+cluster` terminal alone and use another one — join a worker to it:
+
+```
+./coreshift create worker --pull-secret ~/pull-secret
+```
+
+The command mints the join material, mints the worker image from the
+release the cluster records, starts the worker container, and streams
+its boot while waiting for the node to register. The image build line
+appears the first time only; a later create skips it, because the image
+is tagged from the running binary:
+
+```
+Minting the bootstrap identity
+Minting the machine stand-in
+Building container image localhost/coreshift-worker:46637e0-80ad7a553365
+Starting container coreshift-worker-worker1
+Waiting for the worker to join
+Requesting node certificate
+Waiting for the node certificate to be approved
+starting crio
+starting kubelet
+Waiting for the node to register
+
+Worker joined
+  Node:       worker1, reporting NotReady until a CNI exists
+  Kubeconfig: /home/you/.local/state/coreshift/api/admin.kubeconfig
+  Container coreshift-worker-worker1 is running in the background
+```
+
+Then watch the node, with the kubeconfig from the summary:
+
+```
+export KUBECONFIG=~/.local/state/coreshift/api/admin.kubeconfig
+oc get nodes
+NAME      STATUS     ROLES    AGE   VERSION
+worker1   NotReady   <none>   6s    v1.35.9
+```
+
+NotReady is the expected end state, not a bug: the node's Ready
+condition names the reason, and the message behind it names the missing
+CNI configuration:
+
+```
+oc get node worker1 -o jsonpath='{range .status.conditions[*]}{.type}{"="}{.status}{" "}{.reason}{"\n"}{end}'
+MemoryPressure=False KubeletHasSufficientMemory
+DiskPressure=False KubeletHasNoDiskPressure
+PIDPressure=False KubeletHasSufficientPID
+Ready=False KubeletNotReady
+```
+
+The join is real all the way through: the node's certificate request was
+approved by the machine approver the control plane runs, and issued:
+
+```
+oc get csr
+NAME                  AGE   SIGNERNAME                                    REQUESTOR                                                                   REQUESTEDDURATION   CONDITION
+system:node:worker1   22s   kubernetes.io/kube-apiserver-client-kubelet   system:serviceaccount:openshift-machine-config-operator:node-bootstrapper   <none>              Approved,Issued
+```
+
+```
+oc get csr system:node:worker1 -o jsonpath='{.status.conditions[0].message}'
+This CSR was approved by the Node CSR Approver (cluster-machine-approver)
+```
+
+Check what is running, and remove the worker again:
+
+```
+./coreshift get workers
+NAME      CLUSTER     READY
+worker1   coreshift   not ready
+```
+
+```
+./coreshift delete worker
+Stopping container coreshift-worker-worker1
+Deleted worker worker1
+Node worker1 removed from cluster coreshift
+```
+
+The node list is clean again:
+
+```
+oc get nodes
+No resources found
+```
+
+Creating the worker once more joins fresh: the deleted worker's node,
+machine record, and certificate request went with it, so the new join
+starts from nothing.
+
 ### Flags
 
 - `--pull-secret` (required): path to the pull secret JSON file; the
