@@ -109,3 +109,15 @@ func TestSelectOpenShiftComponents(t *testing.T) {
 		t.Fatalf("error = %v, want mention of hyperkube", err)
 	}
 }
+
+func TestSelectMachineApproverBinary(t *testing.T) {
+	selected, err := selectOpenShiftComponents("cluster-machine-approver")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The component image names its binary machine-approver, the name its
+	// deployment runs it by.
+	if selected[0].path != "/usr/bin/machine-approver" {
+		t.Fatalf("cluster-machine-approver path = %q, want /usr/bin/machine-approver", selected[0].path)
+	}
+}
