@@ -35,6 +35,7 @@ import (
 	"github.com/vkareh/coreshift/internal/rbac"
 	"github.com/vkareh/coreshift/internal/scc"
 	"github.com/vkareh/coreshift/internal/supervisor"
+	"github.com/vkareh/coreshift/internal/worker"
 	"github.com/vkareh/coreshift/pkg/image"
 	"golang.org/x/term"
 	clientcmd "k8s.io/client-go/tools/clientcmd"
@@ -172,8 +173,9 @@ func newRootCommand() *cobra.Command {
 }
 
 // newRunCommand builds the parent of everything runnable. It takes a
-// noun naming what to run; today only cluster exists. With no noun, or
-// an unknown one, it prints the list and fails.
+// noun naming what to run: the control plane, or the node side inside a
+// worker container. With no noun, or an unknown one, it prints the list
+// and fails.
 func newRunCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -189,6 +191,7 @@ func newRunCommand() *cobra.Command {
 		},
 	}
 	cmd.AddCommand(newClusterCommand())
+	cmd.AddCommand(newWorkerCommand())
 	return cmd
 }
 
@@ -238,6 +241,25 @@ func newClusterCommand() *cobra.Command {
 		panic(err) // the flag is defined above
 	}
 	return cmd
+}
+
+// newWorkerCommand builds the command that runs inside a worker
+// container: it joins the control plane whose bootstrap material is
+// mounted in and runs the node side until the container stops. Its
+// configuration arrives as files, never as flags: the host-side create
+// command mounts the bootstrap kubeconfig and the node name in.
+func newWorkerCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "worker",
+		Short: "Join a control plane and run the node side",
+		// Failures carry their own report, and the worker container
+		// surfaces this command's errors as the container's log; a usage
+		// dump after them would bury it.
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return worker.Run(cmd.Context())
+		},
+	}
 }
 
 func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, release releaseOptions) error {
