@@ -166,6 +166,7 @@ func TestSeedRegistersMachineApprover(t *testing.T) {
 		t.Fatalf("cluster role: %v", err)
 	}
 	wantRules := []rbacv1.PolicyRule{
+		{APIGroups: []string{"certificates.k8s.io"}, Resources: []string{"certificatesigningrequests"}, Verbs: []string{"get", "list", "watch"}},
 		{APIGroups: []string{"certificates.k8s.io"}, Resources: []string{"certificatesigningrequests/approval"}, Verbs: []string{"update"}},
 		{APIGroups: []string{"certificates.k8s.io"}, Resources: []string{"signers"}, ResourceNames: []string{"kubernetes.io/kube-apiserver-client-kubelet", "kubernetes.io/kubelet-serving"}, Verbs: []string{"approve"}},
 		{APIGroups: []string{"machine.openshift.io"}, Resources: []string{"machines"}, Verbs: []string{"get", "list", "watch"}},
