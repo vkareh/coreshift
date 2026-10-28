@@ -445,8 +445,10 @@ func TestRunWithoutNounPrintsHelp(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "cluster") {
-		t.Fatalf("run help missing the cluster noun:\n%s", out.String())
+	for _, want := range []string{"cluster", "worker"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("run help missing the %s noun:\n%s", want, out.String())
+		}
 	}
 }
 
