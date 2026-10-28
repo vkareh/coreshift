@@ -38,6 +38,18 @@ const (
 	privilegedSyncerAccount = "privileged-namespaces-psa-label-syncer"
 
 	restrictedConstraint = "system:openshift:scc:restricted-v3"
+
+	// The machine approver's identity, matching its ClusterRole the way
+	// OpenShift controller identities do; its component kubeconfig presents
+	// this name.
+	machineApprover = "system:openshift:controller:machine-approver"
+
+	// The node bootstrap permission pair the machine config operator
+	// applies in real clusters: the service account whose token a node's
+	// bootstrap kubeconfig carries may request node client certificates.
+	nodeBootstrapperBinding = "system-bootstrap-node-bootstrapper"
+	nodeBootstrapperAccount = "node-bootstrapper"
+	mcoNamespace            = "openshift-machine-config-operator"
 )
 
 // Seed creates the RBAC objects the locally run controllers need. The
@@ -85,7 +97,13 @@ func seed(ctx context.Context, client kubernetes.Interface) error {
 	if err := ensurePrivilegedSyncer(ctx, client); err != nil {
 		return err
 	}
-	return ensureRestrictedConstraint(ctx, client)
+	if err := ensureRestrictedConstraint(ctx, client); err != nil {
+		return err
+	}
+	if err := ensureMachineApprover(ctx, client); err != nil {
+		return err
+	}
+	return ensureNodeBootstrapper(ctx, client)
 }
 
 // ensureClusterRole grants what the namespace-security-allocation
@@ -286,6 +304,125 @@ func ensureRestrictedConstraint(ctx context.Context, client kubernetes.Interface
 	_, err := client.RbacV1().ClusterRoleBindings().Create(ctx, binding, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("register %s cluster role binding: %w", restrictedConstraint, err)
+	}
+	return nil
+}
+
+// ensureMachineApprover grants what the machine approver needs to approve
+// node certificate requests: updating approvals, approving the node signers,
+// and reading the machines, nodes, and config maps it matches requests
+// against. Copied verbatim from the approver's own manifests, which the
+// cluster-version-operator applies in real clusters; the binding there
+// carries its service account, which the component kubeconfig's certificate
+// identity stands in for here.
+func ensureMachineApprover(ctx context.Context, client kubernetes.Interface) error {
+	role := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: machineApprover},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"certificates.k8s.io"},
+				Resources: []string{"certificatesigningrequests/approval"},
+				Verbs:     []string{"update"},
+			},
+			{
+				APIGroups:     []string{"certificates.k8s.io"},
+				Resources:     []string{"signers"},
+				ResourceNames: []string{"kubernetes.io/kube-apiserver-client-kubelet", "kubernetes.io/kubelet-serving"},
+				Verbs:         []string{"approve"},
+			},
+			{
+				APIGroups: []string{"machine.openshift.io"},
+				Resources: []string{"machines"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"nodes"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"configmaps"},
+				Verbs:     []string{"get", "watch", "list"},
+			},
+			{
+				APIGroups: []string{"authentication.k8s.io"},
+				Resources: []string{"tokenreviews"},
+				Verbs:     []string{"create"},
+			},
+			{
+				APIGroups: []string{"authorization.k8s.io"},
+				Resources: []string{"subjectaccessreviews"},
+				Verbs:     []string{"create"},
+			},
+			{
+				APIGroups: []string{"config.openshift.io"},
+				Resources: []string{"clusteroperators"},
+				Verbs:     []string{"get", "create", "list", "watch"},
+			},
+			{
+				APIGroups:     []string{"config.openshift.io"},
+				Resources:     []string{"clusteroperators/status"},
+				ResourceNames: []string{"machine-approver"},
+				Verbs:         []string{"update"},
+			},
+			{
+				APIGroups: []string{"config.openshift.io"},
+				Resources: []string{"networks"},
+				Verbs:     []string{"get"},
+			},
+			{
+				APIGroups: []string{"network.openshift.io"},
+				Resources: []string{"hostsubnets"},
+				Verbs:     []string{"get"},
+			},
+		},
+	}
+	if _, err := client.RbacV1().ClusterRoles().Create(ctx, role, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("register %s cluster role: %w", machineApprover, err)
+	}
+	binding := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: machineApprover},
+		Subjects: []rbacv1.Subject{{
+			Kind: rbacv1.UserKind,
+			Name: machineApprover,
+		}},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     machineApprover,
+		},
+	}
+	_, err := client.RbacV1().ClusterRoleBindings().Create(ctx, binding, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("register %s cluster role binding: %w", machineApprover, err)
+	}
+	return nil
+}
+
+// ensureNodeBootstrapper grants the machine config operator's node
+// bootstrap service account the standard node-bootstrap role, the
+// permission its token exercises when a node's bootstrap kubeconfig
+// requests a client certificate. Copied verbatim from the operator's
+// manifests; the service account itself belongs to the join material a
+// worker's create command mints, so only the permission is seeded.
+func ensureNodeBootstrapper(ctx context.Context, client kubernetes.Interface) error {
+	binding := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: nodeBootstrapperBinding},
+		Subjects: []rbacv1.Subject{{
+			Kind:      rbacv1.ServiceAccountKind,
+			Name:      nodeBootstrapperAccount,
+			Namespace: mcoNamespace,
+		}},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     "system:node-bootstrapper",
+		},
+	}
+	_, err := client.RbacV1().ClusterRoleBindings().Create(ctx, binding, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("register %s cluster role binding: %w", nodeBootstrapperBinding, err)
 	}
 	return nil
 }

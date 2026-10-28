@@ -154,6 +154,74 @@ func assertBoundToServiceAccount(t *testing.T, client kubernetes.Interface, name
 	}
 }
 
+func TestSeedRegistersMachineApprover(t *testing.T) {
+	client := fake.NewSimpleClientset()
+
+	if err := seed(context.Background(), client); err != nil {
+		t.Fatal(err)
+	}
+
+	role, err := client.RbacV1().ClusterRoles().Get(context.Background(), machineApprover, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("cluster role: %v", err)
+	}
+	wantRules := []rbacv1.PolicyRule{
+		{APIGroups: []string{"certificates.k8s.io"}, Resources: []string{"certificatesigningrequests/approval"}, Verbs: []string{"update"}},
+		{APIGroups: []string{"certificates.k8s.io"}, Resources: []string{"signers"}, ResourceNames: []string{"kubernetes.io/kube-apiserver-client-kubelet", "kubernetes.io/kubelet-serving"}, Verbs: []string{"approve"}},
+		{APIGroups: []string{"machine.openshift.io"}, Resources: []string{"machines"}, Verbs: []string{"get", "list", "watch"}},
+		{APIGroups: []string{""}, Resources: []string{"nodes"}, Verbs: []string{"get", "list", "watch"}},
+		{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get", "watch", "list"}},
+		{APIGroups: []string{"authentication.k8s.io"}, Resources: []string{"tokenreviews"}, Verbs: []string{"create"}},
+		{APIGroups: []string{"authorization.k8s.io"}, Resources: []string{"subjectaccessreviews"}, Verbs: []string{"create"}},
+		{APIGroups: []string{"config.openshift.io"}, Resources: []string{"clusteroperators"}, Verbs: []string{"get", "create", "list", "watch"}},
+		{APIGroups: []string{"config.openshift.io"}, Resources: []string{"clusteroperators/status"}, ResourceNames: []string{"machine-approver"}, Verbs: []string{"update"}},
+		{APIGroups: []string{"config.openshift.io"}, Resources: []string{"networks"}, Verbs: []string{"get"}},
+		{APIGroups: []string{"network.openshift.io"}, Resources: []string{"hostsubnets"}, Verbs: []string{"get"}},
+	}
+	if !reflect.DeepEqual(role.Rules, wantRules) {
+		t.Fatalf("cluster role has unexpected rules: %+v", role.Rules)
+	}
+
+	binding, err := client.RbacV1().ClusterRoleBindings().Get(context.Background(), machineApprover, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("cluster role binding: %v", err)
+	}
+	wantSubjects := []rbacv1.Subject{{
+		Kind: rbacv1.UserKind,
+		Name: machineApprover,
+	}}
+	if !reflect.DeepEqual(binding.Subjects, wantSubjects) {
+		t.Fatalf("binding has unexpected subjects: %+v", binding.Subjects)
+	}
+	if binding.RoleRef.Kind != "ClusterRole" || binding.RoleRef.Name != machineApprover {
+		t.Fatalf("binding points at unexpected role: %+v", binding.RoleRef)
+	}
+}
+
+func TestSeedRegistersNodeBootstrapper(t *testing.T) {
+	client := fake.NewSimpleClientset()
+
+	if err := seed(context.Background(), client); err != nil {
+		t.Fatal(err)
+	}
+
+	binding, err := client.RbacV1().ClusterRoleBindings().Get(context.Background(), nodeBootstrapperBinding, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("cluster role binding: %v", err)
+	}
+	wantSubjects := []rbacv1.Subject{{
+		Kind:      rbacv1.ServiceAccountKind,
+		Name:      nodeBootstrapperAccount,
+		Namespace: mcoNamespace,
+	}}
+	if !reflect.DeepEqual(binding.Subjects, wantSubjects) {
+		t.Fatalf("binding has unexpected subjects: %+v", binding.Subjects)
+	}
+	if binding.RoleRef.Kind != "ClusterRole" || binding.RoleRef.Name != "system:node-bootstrapper" {
+		t.Fatalf("binding points at unexpected role: %+v", binding.RoleRef)
+	}
+}
+
 func TestSeedIsRepeatable(t *testing.T) {
 	client := fake.NewSimpleClientset()
 
@@ -167,15 +235,15 @@ func TestSeedIsRepeatable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(roles.Items) != 4 {
-		t.Fatalf("expected the same four cluster roles after reseeding, got %d", len(roles.Items))
+	if len(roles.Items) != 5 {
+		t.Fatalf("expected the same five cluster roles after reseeding, got %d", len(roles.Items))
 	}
 	bindings, err := client.RbacV1().ClusterRoleBindings().List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bindings.Items) != 4 {
-		t.Fatalf("expected the same four cluster role bindings after reseeding, got %d", len(bindings.Items))
+	if len(bindings.Items) != 6 {
+		t.Fatalf("expected the same six cluster role bindings after reseeding, got %d", len(bindings.Items))
 	}
 }
 
