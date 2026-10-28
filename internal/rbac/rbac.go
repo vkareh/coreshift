@@ -321,6 +321,11 @@ func ensureMachineApprover(ctx context.Context, client kubernetes.Interface) err
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{"certificates.k8s.io"},
+				Resources: []string{"certificatesigningrequests"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{"certificates.k8s.io"},
 				Resources: []string{"certificatesigningrequests/approval"},
 				Verbs:     []string{"update"},
 			},
