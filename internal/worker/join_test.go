@@ -105,8 +105,8 @@ func TestRequestCertificate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if csr.Spec.SignerName != certificatesv1.KubeAPIServerClientSignerName {
-		t.Fatalf("signer = %q, want the kube-apiserver-client signer", csr.Spec.SignerName)
+	if csr.Spec.SignerName != certificatesv1.KubeAPIServerClientKubeletSignerName {
+		t.Fatalf("signer = %q, want the kube-apiserver-client-kubelet signer", csr.Spec.SignerName)
 	}
 	wantUsages := []certificatesv1.KeyUsage{
 		certificatesv1.UsageDigitalSignature,

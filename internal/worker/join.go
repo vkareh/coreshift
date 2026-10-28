@@ -92,10 +92,10 @@ func requestCertificate(ctx context.Context, client kubernetes.Interface, nodeNa
 				certificatesv1.UsageKeyEncipherment,
 				certificatesv1.UsageClientAuth,
 			},
-			// The signer real clusters issue node client certificates
-			// from, and the one the machine approver approves requests
-			// for.
-			SignerName: certificatesv1.KubeAPIServerClientSignerName,
+			// The signer kubelet's own bootstrap requests node client
+			// certificates from, and the one the machine approver approves
+			// requests for.
+			SignerName: certificatesv1.KubeAPIServerClientKubeletSignerName,
 		},
 	}
 	fmt.Println("Requesting node certificate")
