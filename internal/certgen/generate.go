@@ -36,8 +36,9 @@ const (
 	OpenShiftAPIServerKubeconfigFilename         = "openshift-apiserver.kubeconfig"
 	OAuthAPIServerKubeconfigFilename             = "oauth-apiserver.kubeconfig"
 	OAuthServerKubeconfigFilename                = "oauth-server.kubeconfig"
-	OpenShiftControllerManagerKubeconfigFilename = "openshift-controller-manager.kubeconfig"
-	ClusterPolicyControllerKubeconfigFilename    = "cluster-policy-controller.kubeconfig"
+	OpenShiftControllerManagerKubeconfigFilename         = "openshift-controller-manager.kubeconfig"
+	ClusterPolicyControllerKubeconfigFilename            = "cluster-policy-controller.kubeconfig"
+	ClusterMachineApproverKubeconfigFilename             = "cluster-machine-approver.kubeconfig"
 	SessionSecretsFilename                       = "session-secrets.yaml"
 	SAKeyFilename                                = "sa.key"
 	SAPubFilename                                = "sa.pub"
@@ -59,8 +60,9 @@ const (
 //	openshift-apiserver.kubeconfig                  kubeconfig for the OpenShift API server
 //	oauth-apiserver.kubeconfig                      kubeconfig for the OAuth API server
 //	oauth-server.kubeconfig                         kubeconfig for the OAuth server
-//	openshift-controller-manager.kubeconfig         kubeconfig for the OpenShift controller manager
-//	cluster-policy-controller.kubeconfig            kubeconfig for the cluster policy controller
+//	openshift-controller-manager.kubeconfig          kubeconfig for the OpenShift controller manager
+//	cluster-policy-controller.kubeconfig             kubeconfig for the cluster policy controller
+//	cluster-machine-approver.kubeconfig              kubeconfig for the cluster machine approver
 //	session-secrets.yaml                            session signing and encryption secrets for the OAuth server
 //	sa.key, sa.pub                                  service-account signing key pair
 //
@@ -141,6 +143,13 @@ func GenerateAll(outputDir string, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("generate cluster-policy-controller kubeconfig: %w", err)
 	}
+	// The machine approver runs with its own controller identity rather
+	// than the admin identity, the way its deployment does in real
+	// clusters; the permissions behind the identity are seeded.
+	clusterMachineApproverKubeconfig, err := generateComponentKubeconfig("system:openshift:controller:machine-approver", serverURL, caCertPEM, caKeyPEM)
+	if err != nil {
+		return fmt.Errorf("generate cluster-machine-approver kubeconfig: %w", err)
+	}
 
 	files := []struct {
 		name string
@@ -167,6 +176,7 @@ func GenerateAll(outputDir string, opts Options) error {
 		{OAuthServerKubeconfigFilename, oauthServerKubeconfig, 0o600},
 		{OpenShiftControllerManagerKubeconfigFilename, openShiftControllerManagerKubeconfig, 0o600},
 		{ClusterPolicyControllerKubeconfigFilename, clusterPolicyControllerKubeconfig, 0o600},
+		{ClusterMachineApproverKubeconfigFilename, clusterMachineApproverKubeconfig, 0o600},
 		{SessionSecretsFilename, sessionSecrets, 0o600},
 		{SAKeyFilename, saKeyPEM, 0o600},
 		{SAPubFilename, saPubPEM, 0o644},

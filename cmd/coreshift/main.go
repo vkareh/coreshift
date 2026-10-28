@@ -81,9 +81,9 @@ func releaseArch(goArch string) (string, error) {
 // Local ports of the control plane's children, fixed whatever --port the
 // API server takes: etcd's client and peer ports, the ports of the
 // aggregated API servers kube-apiserver reaches through the aggregation
-// layer, and the controllers' health endpoints. The ports appear both in
-// the children's flags and configs and in the endpoints the aggregation
-// wiring registers.
+// layer, and the controllers' health and metrics endpoints. The ports
+// appear both in the children's flags and configs and in the endpoints the
+// aggregation wiring registers.
 const (
 	etcdClientPort                 = 2379
 	etcdPeerPort                   = 2380
@@ -92,6 +92,7 @@ const (
 	oauthServerPort                = 8445
 	openShiftControllerManagerPort = 8446
 	clusterPolicyControllerPort    = 10357
+	machineApproverMetricsPort     = 9191
 )
 
 // The etcd endpoints built from the ports above, so they cannot drift.
@@ -107,6 +108,7 @@ var reservedPorts = []int{
 	etcdClientPort, etcdPeerPort,
 	openShiftAPIServerPort, oauthAPIServerPort, oauthServerPort,
 	openShiftControllerManagerPort, clusterPolicyControllerPort,
+	machineApproverMetricsPort,
 }
 
 // refuseReservedPort refuses an API port a control-plane child listens
@@ -324,7 +326,7 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 		return fmt.Errorf("extract kube components: %w", err)
 	}
 	openShiftBinaries, err := client.ExtractOpenShiftComponents(ctx, releaseRoot,
-		"openshift-apiserver", "oauth-apiserver", "oauth-server", "openshift-controller-manager", "cluster-policy-controller")
+		"openshift-apiserver", "oauth-apiserver", "oauth-server", "openshift-controller-manager", "cluster-policy-controller", "cluster-machine-approver")
 	if err != nil {
 		return fmt.Errorf("extract openshift components: %w", err)
 	}
@@ -615,6 +617,25 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 				"--namespace=default",
 			},
 			Env: append(os.Environ(), "POD_NAMESPACE=default"),
+		},
+		// The machine approver approves the node certificate requests a
+		// joining worker's bootstrap identity makes, matching each against
+		// the machine standing in for the cloud machine that would back
+		// the node. The management and workload clusters are the same
+		// here, so both kubeconfig flags point at the one component
+		// kubeconfig. Its ClusterOperator status reporting stays off
+		// because this control plane runs no ClusterOperator machinery;
+		// everything else runs as the payload deploys it.
+		{
+			Name: "cluster-machine-approver",
+			Path: openShiftBinaries["cluster-machine-approver"],
+			Args: []string{
+				"--management-cluster-kubeconfig=" + filepath.Join(stateDir, certgen.ClusterMachineApproverKubeconfigFilename),
+				"--workload-cluster-kubeconfig=" + filepath.Join(stateDir, certgen.ClusterMachineApproverKubeconfigFilename),
+				"--disable-status-controller",
+				// Single instance, no lease to elect.
+				"--leader-elect=false",
+			},
 		},
 	}
 
@@ -1807,6 +1828,7 @@ func ensureCertificates(stateDir string, port int) error {
 		certgen.OAuthServerKubeconfigFilename,
 		certgen.OpenShiftControllerManagerKubeconfigFilename,
 		certgen.ClusterPolicyControllerKubeconfigFilename,
+		certgen.ClusterMachineApproverKubeconfigFilename,
 		certgen.SessionSecretsFilename,
 		certgen.SAKeyFilename, certgen.SAPubFilename,
 	}

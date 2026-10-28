@@ -87,7 +87,7 @@ there the next time.
   directory, but etcd and the other components always listen on the same
   fixed ports, so this is for avoiding a port collision, not for running two
   instances side by side. The reserved ports, refused up front, are 2379,
-  2380 (etcd), 8443, 8444, 8445, 8446, and 10357 (the OpenShift
+  2380 (etcd), 8443, 8444, 8445, 8446, 9191, and 10357 (the OpenShift
   components).
 - `--verbose`: stream each child's logs live to the terminal, prefixed with
   the child's name. By default child logs are captured to one file per child
