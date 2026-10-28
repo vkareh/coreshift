@@ -26,6 +26,7 @@ var openshiftComponents = []openshiftComponent{
 	{component: "oauth-server", path: "/usr/bin/oauth-server"},
 	{component: "openshift-controller-manager", path: "/usr/bin/openshift-controller-manager"},
 	{component: "cluster-policy-controller", path: "/usr/bin/cluster-policy-controller"},
+	{component: "cluster-machine-approver", path: "/usr/bin/machine-approver"},
 }
 
 // ExtractOpenShiftComponents resolves each requested OpenShift API layer
