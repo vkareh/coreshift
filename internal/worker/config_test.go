@@ -92,6 +92,70 @@ func TestCopyCNIPluginsRefusesMissingSource(t *testing.T) {
 	}
 }
 
+// writeCgroupRoot fills a fake cgroup hierarchy root: the controllers it
+// makes available and the processes sitting in it.
+func writeCgroupRoot(t *testing.T, controllers string, procs ...string) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "cgroup.controllers"), []byte(controllers), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "cgroup.subtree_control"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if len(procs) > 0 {
+		if err := os.WriteFile(filepath.Join(root, "cgroup.procs"), []byte(strings.Join(procs, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+// TestEnableCgroupControllers checks the subtree control line written for
+// the controllers kubelet needs, limited to what the hierarchy makes
+// available.
+func TestEnableCgroupControllers(t *testing.T) {
+	root := writeCgroupRoot(t, "cpuset cpu io memory pids hugetlb")
+	if err := enableCgroupControllers(root); err != nil {
+		t.Fatal(err)
+	}
+	control := string(readFile(t, filepath.Join(root, "cgroup.subtree_control")))
+	if control != "+cpu +io +memory +pids" {
+		t.Fatalf("subtree control = %q, want the kubelet controllers", control)
+	}
+
+	root = writeCgroupRoot(t, "cpu pids")
+	if err := enableCgroupControllers(root); err != nil {
+		t.Fatal(err)
+	}
+	control = string(readFile(t, filepath.Join(root, "cgroup.subtree_control")))
+	if control != "+cpu +pids" {
+		t.Fatalf("subtree control = %q, want only the available controllers", control)
+	}
+}
+
+// TestMoveCgroupProcesses checks that the processes sitting in a cgroup
+// root are moved into the child cgroup the move targets.
+func TestMoveCgroupProcesses(t *testing.T) {
+	root := writeCgroupRoot(t, "cpu pids", "1", "2")
+
+	if err := moveCgroupProcesses(root, "coreshift"); err != nil {
+		t.Fatal(err)
+	}
+	moved, err := os.ReadDir(filepath.Join(root, "coreshift"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(moved) == 0 {
+		t.Fatal("the target cgroup was not created")
+	}
+	// The fake writes each move over the same file, so the last process
+	// moved is the one recorded; both were accepted without error.
+	if got := strings.TrimSpace(string(readFile(t, filepath.Join(root, "coreshift", "cgroup.procs")))); got != "2" {
+		t.Fatalf("cgroup.procs = %q, want the moved process recorded", got)
+	}
+}
+
 func readFile(t *testing.T, path string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(path)

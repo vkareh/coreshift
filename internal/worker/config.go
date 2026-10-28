@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 )
 
 // The node-side paths the configuration below references, fixed inside
@@ -25,6 +27,68 @@ const (
 // pauseImage is the payload's pod component, the pause image this
 // release's nodes run infra containers from.
 const pauseImage = "quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:e5fc73fc66cd2ff4e781d9af380348be759b6917c3703325d340669c3764e136"
+
+// cgroupRoot is the root of the cgroup hierarchy the container sees.
+const cgroupRoot = "/sys/fs/cgroup"
+
+// enableCgroupControllers makes the controllers kubelet's pod cgroups
+// need available below the cgroup hierarchy root the container sees. The
+// rules refuse enabling domain controllers on a cgroup that holds
+// processes, so when the first attempt is refused, the processes sitting
+// in the root are moved into a child cgroup and the attempt repeats. On a
+// real node systemd has both done long before kubelet starts.
+func enableCgroupControllers(root string) error {
+	want := wantedControllers(root)
+	if err := os.WriteFile(filepath.Join(root, "cgroup.subtree_control"), []byte(want), 0o644); err == nil {
+		return nil
+	}
+	if err := moveCgroupProcesses(root, "coreshift"); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(root, "cgroup.subtree_control"), []byte(want), 0o644); err != nil {
+		return fmt.Errorf("enable the cgroup controllers kubelet needs under %s: %w\n"+
+			"the worker container's cgroup hierarchy must be delegated to it", root, err)
+	}
+	return nil
+}
+
+// wantedControllers returns the subtree control line enabling the
+// controllers kubelet's pod cgroups need, limited to the ones the
+// hierarchy makes available.
+func wantedControllers(root string) string {
+	available, err := os.ReadFile(filepath.Join(root, "cgroup.controllers"))
+	if err != nil {
+		return ""
+	}
+	have := strings.Fields(string(available))
+	var want []string
+	for _, controller := range []string{"cpu", "io", "memory", "pids"} {
+		if slices.Contains(have, controller) {
+			want = append(want, "+"+controller)
+		}
+	}
+	return strings.Join(want, " ")
+}
+
+// moveCgroupProcesses moves the processes sitting in root's cgroup into
+// the child cgroup name, which the rules require before domain
+// controllers can be enabled on root.
+func moveCgroupProcesses(root, name string) error {
+	procs, err := os.ReadFile(filepath.Join(root, "cgroup.procs"))
+	if err != nil {
+		return fmt.Errorf("read the cgroup's processes: %w", err)
+	}
+	inner := filepath.Join(root, name)
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		return fmt.Errorf("create the %s cgroup: %w", name, err)
+	}
+	for _, pid := range strings.Fields(string(procs)) {
+		if err := os.WriteFile(filepath.Join(inner, "cgroup.procs"), []byte(pid), 0o644); err != nil {
+			return fmt.Errorf("move process %s into the %s cgroup: %w", pid, name, err)
+		}
+	}
+	return nil
+}
 
 // writeCRIConfig writes CRI-O's configuration. It follows the payload's
 // node runtime where the worker container shares the real node's
@@ -59,10 +123,13 @@ pause_command = "/usr/bin/pod"
 // CRI-O config it follows the payload where the container can and
 // departs where it cannot: kubelet talks to CRI-O's socket, but drives
 // cgroups itself because the container has no systemd, and tolerates the
-// host's swap because that is not the node's choice to make. Certificate
-// rotation stays off until something approves rotation requests.
+// host's swap because that is not the node's choice to make. The worker
+// container runs in a user namespace, so kubelet runs with its own flag
+// for that environment, which skips the node kernel interfaces a user
+// namespace denies. Certificate rotation stays off until something
+// approves rotation requests.
 func writeKubeletConfig(path string) error {
-	config := fmt.Sprintf(`apiVersion: kubelet.config.k8s.io/v1
+	config := fmt.Sprintf(`apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 authentication:
   anonymous:
@@ -74,6 +141,8 @@ authorization:
 cgroupDriver: cgroupfs
 containerRuntimeEndpoint: unix://%s
 failSwapOn: false
+featureGates:
+  KubeletInUserNamespace: true
 rotateCertificates: false
 volumePluginDir: %s
 `, caPath, crioSocket, kubeletPluginDir)

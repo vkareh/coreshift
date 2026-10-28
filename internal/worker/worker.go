@@ -44,6 +44,9 @@ const logDir = "/var/log/coreshift"
 // against the control plane.
 const nodeRegisterTimeout = 2 * time.Minute
 
+// crioReadyTimeout bounds the wait for CRI-O's socket.
+const crioReadyTimeout = time.Minute
+
 // Run joins the control plane and runs the node side until shutdown is
 // requested.
 func Run(ctx context.Context) error {
@@ -66,12 +69,20 @@ func Run(ctx context.Context) error {
 	if err := copyCNIPlugins(cniPluginSource, cniPluginDir); err != nil {
 		return err
 	}
+	if err := enableCgroupControllers(cgroupRoot); err != nil {
+		return err
+	}
 
 	processes := []supervisor.Process{
 		{
 			Name: "crio",
 			Path: crioPath,
 			Args: []string{"--config=" + crioConfigPath},
+			// kubelet fails at startup unless the runtime answers. Real
+			// nodes order kubelet after CRI-O through systemd; the same
+			// ordering happens here by waiting for CRI-O's socket before
+			// kubelet starts.
+			AfterStart: waitCRIO,
 		},
 		{
 			Name: "kubelet",
@@ -92,6 +103,21 @@ func Run(ctx context.Context) error {
 		},
 	}
 	return sup.Run(ctx, processes)
+}
+
+// waitCRIO waits until CRI-O's socket exists, so kubelet starts only
+// against a runtime that answers.
+func waitCRIO(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, crioReadyTimeout)
+	defer cancel()
+	err := wait.PollUntilContextCancel(ctx, apiPollInterval, true, func(ctx context.Context) (bool, error) {
+		_, err := os.Stat(crioSocket)
+		return err == nil, nil
+	})
+	if err != nil {
+		return fmt.Errorf("wait for CRI-O's socket: %w", ctx.Err())
+	}
+	return nil
 }
 
 // join turns the mounted-in bootstrap material into a node identity: it
