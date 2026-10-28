@@ -92,6 +92,28 @@ jobs:
             kill -0 "$pid" 2>/dev/null || break
             sleep 30
           done
+          labeled=""
+          if grep -q "Control plane ready" "$log"; then
+            state="$XDG_STATE_HOME/coreshift/api/16443"
+            api="https://127.0.0.1:16443"
+            curl --fail --silent --show-error \
+              --cacert "$state/ca.crt" \
+              --cert "$state/admin.crt" \
+              --key "$state/admin.key" \
+              -H 'Content-Type: application/json' \
+              -d '{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"drift-probe"}}' \
+              "$api/api/v1/namespaces" > /dev/null
+            # Up to one minute: the label syncer labels new namespaces within seconds.
+            for _ in {1..12}; do
+              curl --fail --silent \
+                --cacert "$state/ca.crt" \
+                --cert "$state/admin.crt" \
+                --key "$state/admin.key" \
+                "$api/api/v1/namespaces/drift-probe" \
+                | grep -q 'pod-security.kubernetes.io/enforce' && labeled=1 && break
+              sleep 5
+            done
+          fi
           kill -TERM "$pid" 2>/dev/null || true
           status=0
           wait "$pid" || status=$?
@@ -100,7 +122,11 @@ jobs:
             echo "The latest release did not reach a ready control plane (exit $status); its stand-ins need updating before it can be supported."
             exit 1
           fi
-          echo "The latest release reached ready and shut down cleanly."
+          if [ "$labeled" != 1 ]; then
+            echo "The latest release did not label a new namespace with its pod security enforce level; the seed layer's pod security label syncer permissions need updating."
+            exit 1
+          fi
+          echo "The latest release reached ready, labeled a new namespace, and shut down cleanly."
 
   container-smoke:
     if: github.event_name == 'push' || github.event_name == 'schedule'
