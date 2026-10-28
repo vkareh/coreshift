@@ -471,6 +471,11 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 				// per-controller service accounts, not to the component's
 				// client identity.
 				"--use-service-account-credentials=true",
+				// The control plane CA signs the node client certificates
+				// the approver approves, the way a real cluster's controller
+				// manager issues what its approver approves.
+				"--cluster-signing-kubelet-client-cert-file=" + filepath.Join(stateDir, certgen.CACertFilename),
+				"--cluster-signing-kubelet-client-key-file=" + filepath.Join(stateDir, certgen.CAKeyFilename),
 				// Single instance, no lease to elect.
 				"--leader-elect=false",
 			},
