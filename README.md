@@ -42,6 +42,12 @@ keeps the data; cleanup destroys the data.
   and live readiness.
 - `coreshift get kubeconfig [--name]`: print the path to a cluster's
   admin kubeconfig.
+- `coreshift create worker`: join a worker to a running cluster in a
+  managed container and wait for its node to register.
+- `coreshift delete worker [--name]`: stop a worker's container and
+  remove it, along with its node.
+- `coreshift get workers`: list the workers with their cluster and live
+  readiness.
 - `coreshift cleanup`: remove state directories and, with `--cache`, the
   shared image cache.
 - `coreshift version`: print the version the binary was built with.
@@ -349,6 +355,48 @@ state is kept. Ctrl-C during the wait aborts the same way. A failure
 caused by the state directory refusing reuse says so and names `--fresh`
 and a different `--port` as the remedies.
 
+## The `create worker` command
+
+`coreshift create worker` joins a worker to a running cluster, in either
+mode: the default cluster at the default port when it runs host-side, or
+any container cluster by name with `--cluster`. The worker is as real as
+the control plane. Its container image is minted from the payload's
+rhel-coreos image of the release the cluster records — carrying the node
+binaries (kubelet, CRI-O, the CNI plugins) matched to that release, with
+the coreshift binary copied in and the join as its entrypoint — and its
+join material is minted from the cluster's own state: a token for the
+node bootstrap service account, the identity real nodes present, and a
+machine record the machine approver matches the worker's certificate
+request against, so the join is approved the way a real node's is,
+without anything minted by hand.
+
+The container runs privileged on the host network, dialing the control
+plane at loopback, with the join material mounted in read-only and the
+host's kernel modules mounted read-only. Everything else, above all the
+kubelet state, stays inside the container: workers are ephemeral,
+re-created rather than restarted, and a re-created worker joins fresh.
+When podman runs rootless, the launch happens under a delegated cgroup
+scope — the systemd user mechanism kubelet's cgroups need under rootless
+podman. Where that cannot be provided the command fails naming rootful
+podman as the worker-only requirement: run the same command with sudo.
+
+A node reports NotReady until a CNI exists, and this control plane runs
+none, so every worker's node shows NotReady; that is the honest
+readiness `get workers` lists. When a worker fails — its container exits,
+or its node never registers — the error quotes the tail of the
+container's log, the container is removed, and the cluster's state is
+kept.
+
+### Flags
+
+- `--pull-secret` (required): path to the pull secret JSON file; the
+  image build pulls the rhel-coreos base with it.
+- `--name`: the worker's name, `worker1` by default. The container is
+  called `coreshift-worker-<name>`, the node carries the name, and a
+  second worker needs its own.
+- `--cluster`: the cluster the worker joins, `coreshift` by default.
+- `--verbose`: stream the image build's output to the terminal.
+
 ## `run cluster` or `create cluster`
 
 Use `run cluster` on machines without a container runtime — it needs
@@ -357,8 +405,10 @@ one terminal or one CI step: it runs in the foreground and stops on
 Ctrl-C. Use `create cluster` when podman is available and the cluster
 should outlive the terminal, or when several clusters have to run side by
 side, each with its own name and port. Both answer the question "does it
-behave like OpenShift at the API level" equally well; neither runs
-workloads, since there is no node, CNI, DNS, or ingress in either mode.
+behave like OpenShift at the API level" equally well; `create worker`
+adds the node side to either, a real kubelet and CRI-O joining from a
+container, though the node reports NotReady until a CNI exists, so no
+workloads run.
 
 ## The `delete cluster` command
 
@@ -380,13 +430,28 @@ command uses, while the shared image cache is kept either way. The
 command says in one line whether the state was kept or removed, and
 where.
 
+## The `delete worker` command
+
+`coreshift delete worker` stops the named worker's container and removes
+it, then removes the node and the machine record its join created, so
+the cluster's node list is clean again. The cluster must be running to
+remove them; when it is not, the container still goes, and the node
+stays until the cluster's data does.
+
+```
+./coreshift delete worker
+```
+
+`--name` selects the worker, `worker1` by default.
+
 ## The `get` command
 
 `coreshift get clusters` lists the clusters: name, published port,
 recorded release, and readiness. Readiness is a live probe of each
 cluster's API server rather than the container's running state, so a
 booting or wedged cluster shows as not ready. With no clusters it prints
-`No clusters`.
+`No clusters`. Worker containers, which share the `coreshift-` name
+prefix, are not clusters in this list.
 
 `coreshift get kubeconfig` prints the path to the named cluster's admin
 kubeconfig — the same file host mode writes — and refuses when no cluster
@@ -398,11 +463,16 @@ on a non-default port:
 /home/you/.local/state/coreshift/api/admin.kubeconfig
 ```
 
+`coreshift get workers` lists the workers: name, cluster, and readiness.
+Readiness is the node's own condition, read live from the cluster's API,
+so a worker whose node reports not ready — every worker here, until a CNI
+exists — shows as not ready. With no workers it prints `No workers`.
+
 ## The `version` command
 
 `coreshift version` prints the version the binary was built with, derived
-from git at build time. The container image minted from the binary is
-tagged with the same string, plus a short digest of the binary's content.
+from git at build time. The container images minted from the binary are
+tagged with the same string, plus a short digest of the build's inputs.
 
 ## The container image
 
@@ -440,6 +510,17 @@ pull worked and the control plane reached ready through the published
 port. The gpgme libraries openshift-controller-manager needs are
 embedded in the binary itself and written out at boot, so the image
 carries nothing but the binary and the certificate bundle.
+
+The worker image is minted the same quiet way, from the same running
+binary, but on the payload's rhel-coreos image, digest-pinned from the
+release's component map so the node binaries in it match the release the
+target cluster runs. The ostree layout of that image owns /usr and
+symlinks /usr/local into its writable var tree, so the binary is copied
+to /var/usrlocal/bin; and the image declares SIGTERM as its stop signal,
+the one the supervisor handles, because the base image declares
+systemd's. The build pulls the base from its registry with the pull
+secret, and the tag covers the recipe naming the base, so a new release's
+base gets its own image.
 
 ## The `cleanup` command
 
