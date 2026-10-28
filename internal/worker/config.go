@@ -31,6 +31,12 @@ const pauseImage = "quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:e5fc73
 // cgroupRoot is the root of the cgroup hierarchy the container sees.
 const cgroupRoot = "/sys/fs/cgroup"
 
+// CgroupDelegationMark appears in the error enabling the cgroup
+// controllers returns when the container's cgroup hierarchy was not
+// delegated to it; the host-side create command recognizes it to name
+// the rootful remedy.
+const CgroupDelegationMark = "must be delegated to it"
+
 // enableCgroupControllers makes the controllers kubelet's pod cgroups
 // need available below the cgroup hierarchy root the container sees. The
 // rules refuse enabling domain controllers on a cgroup that holds
@@ -47,7 +53,7 @@ func enableCgroupControllers(root string) error {
 	}
 	if err := os.WriteFile(filepath.Join(root, "cgroup.subtree_control"), []byte(want), 0o644); err != nil {
 		return fmt.Errorf("enable the cgroup controllers kubelet needs under %s: %w\n"+
-			"the worker container's cgroup hierarchy must be delegated to it", root, err)
+			"the worker container's cgroup hierarchy "+CgroupDelegationMark, root, err)
 	}
 	return nil
 }

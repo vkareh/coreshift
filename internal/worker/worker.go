@@ -23,11 +23,17 @@ import (
 // binaries read. The command takes its configuration from these files,
 // never from flags.
 const (
-	bootstrapKubeconfigPath = "/etc/kubernetes/bootstrap-kubeconfig"
-	nodeNamePath            = "/etc/coreshift/node-name"
-	nodeKubeconfigPath      = "/etc/kubernetes/kubeconfig"
-	crioConfigPath          = "/etc/crio/crio.conf"
-	kubeletConfigPath       = "/etc/kubernetes/kubelet.conf"
+	// BootstrapKubeconfigPath is where the worker container reads the
+	// join identity from; the host-side create command mounts its minted
+	// file here.
+	BootstrapKubeconfigPath = "/etc/kubernetes/bootstrap-kubeconfig"
+	// NodeNamePath is where the worker container reads the name it joins
+	// under; the host-side create command mounts its minted file here.
+	NodeNamePath = "/etc/coreshift/node-name"
+
+	nodeKubeconfigPath = "/etc/kubernetes/kubeconfig"
+	crioConfigPath     = "/etc/crio/crio.conf"
+	kubeletConfigPath  = "/etc/kubernetes/kubelet.conf"
 )
 
 // The node binaries, at the paths the payload's rhel-coreos image ships
@@ -50,7 +56,7 @@ const crioReadyTimeout = time.Minute
 // Run joins the control plane and runs the node side until shutdown is
 // requested.
 func Run(ctx context.Context) error {
-	nodeName, err := readNodeName(nodeNamePath)
+	nodeName, err := readNodeName(NodeNamePath)
 	if err != nil {
 		return err
 	}
@@ -128,11 +134,11 @@ func waitCRIO(ctx context.Context) error {
 // outside the worker, from an operator for now and the machine approver
 // once it runs in the control plane.
 func join(ctx context.Context, nodeName string) error {
-	restConfig, err := clientcmd.BuildConfigFromFlags("", bootstrapKubeconfigPath)
+	restConfig, err := clientcmd.BuildConfigFromFlags("", BootstrapKubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("read bootstrap kubeconfig: %w", err)
 	}
-	bootstrap, err := clientcmd.LoadFromFile(bootstrapKubeconfigPath)
+	bootstrap, err := clientcmd.LoadFromFile(BootstrapKubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("read bootstrap kubeconfig: %w", err)
 	}
