@@ -7,7 +7,9 @@ package worker
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,6 +48,47 @@ const (
 // logDir holds the supervisor's per-child logs inside the container.
 const logDir = "/var/log/coreshift"
 
+// The ports kubelet serves on, where the scan for a free pair starts:
+// the defaults real nodes use. Variables for test override.
+var (
+	kubeletServerPort  = 10250
+	kubeletHealthzPort = 10248
+)
+
+// kubeletPorts picks the ports kubelet serves on. Workers share the host
+// network, so two workers' kubelets cannot both take the defaults, and a
+// worker's own two ports must differ too; each worker takes the first
+// free pair from the defaults, keeping a single worker on the ports a
+// real node uses.
+func kubeletPorts() (server, healthz int, err error) {
+	server, err = freePort("0.0.0.0", kubeletServerPort)
+	if err != nil {
+		return 0, 0, err
+	}
+	// The health port scans from its own default, skipping the server
+	// port this worker just took: nothing binds the pair until kubelet
+	// starts, so the scans cannot see each other any other way.
+	healthz, err = freePort("127.0.0.1", kubeletHealthzPort)
+	for err == nil && healthz == server {
+		healthz, err = freePort("127.0.0.1", healthz+1)
+	}
+	return server, healthz, err
+}
+
+// freePort returns the first port from start a listener on address can
+// take, so the kubelet can take it right after.
+func freePort(address string, start int) (int, error) {
+	const attempts = 100
+	for port := start; port < start+attempts; port++ {
+		listener, err := net.Listen("tcp", net.JoinHostPort(address, strconv.Itoa(port)))
+		if err == nil {
+			listener.Close()
+			return port, nil
+		}
+	}
+	return 0, fmt.Errorf("no free port for %s from %d up %d", address, start, attempts)
+}
+
 // nodeRegisterTimeout bounds the wait for the node's object to appear
 // against the control plane.
 const nodeRegisterTimeout = 2 * time.Minute
@@ -78,6 +121,10 @@ func Run(ctx context.Context) error {
 	if err := enableCgroupControllers(cgroupRoot); err != nil {
 		return err
 	}
+	serverPort, healthzPort, err := kubeletPorts()
+	if err != nil {
+		return err
+	}
 
 	processes := []supervisor.Process{
 		{
@@ -99,6 +146,10 @@ func Run(ctx context.Context) error {
 				// The payload's kubelet unit names the node this way;
 				// the certificate the join requested names it the same.
 				"--hostname-override=" + nodeName,
+				// The ports this worker's kubelet serves on, taken as a
+				// free pair because workers share the host network.
+				"--port=" + strconv.Itoa(serverPort),
+				"--healthz-port=" + strconv.Itoa(healthzPort),
 			},
 		},
 	}

@@ -11,9 +11,9 @@ import (
 // The node-side paths the configuration below references, fixed inside
 // the worker container.
 const (
-	caPath            = "/etc/kubernetes/ca.crt"
-	crioSocket        = "/var/run/crio/crio.sock"
-	kubeletPluginDir  = "/var/lib/kubelet/volumeplugins"
+	caPath           = "/etc/kubernetes/ca.crt"
+	crioSocket       = "/var/run/crio/crio.sock"
+	kubeletPluginDir = "/var/lib/kubelet/volumeplugins"
 
 	// The OpenShift CNI layout: network configuration the payload puts
 	// under /etc/kubernetes/cni/net.d, and the plugin directory real
