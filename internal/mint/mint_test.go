@@ -27,7 +27,7 @@ func TestBuildContextWritesBinaryAndContainerfile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writeContext(contextDir, binary); err != nil {
+	if err := writeContext(contextDir, binary, containerfile); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := os.ReadFile(filepath.Join(contextDir, "coreshift")); err != nil || string(got) != "fake binary" {
@@ -52,6 +52,23 @@ func TestBuildContextWritesBinaryAndContainerfile(t *testing.T) {
 	} {
 		if !strings.Contains(string(file), want) {
 			t.Fatalf("Containerfile missing %q:\n%s", want, file)
+		}
+	}
+}
+
+// TestWorkerContainerfile pins the worker image's recipe: the payload's
+// rhel-coreos base, the binary under the image's writable var tree, the
+// stop signal the supervisor handles, and the worker entrypoint.
+func TestWorkerContainerfile(t *testing.T) {
+	file := fmt.Sprintf(workerContainerfile, "reg.example/coreos@sha256:abc123")
+	for _, want := range []string{
+		"FROM reg.example/coreos@sha256:abc123",
+		"COPY coreshift /var/usrlocal/bin/coreshift",
+		"STOPSIGNAL SIGTERM",
+		`ENTRYPOINT ["/var/usrlocal/bin/coreshift", "run", "worker"]`,
+	} {
+		if !strings.Contains(file, want) {
+			t.Fatalf("worker Containerfile missing %q:\n%s", want, file)
 		}
 	}
 }
@@ -105,11 +122,26 @@ func wantedRef(t *testing.T, version string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sum, err := fileDigest(exe)
+	sum, err := contextDigest(exe, containerfile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return "localhost/coreshift:" + stamp(version, sum)
+}
+
+// wantedWorkerRef returns the reference WorkerImage should report for
+// version and base: the test binary's own worker tag.
+func wantedWorkerRef(t *testing.T, version, base string) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum, err := contextDigest(exe, fmt.Sprintf(workerContainerfile, base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "localhost/coreshift-worker:" + stamp(version, sum)
 }
 
 func TestImageSkipsBuildWhenTagExists(t *testing.T) {
@@ -216,6 +248,33 @@ func TestImageRequiresPodman(t *testing.T) {
 	_, err := Image(context.Background(), "test", false)
 	if err == nil || !strings.Contains(err.Error(), "podman") {
 		t.Fatalf("err = %v, want an error naming podman", err)
+	}
+}
+
+// TestWorkerImageBuildsWithAuthfile checks that the worker image builds
+// under its own repository, tagged from the binary and the recipe naming
+// the base, and that the build pulls the base with the pull secret as
+// podman's authfile.
+func TestWorkerImageBuildsWithAuthfile(t *testing.T) {
+	writeFakePodman(t, 1)
+	const base = "reg.example/coreos@sha256:abc123"
+
+	ref, err := WorkerImage(context.Background(), "test", base, "/secret/pull-secret", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := wantedWorkerRef(t, "test", base); ref != want {
+		t.Fatalf("ref = %q, want %q", ref, want)
+	}
+	calls := podmanCalls(t)
+	if len(calls) != 2 {
+		t.Fatalf("podman calls = %q, want the exists check and the build", calls)
+	}
+	if calls[0] != "image exists "+ref {
+		t.Fatalf("first podman call = %q, want the exists check for %s", calls[0], ref)
+	}
+	if !strings.HasPrefix(calls[1], "build --authfile /secret/pull-secret -t "+ref+" ") {
+		t.Fatalf("second podman call = %q, want an authfile build of %s", calls[1], ref)
 	}
 }
 
