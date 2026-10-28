@@ -19,7 +19,7 @@ func TestGenerateAll(t *testing.T) {
 
 	certs := []string{CACertFilename, APIServerCertFilename, FrontProxyCACertFilename, FrontProxyClientCertFilename, ServiceServingCertFilename, AdminCertFilename, SAPubFilename}
 	keys := []string{CAKeyFilename, APIServerKeyFilename, FrontProxyCAKeyFilename, FrontProxyClientKeyFilename, ServiceServingKeyFilename, AdminKeyFilename, SAKeyFilename}
-	kubeconfigs := []string{AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, OAuthServerKubeconfigFilename, OpenShiftControllerManagerKubeconfigFilename, ClusterPolicyControllerKubeconfigFilename}
+	kubeconfigs := []string{AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, OAuthServerKubeconfigFilename, OpenShiftControllerManagerKubeconfigFilename, ClusterPolicyControllerKubeconfigFilename, ClusterMachineApproverKubeconfigFilename}
 	for _, name := range append(append(certs, keys...), kubeconfigs...) {
 		if _, err := os.Stat(filepath.Join(outputDir, name)); err != nil {
 			t.Fatalf("expected %s to be written: %v", name, err)
@@ -89,6 +89,26 @@ func TestGenerateAll(t *testing.T) {
 			t.Fatalf("%s client certificate is not in the system:masters group", name)
 		}
 	}
+	// The machine approver runs with its own controller identity, so its
+	// kubeconfig's certificate carries that name and no group.
+	config, err = clientcmd.Load(readFile(t, outputDir, ClusterMachineApproverKubeconfigFilename))
+	if err != nil {
+		t.Fatalf("load %s: %v", ClusterMachineApproverKubeconfigFilename, err)
+	}
+	user, ok := config.AuthInfos["system:openshift:controller:machine-approver"]
+	if !ok {
+		t.Fatalf("%s has no machine approver user", ClusterMachineApproverKubeconfigFilename)
+	}
+	cert := parseCertificate(t, user.ClientCertificateData)
+	if cert.Subject.CommonName != "system:openshift:controller:machine-approver" {
+		t.Fatalf("%s client certificate common name = %q", ClusterMachineApproverKubeconfigFilename, cert.Subject.CommonName)
+	}
+	if len(cert.Subject.Organization) != 0 {
+		t.Fatalf("%s client certificate carries groups: %v", ClusterMachineApproverKubeconfigFilename, cert.Subject.Organization)
+	}
+	if err := cert.CheckSignatureFrom(caCert); err != nil {
+		t.Fatalf("%s client certificate is not signed by CA: %v", ClusterMachineApproverKubeconfigFilename, err)
+	}
 }
 
 func TestGenerateAllCustomAPIServerURL(t *testing.T) {
@@ -106,7 +126,7 @@ func TestGenerateAllCustomAPIServerURL(t *testing.T) {
 		t.Fatalf("unexpected cluster config: %#v", cluster)
 	}
 
-	for _, name := range []string{ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, OAuthServerKubeconfigFilename, OpenShiftControllerManagerKubeconfigFilename, ClusterPolicyControllerKubeconfigFilename} {
+	for _, name := range []string{ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, OAuthServerKubeconfigFilename, OpenShiftControllerManagerKubeconfigFilename, ClusterPolicyControllerKubeconfigFilename, ClusterMachineApproverKubeconfigFilename} {
 		config, err := clientcmd.Load(readFile(t, outputDir, name))
 		if err != nil {
 			t.Fatalf("load %s: %v", name, err)
@@ -135,7 +155,7 @@ func TestGenerateAllKeyPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{CAKeyFilename, APIServerKeyFilename, FrontProxyCAKeyFilename, FrontProxyClientKeyFilename, ServiceServingKeyFilename, AdminKeyFilename, AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, OAuthServerKubeconfigFilename, OpenShiftControllerManagerKubeconfigFilename, ClusterPolicyControllerKubeconfigFilename, SAKeyFilename} {
+	for _, name := range []string{CAKeyFilename, APIServerKeyFilename, FrontProxyCAKeyFilename, FrontProxyClientKeyFilename, ServiceServingKeyFilename, AdminKeyFilename, AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, OAuthServerKubeconfigFilename, OpenShiftControllerManagerKubeconfigFilename, ClusterPolicyControllerKubeconfigFilename, ClusterMachineApproverKubeconfigFilename, SAKeyFilename} {
 		info, err := os.Stat(filepath.Join(outputDir, name))
 		if err != nil {
 			t.Fatal(err)
