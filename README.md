@@ -472,17 +472,3 @@ component image references are cached under `~/.cache/coreshift/`
 everything regardless of mode or port. A second run of the
 same pinned release pulls nothing from the registry and starts straight
 from the cache. Run `coreshift cleanup --cache` to clear it.
-
-## Nightly CI
-
-CI runs the live, pull-secret-gated smoke tests nightly on a schedule.
-The nightly jobs need a repository secret named `PULL_SECRET` holding the
-JSON pull secret; a maintainer must add it under Settings -> Secrets and
-variables -> Actions to enable the runs. Without the secret the jobs skip
-cleanly instead of failing.
-
-A second nightly job, the drift alarm, boots the newest stable release
-with no version pin, on a fresh state directory and cache, and reports
-readiness or the failing component by name. A failure there does not
-mean supported releases broke; it means the new release needs the
-hand-written stand-ins updated before it can be declared supported.
