@@ -22,14 +22,16 @@ func TestSeedRegistersDefinitions(t *testing.T) {
 	}
 
 	for _, want := range []struct {
-		name, group, plural string
-		scope               apiextensionsv1.ResourceScope
+		name, group, plural, version string
+		scope                        apiextensionsv1.ResourceScope
 	}{
-		{"clusterresourcequotas.quota.openshift.io", "quota.openshift.io", "clusterresourcequotas", apiextensionsv1.ClusterScoped},
-		{"securitycontextconstraints.security.openshift.io", "security.openshift.io", "securitycontextconstraints", apiextensionsv1.ClusterScoped},
-		{"rangeallocations.security.internal.openshift.io", "security.internal.openshift.io", "rangeallocations", apiextensionsv1.ClusterScoped},
-		{"rolebindingrestrictions.authorization.openshift.io", "authorization.openshift.io", "rolebindingrestrictions", apiextensionsv1.NamespaceScoped},
-		{"oauths.config.openshift.io", "config.openshift.io", "oauths", apiextensionsv1.ClusterScoped},
+		{"clusterresourcequotas.quota.openshift.io", "quota.openshift.io", "clusterresourcequotas", "v1", apiextensionsv1.ClusterScoped},
+		{"securitycontextconstraints.security.openshift.io", "security.openshift.io", "securitycontextconstraints", "v1", apiextensionsv1.ClusterScoped},
+		{"rangeallocations.security.internal.openshift.io", "security.internal.openshift.io", "rangeallocations", "v1", apiextensionsv1.ClusterScoped},
+		{"rolebindingrestrictions.authorization.openshift.io", "authorization.openshift.io", "rolebindingrestrictions", "v1", apiextensionsv1.NamespaceScoped},
+		{"oauths.config.openshift.io", "config.openshift.io", "oauths", "v1", apiextensionsv1.ClusterScoped},
+		{"infrastructures.config.openshift.io", "config.openshift.io", "infrastructures", "v1", apiextensionsv1.ClusterScoped},
+		{"machines.machine.openshift.io", "machine.openshift.io", "machines", "v1beta1", apiextensionsv1.NamespaceScoped},
 	} {
 		definition, err := client.ApiextensionsV1().CustomResourceDefinitions().Get(context.Background(), want.name, metav1.GetOptions{})
 		if err != nil {
@@ -44,7 +46,7 @@ func TestSeedRegistersDefinitions(t *testing.T) {
 		if definition.Spec.Scope != want.scope {
 			t.Fatalf("%s: unexpected scope: %s", want.name, definition.Spec.Scope)
 		}
-		if len(definition.Spec.Versions) != 1 || definition.Spec.Versions[0].Name != "v1" {
+		if len(definition.Spec.Versions) != 1 || definition.Spec.Versions[0].Name != want.version {
 			t.Fatalf("%s: unexpected versions: %+v", want.name, definition.Spec.Versions)
 		}
 		if !definition.Spec.Versions[0].Served || !definition.Spec.Versions[0].Storage {

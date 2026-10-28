@@ -29,6 +29,7 @@ import (
 	"github.com/vkareh/coreshift/internal/certgen"
 	"github.com/vkareh/coreshift/internal/crd"
 	"github.com/vkareh/coreshift/internal/gpgme"
+	"github.com/vkareh/coreshift/internal/infrastructure"
 	"github.com/vkareh/coreshift/internal/mint"
 	"github.com/vkareh/coreshift/internal/oauth"
 	"github.com/vkareh/coreshift/internal/oauthclient"
@@ -459,7 +460,14 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 			if err := rbac.Seed(ctx, kubeconfig); err != nil {
 				return err
 			}
-			return crd.Seed(ctx, kubeconfig)
+			if err := crd.Seed(ctx, kubeconfig); err != nil {
+				return err
+			}
+			// The managed-node admission's informer retries until the
+			// Infrastructure definition lands and then reads the object,
+			// so node creation is permitted once both are in, however
+			// late against the API server's boot.
+			return infrastructure.Seed(ctx, kubeconfig)
 		},
 		},
 		{
