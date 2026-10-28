@@ -46,6 +46,13 @@ func nodeUser(nodeName string) string {
 	return "system:node:" + nodeName
 }
 
+// NodeUser is the name a worker's node client certificate carries, and
+// the name of the certificate request the join makes for it; the
+// host-side commands use it to clean up a worker's join residue.
+func NodeUser(nodeName string) string {
+	return nodeUser(nodeName)
+}
+
 // clusterInfo returns the API server address and CA certificate the
 // bootstrap kubeconfig points at, from the CA the kubeconfig embeds or
 // the file it references.
@@ -98,6 +105,10 @@ func requestCertificate(ctx context.Context, client kubernetes.Interface, nodeNa
 			SignerName: certificatesv1.KubeAPIServerClientKubeletSignerName,
 		},
 	}
+	// The name is deterministic, so a stale request from a previous
+	// worker of this name must be gone before the join runs; the
+	// host-side minting removes it, because the bootstrap identity may
+	// only create requests.
 	fmt.Println("Requesting node certificate")
 	if _, err := client.CertificatesV1().CertificateSigningRequests().Create(ctx, csr, metav1.CreateOptions{}); err != nil {
 		return nil, nil, fmt.Errorf("request node certificate: %w", err)

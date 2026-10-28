@@ -158,6 +158,10 @@ func pemEncodes(t *testing.T, data []byte, blockType string) []byte {
 	return block.Bytes
 }
 
+// TestRequestCertificateRefusesTakenName checks that a leftover request
+// blocks the join with the plain name conflict: the bootstrap identity
+// may only create requests, so removing a stale one is the host-side
+// minting's job, which runs before the worker starts.
 func TestRequestCertificateRefusesTakenName(t *testing.T) {
 	client := fake.NewSimpleClientset(&certificatesv1.CertificateSigningRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "system:node:worker1"},

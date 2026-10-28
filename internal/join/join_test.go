@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
+	certificatesv1 "k8s.io/api/certificates/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,6 +22,7 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	"github.com/vkareh/coreshift/internal/rbac"
+	"github.com/vkareh/coreshift/internal/worker"
 )
 
 // newFakeClients returns a fake core client whose token minting answers
@@ -148,16 +150,20 @@ func TestMintReplacesLeftovers(t *testing.T) {
 	}
 }
 
-// TestRemoveDeletesPair checks the delete contract: the worker's node
-// object and machine stand-in both go, and a missing pair is not an
-// error.
-func TestRemoveDeletesPair(t *testing.T) {
+// TestRemoveDeletesJoinMaterial checks the delete contract: the worker's
+// node object, node certificate request, and machine stand-in all go,
+// and missing ones are not an error.
+func TestRemoveDeletesJoinMaterial(t *testing.T) {
 	client, dynamicClient := newFakeClients(t)
 	if err := mint(context.Background(), "https://127.0.0.1:6443", nil, client, dynamicClient, t.TempDir(), "worker1"); err != nil {
 		t.Fatal(err)
 	}
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker1"}}
 	if _, err := client.CoreV1().Nodes().Create(context.Background(), node, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	csr := &certificatesv1.CertificateSigningRequest{ObjectMeta: metav1.ObjectMeta{Name: worker.NodeUser("worker1")}}
+	if _, err := client.CertificatesV1().CertificateSigningRequests().Create(context.Background(), csr, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -167,12 +173,15 @@ func TestRemoveDeletesPair(t *testing.T) {
 	if _, err := client.CoreV1().Nodes().Get(context.Background(), "worker1", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("node survived: %v", err)
 	}
+	if _, err := client.CertificatesV1().CertificateSigningRequests().Get(context.Background(), worker.NodeUser("worker1"), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("node certificate request survived: %v", err)
+	}
 	if _, err := dynamicClient.Resource(machines).Namespace(machineNamespace).Get(
 		context.Background(), "worker1", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("machine stand-in survived: %v", err)
 	}
 	if err := forgetWorker(context.Background(), client, dynamicClient, "worker1"); err != nil {
-		t.Fatalf("removing a missing pair is an error: %v", err)
+		t.Fatalf("removing missing join material is an error: %v", err)
 	}
 }
 

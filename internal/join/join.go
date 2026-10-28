@@ -25,6 +25,7 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	"github.com/vkareh/coreshift/internal/rbac"
+	"github.com/vkareh/coreshift/internal/worker"
 )
 
 // The files Mint writes, which the create command mounts into the worker
@@ -50,8 +51,9 @@ var machines = schema.GroupVersionResource{
 
 // Mint creates the join material for one worker named nodeName against
 // the cluster the admin kubeconfig at kubeconfigPath points at, writing
-// it into dir. Any node and machine a previous worker of the same name
-// left behind go first, so a re-created worker joins fresh.
+// it into dir. Any node, machine, and certificate request a previous
+// worker of the same name left behind go first, so a re-created worker
+// joins fresh.
 func Mint(ctx context.Context, kubeconfigPath, dir, nodeName string) error {
 	config, err := clientcmd.LoadFromFile(kubeconfigPath)
 	if err != nil {
@@ -107,9 +109,9 @@ func mint(ctx context.Context, server string, caPEM []byte, client kubernetes.In
 	return nil
 }
 
-// Remove deletes a worker's node object and machine stand-in against the
-// cluster the admin kubeconfig points at, so the pair the join minted
-// goes when the worker does.
+// Remove deletes a worker's node object, machine stand-in, and node
+// certificate request against the cluster the admin kubeconfig points
+// at, so the join material goes when the worker does.
 func Remove(ctx context.Context, kubeconfigPath, nodeName string) error {
 	restConfig, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 	if err != nil {
@@ -210,11 +212,15 @@ func ensureMachine(ctx context.Context, client dynamic.Interface, nodeName strin
 	return nil
 }
 
-// forgetWorker deletes the node object and machine stand-in a worker of
-// this name may have left behind. A missing pair is not an error.
+// forgetWorker deletes the node object, machine stand-in, and node
+// certificate request a worker of this name may have left behind. A
+// missing trio is not an error.
 func forgetWorker(ctx context.Context, client kubernetes.Interface, dynamicClient dynamic.Interface, nodeName string) error {
 	if err := client.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete the %s node: %w", nodeName, err)
+	}
+	if err := client.CertificatesV1().CertificateSigningRequests().Delete(ctx, worker.NodeUser(nodeName), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete the %s node certificate request: %w", nodeName, err)
 	}
 	if err := dynamicClient.Resource(machines).Namespace(machineNamespace).Delete(ctx, nodeName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete the %s machine stand-in: %w", nodeName, err)
