@@ -212,8 +212,8 @@ func TestSeedRegistersNodeBootstrapper(t *testing.T) {
 	}
 	wantSubjects := []rbacv1.Subject{{
 		Kind:      rbacv1.ServiceAccountKind,
-		Name:      nodeBootstrapperAccount,
-		Namespace: mcoNamespace,
+		Name:      NodeBootstrapperAccount,
+		Namespace: NodeBootstrapperNamespace,
 	}}
 	if !reflect.DeepEqual(binding.Subjects, wantSubjects) {
 		t.Fatalf("binding has unexpected subjects: %+v", binding.Subjects)

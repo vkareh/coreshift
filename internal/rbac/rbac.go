@@ -47,9 +47,17 @@ const (
 	// The node bootstrap permission pair the machine config operator
 	// applies in real clusters: the service account whose token a node's
 	// bootstrap kubeconfig carries may request node client certificates.
+	// The join material minting creates the account itself, so the
+	// account and its namespace are shared facts.
 	nodeBootstrapperBinding = "system-bootstrap-node-bootstrapper"
-	nodeBootstrapperAccount = "node-bootstrapper"
-	mcoNamespace            = "openshift-machine-config-operator"
+)
+
+// The node bootstrap identity the machine config operator's join flow
+// uses: the service account whose token a node's bootstrap kubeconfig
+// carries, in the operator's namespace.
+const (
+	NodeBootstrapperAccount   = "node-bootstrapper"
+	NodeBootstrapperNamespace = "openshift-machine-config-operator"
 )
 
 // Seed creates the RBAC objects the locally run controllers need. The
@@ -416,8 +424,8 @@ func ensureNodeBootstrapper(ctx context.Context, client kubernetes.Interface) er
 		ObjectMeta: metav1.ObjectMeta{Name: nodeBootstrapperBinding},
 		Subjects: []rbacv1.Subject{{
 			Kind:      rbacv1.ServiceAccountKind,
-			Name:      nodeBootstrapperAccount,
-			Namespace: mcoNamespace,
+			Name:      NodeBootstrapperAccount,
+			Namespace: NodeBootstrapperNamespace,
 		}},
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: rbacv1.GroupName,
