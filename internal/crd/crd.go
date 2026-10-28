@@ -57,6 +57,20 @@ var roleBindingRestrictionsManifest string
 //go:embed 0000_10_config-operator_01_oauths.crd.yaml
 var oauthManifest string
 
+// The Infrastructure definition backs the cluster's Infrastructure object,
+// which the managed-node admission reads before permitting node creation;
+// without it, no node can register.
+//
+//go:embed 0000_10_config-operator_01_infrastructures-Default.crd.yaml
+var infrastructureManifest string
+
+// The Machine definition backs the machine objects the machine approver
+// matches node certificate requests against; without it, the approver never
+// sees a machine and approves nothing.
+//
+//go:embed 0000_30_machine-api-operator_02_machine.Default.crd.yaml
+var machineManifest string
+
 // definitions pairs each embedded manifest with the name of the definition
 // it holds.
 var definitions = []struct {
@@ -68,6 +82,8 @@ var definitions = []struct {
 	{name: "rangeallocations.security.internal.openshift.io", manifest: rangeAllocationManifest},
 	{name: "rolebindingrestrictions.authorization.openshift.io", manifest: roleBindingRestrictionsManifest},
 	{name: "oauths.config.openshift.io", manifest: oauthManifest},
+	{name: "infrastructures.config.openshift.io", manifest: infrastructureManifest},
+	{name: "machines.machine.openshift.io", manifest: machineManifest},
 }
 
 // objectRetryInterval spaces out retries while kube-apiserver warms up or
