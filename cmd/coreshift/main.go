@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -25,11 +26,19 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes"
+	clientcmd "k8s.io/client-go/tools/clientcmd"
+
 	"github.com/vkareh/coreshift/internal/aggregation"
 	"github.com/vkareh/coreshift/internal/certgen"
 	"github.com/vkareh/coreshift/internal/crd"
 	"github.com/vkareh/coreshift/internal/gpgme"
 	"github.com/vkareh/coreshift/internal/infrastructure"
+	"github.com/vkareh/coreshift/internal/join"
 	"github.com/vkareh/coreshift/internal/mint"
 	"github.com/vkareh/coreshift/internal/oauth"
 	"github.com/vkareh/coreshift/internal/oauthclient"
@@ -38,8 +47,6 @@ import (
 	"github.com/vkareh/coreshift/internal/supervisor"
 	"github.com/vkareh/coreshift/internal/worker"
 	"github.com/vkareh/coreshift/pkg/image"
-	"golang.org/x/term"
-	clientcmd "k8s.io/client-go/tools/clientcmd"
 )
 
 // version is the binary's version, set at build time from git; it tags
@@ -404,8 +411,8 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 			Path: kubeBinaries["kube-apiserver"],
 			Args: []string{
 				"--etcd-servers=" + etcdClientURL,
-			"--secure-port=" + strconv.Itoa(port),
-			"--bind-address=" + apiBindAddress(),
+				"--secure-port=" + strconv.Itoa(port),
+				"--bind-address=" + apiBindAddress(),
 				"--tls-cert-file=" + filepath.Join(stateDir, certgen.APIServerCertFilename),
 				"--tls-private-key-file=" + filepath.Join(stateDir, certgen.APIServerKeyFilename),
 				"--client-ca-file=" + filepath.Join(stateDir, certgen.CACertFilename),
@@ -431,46 +438,46 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 				"--proxy-client-cert-file=" + filepath.Join(stateDir, certgen.FrontProxyClientCertFilename),
 				"--proxy-client-key-file=" + filepath.Join(stateDir, certgen.FrontProxyClientKeyFilename),
 				"--enable-aggregator-routing=true",
-			// The OpenShift config switches the forked kube-apiserver
-			// into OpenShift mode, which among other things serves the
-			// OAuth discovery document clients like oc need to log in.
-			// The flag is hidden and marked deprecated upstream, but it
-			// is how every real deployment, including Hypershift's,
-			// runs the server.
-			"--openshift-config=" + kubeAPIServerConfig,
-			// Access tokens issued by the OAuth server are only
-			// validated by the aggregated OAuth API server; this webhook
-			// is how kube-apiserver asks it to review them. Real
-			// clusters carry the same wiring from their operators.
-			"--authentication-token-webhook-config-file=" + tokenReviewKubeconfig,
-			"--authentication-token-webhook-version=v1",
+				// The OpenShift config switches the forked kube-apiserver
+				// into OpenShift mode, which among other things serves the
+				// OAuth discovery document clients like oc need to log in.
+				// The flag is hidden and marked deprecated upstream, but it
+				// is how every real deployment, including Hypershift's,
+				// runs the server.
+				"--openshift-config=" + kubeAPIServerConfig,
+				// Access tokens issued by the OAuth server are only
+				// validated by the aggregated OAuth API server; this webhook
+				// is how kube-apiserver asks it to review them. Real
+				// clusters carry the same wiring from their operators.
+				"--authentication-token-webhook-config-file=" + tokenReviewKubeconfig,
+				"--authentication-token-webhook-version=v1",
 			},
-		AfterStart: func(ctx context.Context) error {
-			// The aggregated servers need kube-apiserver up for delegated
-			// auth, the aggregation wiring needs it to accept writes, and
-			// the controller permissions and the range allocation API
-			// must exist before the cluster policy controller starts
-			// calling. Bound the wait so a broken kube-apiserver fails
-			// the run instead of blocking startup forever.
-			ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-			defer cancel()
-			fmt.Println("Seeding cluster objects")
-			kubeconfig := filepath.Join(stateDir, certgen.AdminKubeconfigFilename)
-			if err := aggregation.Seed(ctx, kubeconfig, aggregatedServers, filepath.Join(stateDir, certgen.CACertFilename)); err != nil {
-				return err
-			}
-			if err := rbac.Seed(ctx, kubeconfig); err != nil {
-				return err
-			}
-			if err := crd.Seed(ctx, kubeconfig); err != nil {
-				return err
-			}
-			// The managed-node admission's informer retries until the
-			// Infrastructure definition lands and then reads the object,
-			// so node creation is permitted once both are in, however
-			// late against the API server's boot.
-			return infrastructure.Seed(ctx, kubeconfig)
-		},
+			AfterStart: func(ctx context.Context) error {
+				// The aggregated servers need kube-apiserver up for delegated
+				// auth, the aggregation wiring needs it to accept writes, and
+				// the controller permissions and the range allocation API
+				// must exist before the cluster policy controller starts
+				// calling. Bound the wait so a broken kube-apiserver fails
+				// the run instead of blocking startup forever.
+				ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				defer cancel()
+				fmt.Println("Seeding cluster objects")
+				kubeconfig := filepath.Join(stateDir, certgen.AdminKubeconfigFilename)
+				if err := aggregation.Seed(ctx, kubeconfig, aggregatedServers, filepath.Join(stateDir, certgen.CACertFilename)); err != nil {
+					return err
+				}
+				if err := rbac.Seed(ctx, kubeconfig); err != nil {
+					return err
+				}
+				if err := crd.Seed(ctx, kubeconfig); err != nil {
+					return err
+				}
+				// The managed-node admission's informer retries until the
+				// Infrastructure definition lands and then reads the object,
+				// so node creation is permitted once both are in, however
+				// late against the API server's boot.
+				return infrastructure.Seed(ctx, kubeconfig)
+			},
 		},
 		{
 			Name: "kube-controller-manager",
@@ -521,12 +528,12 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 			// cluster policy controller, see them from the beginning. Bound
 			// the wait so a broken server fails the run instead of blocking
 			// startup forever.
-		AfterStart: func(ctx context.Context) error {
-			ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-			defer cancel()
-			fmt.Println("Seeding security context constraints")
-			return scc.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
-		},
+			AfterStart: func(ctx context.Context) error {
+				ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				defer cancel()
+				fmt.Println("Seeding security context constraints")
+				return scc.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
+			},
 		},
 		{
 			Name: "openshift-oauth-apiserver",
@@ -547,21 +554,21 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 				"--requestheader-username-headers=X-Remote-User",
 				"--requestheader-group-headers=X-Remote-Group",
 				"--requestheader-extra-headers-prefix=X-Remote-Extra-",
-			"--client-ca-file=" + filepath.Join(stateDir, certgen.CACertFilename),
+				"--client-ca-file=" + filepath.Join(stateDir, certgen.CACertFilename),
+			},
+			// The login client is stored through the OAuth API this server
+			// serves; it is created once the server answers, so logins have
+			// a client to talk to from the first attempt. Bound the wait so
+			// a broken server fails the run instead of blocking startup
+			// forever.
+			AfterStart: func(ctx context.Context) error {
+				ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				defer cancel()
+				fmt.Println("Seeding OAuth client")
+				return oauthclient.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), apiServerURL(port))
+			},
 		},
-		// The login client is stored through the OAuth API this server
-		// serves; it is created once the server answers, so logins have
-		// a client to talk to from the first attempt. Bound the wait so
-		// a broken server fails the run instead of blocking startup
-		// forever.
-	AfterStart: func(ctx context.Context) error {
-		ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		defer cancel()
-		fmt.Println("Seeding OAuth client")
-		return oauthclient.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), apiServerURL(port))
-	},
-	},
-	// oauth-server hands login flows to the identity providers in its
+		// oauth-server hands login flows to the identity providers in its
 		// config; with none configured it serves a deny-all provider, so it
 		// starts and answers without cluster-side seed objects. Its API
 		// calls, such as issuing tokens through the aggregated OAuth API
@@ -696,8 +703,9 @@ func printReadySummary(stateDir string, port int) {
 }
 
 // newCreateCommand builds the parent of everything creatable. It takes a
-// noun naming what to create; today only cluster exists. With no noun,
-// or an unknown one, it prints the list and fails.
+// noun naming what to create: the control plane, or a worker joining a
+// running one. With no noun, or an unknown one, it prints the list and
+// fails.
 func newCreateCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -713,6 +721,7 @@ func newCreateCommand() *cobra.Command {
 		},
 	}
 	cmd.AddCommand(newCreateClusterCommand())
+	cmd.AddCommand(newCreateWorkerCommand())
 	return cmd
 }
 
@@ -932,14 +941,28 @@ func refuseIfPortBusy(port int) error {
 	return listener.Close()
 }
 
-// streamUntilReady follows the container's boot output while waiting for
-// the control plane's readiness from the host. The follower is only
-// output: it can end for its own reasons, such as a closed pipe, without
-// the container being any less alive. Its state is polled instead, and a
-// container that stops before becoming ready is a failure; a readiness
-// wait that succeeds prints the ready summary and leaves the container
-// running.
+// streamUntilReady follows the cluster container's boot output while
+// waiting for the control plane's readiness from the host.
 func streamUntilReady(ctx context.Context, container, stateDir string, port int) error {
+	return streamUntil(ctx, container, "the control plane became ready",
+		func(ctx context.Context) error { return waitContainerReady(ctx, stateDir) },
+		func() {
+			printReadySummary(stateDir, port)
+			fmt.Printf("Container %s is running in the background\n", container)
+		},
+		func(err error) error { return containerFailure(container, stateDir, err) },
+	)
+}
+
+// streamUntil follows a container's boot output while waiting for its
+// readiness from the host. The follower is only output: it can end for
+// its own reasons, such as a closed pipe, without the container being
+// any less alive. Its state is polled instead, and a container that
+// stops before becoming ready is a failure; a wait that succeeds runs
+// the report and leaves the container running. The waitingFor phrase
+// names what was being waited for in a failure, and fail handles the
+// failure, including the container's removal.
+func streamUntil(ctx context.Context, container, waitingFor string, wait func(context.Context) error, report func(), fail func(error) error) error {
 	logs := exec.CommandContext(ctx, "podman", "logs", "--follow", container)
 	logs.Stdout = os.Stdout
 	logs.Stderr = os.Stderr
@@ -947,7 +970,7 @@ func streamUntilReady(ctx context.Context, container, stateDir string, port int)
 		return fmt.Errorf("stream container output: %w", err)
 	}
 	ready := make(chan error, 1)
-	go func() { ready <- waitContainerReady(ctx, stateDir) }()
+	go func() { ready <- wait(ctx) }()
 	dead := make(chan struct{}, 1)
 	go func() {
 		for {
@@ -968,15 +991,13 @@ func streamUntilReady(ctx context.Context, container, stateDir string, port int)
 	case err := <-ready:
 		stopStreaming(logs)
 		if err != nil {
-			return containerFailure(container, stateDir, err)
+			return fail(err)
 		}
-		printReadySummary(stateDir, port)
-		fmt.Printf("Container %s is running in the background\n", container)
+		report()
 		return nil
 	case <-dead:
 		stopStreaming(logs)
-		return containerFailure(container, stateDir,
-			fmt.Errorf("container %s exited before the control plane became ready", container))
+		return fail(fmt.Errorf("container %s exited before %s", container, waitingFor))
 	}
 }
 
@@ -1090,9 +1111,256 @@ func tailText(text string, lines int) string {
 // clusterContainerPrefix prepends a cluster's name to name its container.
 const clusterContainerPrefix = "coreshift-"
 
+// The names and labels of the worker side: containers take the worker
+// prefix, carry their cluster as a label, and keep their join material
+// below their cluster's state directory.
+const (
+	workerContainerPrefix = "coreshift-worker-"
+	workerClusterLabel    = "coreshift-cluster"
+	workersDirName        = "workers"
+)
+
+// defaultClusterName is the cluster every command addresses unless a
+// flag names another one.
+const defaultClusterName = "coreshift"
+
+// newCreateWorkerCommand builds the command that joins a worker to a
+// running cluster: it mints the worker's container image and join
+// material, starts one privileged worker container, and waits for the
+// worker's node to register.
+func newCreateWorkerCommand() *cobra.Command {
+	var pullSecretPath, name, cluster string
+	var verbose bool
+	cmd := &cobra.Command{
+		Use:          "worker",
+		Short:        "Join a worker to a cluster in a podman container",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runCreateWorker(cmd.Context(), name, cluster, pullSecretPath, verbose)
+		},
+	}
+	cmd.Flags().StringVar(&pullSecretPath, "pull-secret", "", "path to a Red Hat pull secret with credentials for the release image registry (required)")
+	cmd.Flags().StringVar(&name, "name", "worker1", "name of the worker; its container is called coreshift-worker-<name> and its node carries the name")
+	cmd.Flags().StringVar(&cluster, "cluster", defaultClusterName, "name of the cluster the worker joins")
+	cmd.Flags().BoolVar(&verbose, "verbose", false, "stream the image build's output to the terminal")
+	if err := cmd.MarkFlagRequired("pull-secret"); err != nil {
+		panic(err) // the flag is defined above
+	}
+	return cmd
+}
+
+// workerNamePattern is what a worker's name may look like: a DNS label,
+// the strictest shape its node and machine objects accept. The name also
+// names a directory below the cluster's state directory, so it cannot
+// carry separators.
+var workerNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+// runCreateWorker joins a worker to a running cluster. It refuses a
+// taken worker name, an unknown cluster, or a cluster whose API is not
+// answering before touching anything, mints the join material and the
+// worker image, starts the container detached, streams its boot output,
+// and waits for the worker's node to register. On success the container
+// keeps running; on any failure it is removed, with the join material,
+// while the cluster's state is kept.
+func runCreateWorker(ctx context.Context, name, cluster, pullSecretPath string, verbose bool) error {
+	if !workerNamePattern.MatchString(name) || len(name) > 63 {
+		return fmt.Errorf("worker name %q is not a DNS label of at most 63 characters: lowercase letters, digits, and dashes", name)
+	}
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if _, err := exec.LookPath("podman"); err != nil {
+		return fmt.Errorf("podman is required to create workers: %w", err)
+	}
+	pullSecretPath, err := filepath.Abs(pullSecretPath)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(pullSecretPath); err != nil {
+		return fmt.Errorf("read pull secret: %w", err)
+	}
+	container := workerContainerPrefix + name
+	if exec.Command("podman", "container", "exists", container).Run() == nil {
+		return fmt.Errorf("worker %s already exists; use --name to create another worker, or delete it first", name)
+	}
+	port, stateDir, err := workerClusterTarget(cluster)
+	if err != nil {
+		return err
+	}
+	if !clusterReady(port) {
+		return fmt.Errorf("cluster %s is not running at %s; start it first", cluster, apiServerURL(port))
+	}
+
+	materialDir := filepath.Join(stateDir, workersDirName, name)
+	if err := join.Mint(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), materialDir, name); err != nil {
+		return err
+	}
+	if err := launchWorker(ctx, container, cluster, name, stateDir, materialDir, pullSecretPath, verbose); err != nil {
+		// The failure path removed the container, when one started; the
+		// join material is the worker's own ephemera and goes with it,
+		// while the cluster's state stays.
+		_ = os.RemoveAll(materialDir)
+		return err
+	}
+	return nil
+}
+
+// launchWorker mints the worker image from the release the cluster
+// records, so the node binaries in it match the control plane, starts
+// the worker container, and waits for its join.
+func launchWorker(ctx context.Context, container, cluster, name, stateDir, materialDir, pullSecretPath string, verbose bool) error {
+	pullSecret, err := os.ReadFile(pullSecretPath)
+	if err != nil {
+		return fmt.Errorf("read pull secret: %w", err)
+	}
+	client, err := image.NewClient(pullSecret)
+	if err != nil {
+		return fmt.Errorf("create image client: %w", err)
+	}
+	releaseRef := stateRelease(stateDir)
+	if releaseRef == "" {
+		return fmt.Errorf("cluster %s records no release to build the worker image from", cluster)
+	}
+	releaseRoot, err := client.CachedRelease(ctx, releaseRef)
+	if err != nil {
+		return fmt.Errorf("prepare release image: %w", err)
+	}
+	base, err := image.ResolveComponentImage(releaseRoot, "rhel-coreos")
+	if err != nil {
+		return err
+	}
+	imageRef, err := mint.WorkerImage(ctx, version, base, pullSecretPath, verbose)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Starting container %s\n", container)
+	if err := runWorkerPodman(ctx, workerRunArgs(container, cluster, materialDir, imageRef)); err != nil {
+		return err
+	}
+	return streamUntilWorkerReady(ctx, container, stateDir, name)
+}
+
+// workerRunArgs builds the podman command line that starts a worker
+// container: detached and named, labeled with the cluster it joins, on
+// the host network so it dials the control plane at loopback, and
+// privileged, which hands it the writable cgroup hierarchy the node side
+// needs. The join material is mounted read-only at the paths the
+// entrypoint reads, and the host's kernel modules read-only for kubelet.
+// The kubelet state directory stays inside the container: workers are
+// ephemeral, recreated rather than restarted.
+func workerRunArgs(container, cluster, materialDir, imageRef string) []string {
+	return []string{
+		"run", "--detach",
+		"--name", container,
+		"--label", workerClusterLabel + "=" + cluster,
+		"--network", "host",
+		"--privileged",
+		"--volume", filepath.Join(materialDir, join.BootstrapKubeconfigFilename) + ":" + worker.BootstrapKubeconfigPath + ":ro,z",
+		"--volume", filepath.Join(materialDir, join.NodeNameFilename) + ":" + worker.NodeNamePath + ":ro,z",
+		"--volume", "/lib/modules:/lib/modules:ro",
+		imageRef,
+	}
+}
+
+// rootlessCgroupRemedy names the requirement a rootless launch that
+// could not delegate cgroups leaves the user with: the worker is the
+// only part of CoreShift that needs rootful podman.
+const rootlessCgroupRemedy = "Rootless podman cannot give kubelet the cgroup hierarchy it needs here.\n" +
+	"Rootful podman is the worker-only requirement: run the same command with sudo."
+
+// runWorkerPodman starts the worker container, under a delegated cgroup
+// scope when rootless: kubelet creates cgroups inside the container,
+// which rootless podman only permits from a subtree systemd delegated to
+// the user, so the launch asks the user's systemd for one.
+func runWorkerPodman(ctx context.Context, args []string) error {
+	command := append([]string{"podman"}, args...)
+	if os.Geteuid() != 0 {
+		if _, err := exec.LookPath("systemd-run"); err != nil {
+			return fmt.Errorf("systemd-run is required to delegate cgroups to a rootless worker container: %w\n%s", err, rootlessCgroupRemedy)
+		}
+		command = append([]string{"systemd-run", "--user", "--scope", "--quiet", "--property=Delegate=yes"}, command...)
+	}
+	run := exec.CommandContext(ctx, command[0], command[1:]...)
+	run.Stdout = io.Discard // the detached run only prints the container ID
+	run.Stderr = os.Stderr
+	if err := run.Run(); err != nil {
+		return fmt.Errorf("start worker container: %w", err)
+	}
+	return nil
+}
+
+// streamUntilWorkerReady follows the worker container's boot output
+// while waiting for its node to register.
+func streamUntilWorkerReady(ctx context.Context, container, stateDir, name string) error {
+	return streamUntil(ctx, container, "the worker joined",
+		func(ctx context.Context) error { return waitWorkerNode(ctx, stateDir, name) },
+		func() { printWorkerSummary(container, stateDir, name) },
+		func(err error) error { return workerFailure(container, stateDir, name, err) },
+	)
+}
+
+// workerReadyTimeout bounds the whole join wait of a created worker: the
+// container must boot CRI-O and kubelet, have its certificate request
+// approved, and register its node. Ctrl-C cancels the wait.
+const workerReadyTimeout = 10 * time.Minute
+
+// waitWorkerNode waits for the worker's node object to appear against
+// the cluster's admin kubeconfig, the moment a join succeeded.
+func waitWorkerNode(ctx context.Context, stateDir, name string) error {
+	config, err := clientcmd.BuildConfigFromFlags("", filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
+	if err != nil {
+		return fmt.Errorf("read admin kubeconfig: %w", err)
+	}
+	client, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("create admin client: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, workerReadyTimeout)
+	defer cancel()
+	fmt.Println("Waiting for the worker to join")
+	pollErr := wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
+		_, err := client.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
+		return err == nil, nil
+	})
+	if pollErr != nil {
+		return fmt.Errorf("wait for the node to register: %w", ctx.Err())
+	}
+	return nil
+}
+
+// printWorkerSummary prints what a joined worker looks like: its node
+// reporting not ready until a CNI exists, and the container running in
+// the background.
+func printWorkerSummary(container, stateDir, name string) {
+	fmt.Println()
+	fmt.Println("Worker joined")
+	fmt.Printf("  Node:       %s, reporting NotReady until a CNI exists\n", name)
+	fmt.Printf("  Kubeconfig: %s\n", filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
+	fmt.Printf("Container %s is running in the background\n", container)
+}
+
+// workerFailure reports a worker container that did not join: the error
+// carries the tail of the container's log, a join that failed on the
+// cgroup hierarchy gains the rootful remedy, and the container is
+// removed while the cluster's state is kept.
+func workerFailure(container, stateDir, name string, err error) error {
+	tail := containerLogTail(container)
+	if strings.Contains(tail, worker.CgroupDelegationMark) {
+		err = fmt.Errorf("%w\n%s", err, rootlessCgroupRemedy)
+	}
+	if tail != "" {
+		err = fmt.Errorf("%w\n\nrecent log output:\n%s", err, tail)
+	}
+	if rmErr := exec.Command("podman", "rm", "--force", container).Run(); rmErr != nil {
+		err = fmt.Errorf("%w\nremoving the container failed; remove %s by hand", err, container)
+	}
+	return err
+}
+
 // newDeleteCommand builds the parent of everything deletable. It takes a
-// noun naming what to delete; today only cluster exists. With no noun, or
-// an unknown one, it prints the list and fails.
+// noun naming what to delete: a cluster, or a worker joined to one. With
+// no noun, or an unknown one, it prints the list and fails.
 func newDeleteCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "delete",
@@ -1108,6 +1376,7 @@ func newDeleteCommand() *cobra.Command {
 		},
 	}
 	cmd.AddCommand(newDeleteClusterCommand())
+	cmd.AddCommand(newDeleteWorkerCommand())
 	return cmd
 }
 
@@ -1173,6 +1442,69 @@ func runDelete(name string, cleanup bool) error {
 	return nil
 }
 
+// newDeleteWorkerCommand builds the command that deletes a worker: its
+// container is stopped and removed, and the node object and machine
+// stand-in its join created go with it, leaving the cluster's node list
+// clean.
+func newDeleteWorkerCommand() *cobra.Command {
+	var name string
+	cmd := &cobra.Command{
+		Use:          "worker",
+		Short:        "Delete a worker, stopping its container and its node",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runDeleteWorker(cmd.Context(), name)
+		},
+	}
+	cmd.Flags().StringVar(&name, "name", "worker1", "name of the worker to delete")
+	return cmd
+}
+
+// runDeleteWorker deletes a worker: its container is stopped and
+// removed, then the node object and machine stand-in the join minted are
+// deleted through the cluster's admin kubeconfig, and the join material
+// goes with them. The cluster must be running to remove the pair; when
+// it is not, the node stays and the command says so.
+func runDeleteWorker(ctx context.Context, name string) error {
+	if _, err := exec.LookPath("podman"); err != nil {
+		return fmt.Errorf("podman is required to delete workers: %w", err)
+	}
+	container := workerContainerPrefix + name
+	if exec.Command("podman", "container", "exists", container).Run() != nil {
+		return fmt.Errorf("no worker named %s", name)
+	}
+	cluster, err := containerLabel(container, workerClusterLabel)
+	if err != nil {
+		return err
+	}
+	if cluster == "" {
+		return fmt.Errorf("container %s carries no cluster label; remove it with podman", container)
+	}
+	fmt.Printf("Stopping container %s\n", container)
+	stop := exec.Command("podman", "stop", "--timeout", strconv.Itoa(containerStopSeconds), container)
+	stop.Stderr = os.Stderr
+	if err := stop.Run(); err != nil {
+		return fmt.Errorf("stop container: %w", err)
+	}
+	if err := exec.Command("podman", "rm", container).Run(); err != nil {
+		return fmt.Errorf("remove container: %w", err)
+	}
+	fmt.Printf("Deleted worker %s\n", name)
+
+	// The container goes first: a running kubelet recreates its node, so
+	// the pair is removed only once nothing re-registers it.
+	if port, stateDir, err := workerClusterTarget(cluster); err == nil && clusterReady(port) {
+		if err := join.Remove(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), name); err != nil {
+			return fmt.Errorf("remove the node and machine stand-in: %w", err)
+		}
+		_ = os.RemoveAll(filepath.Join(stateDir, workersDirName, name))
+		fmt.Printf("Node %s removed from cluster %s\n", name, cluster)
+		return nil
+	}
+	fmt.Printf("Cluster %s is not running; its node stays until the cluster's data goes\n", cluster)
+	return nil
+}
+
 // newGetCommand builds the parent of everything gettable. It takes a noun
 // naming what to get; with no noun, or an unknown one, it prints the list
 // and fails.
@@ -1192,6 +1524,7 @@ func newGetCommand() *cobra.Command {
 	}
 	cmd.AddCommand(newGetClustersCommand())
 	cmd.AddCommand(newGetKubeconfigCommand())
+	cmd.AddCommand(newGetWorkersCommand())
 	return cmd
 }
 
@@ -1278,16 +1611,104 @@ func runGetKubeconfig(name string) error {
 	return nil
 }
 
+// newGetWorkersCommand builds the command that lists the workers with
+// their name, cluster, and readiness.
+func newGetWorkersCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:          "workers",
+		Short:        "List workers",
+		SilenceUsage: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runGetWorkers()
+		},
+	}
+}
+
+// runGetWorkers lists the workers. Readiness is the worker's own node
+// condition, read live from the cluster's API, so a worker whose node
+// reports not ready — which is every worker until a CNI exists — shows
+// as not ready.
+func runGetWorkers() error {
+	if _, err := exec.LookPath("podman"); err != nil {
+		return fmt.Errorf("podman is required to list workers: %w", err)
+	}
+	containers, err := containersNamed(workerContainerPrefix)
+	if err != nil {
+		return err
+	}
+	if len(containers) == 0 {
+		fmt.Println("No workers")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(w, "NAME\tCLUSTER\tREADY")
+	for _, container := range containers {
+		name := strings.TrimPrefix(container, workerContainerPrefix)
+		cluster := "-"
+		ready := "not ready"
+		if label, err := containerLabel(container, workerClusterLabel); err == nil && label != "" {
+			cluster = label
+			if _, stateDir, err := workerClusterTarget(label); err == nil && workerNodeReady(stateDir, name) {
+				ready = "ready"
+			}
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\n", name, cluster, ready)
+	}
+	return w.Flush()
+}
+
+// workerNodeReady reports whether the worker's node object carries a
+// ready condition, a live read against the cluster's API. Anything in
+// the way — a stopped cluster, a missing node — counts as not ready.
+func workerNodeReady(stateDir, name string) bool {
+	config, err := clientcmd.BuildConfigFromFlags("", filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
+	if err != nil {
+		return false
+	}
+	config.Timeout = readyProbeTimeout
+	client, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return false
+	}
+	node, err := client.CoreV1().Nodes().Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	for _, condition := range node.Status.Conditions {
+		if condition.Type == corev1.NodeReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
 // clusterContainers returns the names of the cluster containers, sorted:
-// every container named coreshift-* is one.
+// every container named coreshift-* is one, except the workers, which
+// share the prefix and are listed by their own command.
 func clusterContainers() ([]string, error) {
+	containers, err := containersNamed(clusterContainerPrefix)
+	if err != nil {
+		return nil, err
+	}
+	var clusters []string
+	for _, name := range containers {
+		if !strings.HasPrefix(name, workerContainerPrefix) {
+			clusters = append(clusters, name)
+		}
+	}
+	return clusters, nil
+}
+
+// containersNamed returns the names of the containers carrying the given
+// prefix, sorted.
+func containersNamed(prefix string) ([]string, error) {
 	out, err := exec.Command("podman", "ps", "-a", "--format", "{{.Names}}").Output()
 	if err != nil {
 		return nil, fmt.Errorf("list containers: %w", err)
 	}
 	var containers []string
 	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if strings.HasPrefix(name, clusterContainerPrefix) {
+		if strings.HasPrefix(name, prefix) {
 			containers = append(containers, name)
 		}
 	}
@@ -1300,15 +1721,61 @@ func clusterContainers() ([]string, error) {
 // publishes decides the directory, the same resolution every other
 // command uses.
 func clusterStateDir(name string) (string, error) {
+	_, dir, err := clusterTarget(name)
+	return dir, err
+}
+
+// clusterTarget resolves a container-mode cluster to its port and state
+// directory through its published port, refusing when no cluster with
+// that name exists.
+func clusterTarget(name string) (int, string, error) {
 	container := clusterContainerPrefix + name
 	if exec.Command("podman", "container", "exists", container).Run() != nil {
-		return "", fmt.Errorf("no cluster named %s", name)
+		return 0, "", fmt.Errorf("no cluster named %s", name)
 	}
 	port, err := containerPort(container)
 	if err != nil {
-		return "", err
+		return 0, "", err
 	}
-	return apiStateDir(port)
+	dir, err := apiStateDir(port)
+	if err != nil {
+		return 0, "", err
+	}
+	return port, dir, nil
+}
+
+// workerClusterTarget resolves the cluster a worker joins to its port
+// and state directory: a container cluster through its published port,
+// the way every other cluster command resolves it, and the default
+// cluster at the default port when it runs host-side, where no container
+// exists to ask. The admin kubeconfig in the default state directory
+// marks a host-side cluster.
+func workerClusterTarget(cluster string) (int, string, error) {
+	port, stateDir, err := clusterTarget(cluster)
+	if err == nil {
+		return port, stateDir, nil
+	}
+	if cluster == defaultClusterName {
+		stateDir, dirErr := apiStateDir(defaultAPIPort)
+		if dirErr != nil {
+			return 0, "", dirErr
+		}
+		if _, statErr := os.Stat(filepath.Join(stateDir, certgen.AdminKubeconfigFilename)); statErr == nil {
+			return defaultAPIPort, stateDir, nil
+		}
+	}
+	return 0, "", err
+}
+
+// containerLabel returns the value of a container's label, or an empty
+// string when the container carries none.
+func containerLabel(container, label string) (string, error) {
+	out, err := exec.Command("podman", "inspect", "--format",
+		fmt.Sprintf(`{{index .Config.Labels %q}}`, label), container).Output()
+	if err != nil {
+		return "", fmt.Errorf("inspect container %s: %w", container, err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // containerPort returns the port a cluster container publishes its API

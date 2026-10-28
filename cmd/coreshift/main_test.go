@@ -1265,8 +1265,10 @@ func pemDecode(t *testing.T, data []byte) *pem.Block {
 // writeFakePodman writes a podman stand-in into a directory of its own and
 // prepends it to PATH. It records every call, one line per call, in the
 // file named by PODMAN_LOG; the containers named in PODMAN_CONTAINERS,
-// one per line, are the ones that exist and the ones ps lists, and
-// inspect answers with the per-container port file from PODMAN_PORTS.
+// one per line, are the ones that exist and the ones ps lists; inspect
+// answers with the per-container port file from PODMAN_PORTS, and with
+// the per-container label file from PODMAN_LABELS when asked for labels;
+// logs answers with the per-container file from PODMAN_LOGS.
 func writeFakePodman(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
@@ -1282,7 +1284,14 @@ if [ "$1" = "ps" ]; then
 fi
 if [ "$1" = "inspect" ]; then
 	eval "container=\${$#}"
-	cat "$PODMAN_PORTS/$container"
+	case "$3" in
+	*Labels*) cat "$PODMAN_LABELS/$container" 2>/dev/null ;;
+	*) cat "$PODMAN_PORTS/$container" ;;
+	esac
+	exit 0
+fi
+if [ "$1" = "logs" ]; then
+	cat "$PODMAN_LOGS/$2" 2>/dev/null
 	exit 0
 fi
 exit 0
@@ -1295,6 +1304,8 @@ exit 0
 	t.Setenv("PODMAN_LOG", filepath.Join(t.TempDir(), "calls"))
 	t.Setenv("PODMAN_CONTAINERS", filepath.Join(t.TempDir(), "containers"))
 	t.Setenv("PODMAN_PORTS", t.TempDir())
+	t.Setenv("PODMAN_LABELS", t.TempDir())
+	t.Setenv("PODMAN_LOGS", t.TempDir())
 }
 
 // setContainers makes the fake podman report exactly these containers as
@@ -1311,6 +1322,24 @@ func setContainers(t *testing.T, names ...string) {
 func setContainerPort(t *testing.T, container string, port int) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(os.Getenv("PODMAN_PORTS"), container), []byte(strconv.Itoa(port)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// setContainerLabel makes the fake podman answer label inspection for
+// container with label.
+func setContainerLabel(t *testing.T, container, label string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(os.Getenv("PODMAN_LABELS"), container), []byte(label), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// setContainerLog makes the fake podman answer logs for container with
+// the given output.
+func setContainerLog(t *testing.T, container, log string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(os.Getenv("PODMAN_LOGS"), container), []byte(log), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1670,5 +1699,275 @@ func TestDeleteClusterFlagDefaults(t *testing.T) {
 		t.Fatal("flag --cleanup is not defined")
 	} else if flag.DefValue != "false" {
 		t.Fatalf("--cleanup default = %q, want false", flag.DefValue)
+	}
+}
+
+// TestCreateWorkerFlagDefaults checks that the worker creation flags are
+// accepted and come with the documented defaults.
+func TestCreateWorkerFlagDefaults(t *testing.T) {
+	cmd := newCreateWorkerCommand()
+	for name, want := range map[string]string{
+		"name":        "worker1",
+		"cluster":     "coreshift",
+		"verbose":     "false",
+		"pull-secret": "",
+	} {
+		if flag := cmd.Flags().Lookup(name); flag == nil {
+			t.Fatalf("flag --%s is not defined", name)
+		} else if flag.DefValue != want {
+			t.Fatalf("--%s default = %q, want %q", name, flag.DefValue, want)
+		}
+	}
+	if err := cmd.MarkFlagRequired("pull-secret"); err != nil {
+		t.Fatalf("pull secret is not required: %v", err)
+	}
+}
+
+// TestDeleteWorkerFlagDefaults checks that the worker deletion comes
+// with the documented default.
+func TestDeleteWorkerFlagDefaults(t *testing.T) {
+	cmd := newDeleteWorkerCommand()
+	if flag := cmd.Flags().Lookup("name"); flag == nil {
+		t.Fatal("flag --name is not defined")
+	} else if flag.DefValue != "worker1" {
+		t.Fatalf("--name default = %q, want worker1", flag.DefValue)
+	}
+}
+
+// TestWorkerRunArgs checks the podman command line that starts a worker
+// container: its name and cluster label, the host network it dials the
+// control plane on, the privilege its cgroup hierarchy needs, the join
+// material mounted read-only where the entrypoint reads it, and the
+// host's kernel modules read-only.
+func TestWorkerRunArgs(t *testing.T) {
+	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1")
+	want := []string{
+		"run", "--detach",
+		"--name", "coreshift-worker-w1",
+		"--label", "coreshift-cluster=dev",
+		"--network", "host",
+		"--privileged",
+		"--volume", "/state/api/workers/w1/bootstrap-kubeconfig:/etc/kubernetes/bootstrap-kubeconfig:ro,z",
+		"--volume", "/state/api/workers/w1/node-name:/etc/coreshift/node-name:ro,z",
+		"--volume", "/lib/modules:/lib/modules:ro",
+		"localhost/coreshift-worker:v1",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("podman args = %q\nwant %q", got, want)
+	}
+}
+
+// TestRunCreateWorkerRefusals checks the refusals that must arrive before
+// anything is minted: a name the objects cannot carry, a taken worker
+// name, an unknown cluster, and a cluster whose API is not answering.
+func TestRunCreateWorkerRefusals(t *testing.T) {
+	secret := writePullSecret(t)
+	for name, tc := range map[string]struct {
+		worker  string
+		cluster string
+		want    string
+	}{
+		"name is not a DNS label": {"Bad Name", "coreshift", "DNS label"},
+		"name is empty":           {"", "coreshift", "DNS label"},
+		"worker name is taken":    {"w1", "coreshift", "worker w1 already exists"},
+		"cluster is unknown":      {"fresh", "nope", "no cluster named nope"},
+		"cluster is not running":  {"fresh", "dev", "not running"},
+	} {
+		writeFakePodman(t)
+		setContainers(t, "coreshift-worker-w1", "coreshift-dev")
+		setContainerPort(t, "coreshift-dev", 17443)
+
+		err := runCreateWorker(context.Background(), tc.worker, tc.cluster, secret, false)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: err = %v, want a refusal containing %q", name, err, tc.want)
+		}
+		// A refusal before the first podman call leaves no call log.
+		if calls, err := os.ReadFile(os.Getenv("PODMAN_LOG")); err == nil && strings.Contains(string(calls), "build") {
+			t.Fatalf("%s: an image was minted despite the refusal", name)
+		}
+	}
+}
+
+// TestWorkerClusterTarget checks how a worker's cluster is resolved: a
+// container cluster through its published port, and the default cluster
+// at the default port when it runs host-side, which no container marks.
+func TestWorkerClusterTarget(t *testing.T) {
+	writeFakePodman(t)
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	setContainers(t, "coreshift-dev")
+	setContainerPort(t, "coreshift-dev", 7443)
+
+	port, dir, err := workerClusterTarget("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if port != 7443 || dir != filepath.Join(base, "coreshift", "api", "7443") {
+		t.Fatalf("container cluster: port %d, dir %q", port, dir)
+	}
+
+	// Host mode: no cluster container, but the default state directory
+	// holds the admin kubeconfig a run wrote.
+	stateDir := filepath.Join(base, "coreshift", "api")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, certgen.AdminKubeconfigFilename), []byte("kubeconfig"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	port, dir, err = workerClusterTarget("coreshift")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if port != defaultAPIPort || dir != stateDir {
+		t.Fatalf("host-mode cluster: port %d, dir %q", port, dir)
+	}
+
+	if _, _, err := workerClusterTarget("nope"); err == nil || !strings.Contains(err.Error(), "no cluster named nope") {
+		t.Fatalf("err = %v, want a plain refusal", err)
+	}
+}
+
+// TestRunGetWorkersEmpty checks that an empty worker list is reported
+// plainly.
+func TestRunGetWorkersEmpty(t *testing.T) {
+	writeFakePodman(t)
+	var err error
+	out := captureStdout(t, func() { err = runGetWorkers() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "No workers") {
+		t.Fatalf("output = %q, want the empty list reported", out)
+	}
+}
+
+// TestRunGetWorkersListsWorkers checks the row each worker gets: its
+// name, the cluster its container is labeled with, and readiness from
+// its node's live condition, so a worker without a reachable cluster
+// shows as not ready and one without a label shows no cluster.
+func TestRunGetWorkersListsWorkers(t *testing.T) {
+	writeFakePodman(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	setContainers(t, "coreshift-dev", "coreshift-worker-w1", "coreshift-worker-w2")
+	setContainerPort(t, "coreshift-dev", 7443)
+	setContainerLabel(t, "coreshift-worker-w1", "dev")
+
+	var err error
+	out := captureStdout(t, func() { err = runGetWorkers() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("output has %d lines, want a header and two workers:\n%s", len(lines), out)
+	}
+	if fields := strings.Fields(lines[1]); len(fields) < 4 || fields[0] != "w1" || fields[1] != "dev" || strings.Join(fields[2:], " ") != "not ready" {
+		t.Fatalf("w1 row = %q, want its name, cluster, and not ready", lines[1])
+	}
+	if fields := strings.Fields(lines[2]); len(fields) < 4 || fields[0] != "w2" || fields[1] != "-" || strings.Join(fields[2:], " ") != "not ready" {
+		t.Fatalf("w2 row = %q, want its name, no cluster, and not ready", lines[2])
+	}
+}
+
+// TestRunDeleteWorkerStopsAndRemoves checks the delete contract: the
+// container is stopped with the same teardown time the cluster's gets
+// and then removed, its cluster read from its label.
+func TestRunDeleteWorkerStopsAndRemoves(t *testing.T) {
+	writeFakePodman(t)
+	setContainers(t, "coreshift-worker-w1")
+	setContainerLabel(t, "coreshift-worker-w1", "coreshift")
+
+	var delErr error
+	captureStdout(t, func() { delErr = runDeleteWorker(context.Background(), "w1") })
+	if delErr != nil {
+		t.Fatal(delErr)
+	}
+	calls := podmanCalls(t)
+	want := []string{
+		"container exists coreshift-worker-w1",
+		`inspect --format {{index .Config.Labels "coreshift-cluster"}} coreshift-worker-w1`,
+		"stop --timeout 120 coreshift-worker-w1",
+		"rm coreshift-worker-w1",
+	}
+	// The cluster resolution trails the removal; only the head of the
+	// call sequence is the delete itself.
+	if !slices.Equal(calls[:len(want)], want) {
+		t.Fatalf("podman calls = %q\nwant %q at the head", calls, want)
+	}
+}
+
+// TestRunDeleteWorkerMissing checks that deleting a missing worker is
+// refused plainly, with nothing stopped or removed.
+func TestRunDeleteWorkerMissing(t *testing.T) {
+	writeFakePodman(t)
+	err := runDeleteWorker(context.Background(), "nope")
+	if err == nil || !strings.Contains(err.Error(), "no worker named nope") {
+		t.Fatalf("err = %v, want a plain refusal", err)
+	}
+	if calls := podmanCalls(t); len(calls) != 1 || calls[0] != "container exists coreshift-worker-nope" {
+		t.Fatalf("podman calls = %q, want only the existence check", calls)
+	}
+}
+
+// TestWorkerFailureQuotesLogAndRemoves checks the failure contract: the
+// error carries the container's log tail, a cgroup delegation failure
+// gains the rootful remedy, and the container is removed.
+func TestWorkerFailureQuotesLogAndRemoves(t *testing.T) {
+	writeFakePodman(t)
+	setContainerLog(t, "coreshift-worker-w1",
+		"enabling the cgroup controllers failed\nthe worker container's cgroup hierarchy must be delegated to it\n")
+
+	err := workerFailure("coreshift-worker-w1", "/state/api", "w1", fmt.Errorf("the worker did not join"))
+	if err == nil {
+		t.Fatal("expected a failure report")
+	}
+	for _, want := range []string{
+		"the worker did not join",
+		"recent log output:",
+		"must be delegated to it",
+		"sudo",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("failure missing %q:\n%v", want, err)
+		}
+	}
+	if calls := podmanCalls(t); !slices.Contains(calls, "rm --force coreshift-worker-w1") {
+		t.Fatalf("podman calls = %q, want the container removed", calls)
+	}
+}
+
+// TestWorkerFailureWithoutLogKeepsErrorPlain checks that a failure with
+// no log output to quote stays plain, still removing the container.
+func TestWorkerFailureWithoutLogKeepsErrorPlain(t *testing.T) {
+	writeFakePodman(t)
+
+	err := workerFailure("coreshift-worker-w1", "/state/api", "w1", fmt.Errorf("the worker did not join"))
+	if err == nil || err.Error() != "the worker did not join" {
+		t.Fatalf("err = %v, want the plain failure", err)
+	}
+	if calls := podmanCalls(t); !slices.Contains(calls, "rm --force coreshift-worker-w1") {
+		t.Fatalf("podman calls = %q, want the container removed", calls)
+	}
+}
+
+// TestGetClustersSkipsWorkers checks that worker containers, which share
+// the cluster prefix, are not listed as clusters.
+func TestGetClustersSkipsWorkers(t *testing.T) {
+	writeFakePodman(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	setContainers(t, "coreshift-dev", "coreshift-worker-w1")
+	setContainerPort(t, "coreshift-dev", 7443)
+
+	var err error
+	out := captureStdout(t, func() { err = runGetClusters() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "w1") {
+		t.Fatalf("worker listed as a cluster:\n%s", out)
+	}
+	if !strings.Contains(out, "dev") {
+		t.Fatalf("cluster missing from the list:\n%s", out)
 	}
 }
