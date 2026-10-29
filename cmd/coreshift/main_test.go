@@ -39,12 +39,12 @@ import (
 
 func TestEnsureCertificatesReusesCompleteSet(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureCertificates(stateDir, defaultAPIPort); err != nil {
+	if err := ensureCertificates(stateDir, defaultClusterName, defaultAPIPort); err != nil {
 		t.Fatal(err)
 	}
 	caBefore := readFile(t, stateDir, certgen.CACertFilename)
 
-	if err := ensureCertificates(stateDir, defaultAPIPort); err != nil {
+	if err := ensureCertificates(stateDir, defaultClusterName, defaultAPIPort); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(caBefore, readFile(t, stateDir, certgen.CACertFilename)) {
@@ -54,12 +54,12 @@ func TestEnsureCertificatesReusesCompleteSet(t *testing.T) {
 
 func TestEnsureCertificatesRegeneratesSetWithoutLoopbackSAN(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureCertificates(stateDir, defaultAPIPort); err != nil {
+	if err := ensureCertificates(stateDir, defaultClusterName, defaultAPIPort); err != nil {
 		t.Fatal(err)
 	}
 	writeStaleServiceServingCert(t, stateDir)
 
-	if err := ensureCertificates(stateDir, defaultAPIPort); err != nil {
+	if err := ensureCertificates(stateDir, defaultClusterName, defaultAPIPort); err != nil {
 		t.Fatal(err)
 	}
 	cert := parseCertificate(t, readFile(t, stateDir, certgen.ServiceServingCertFilename))
@@ -99,7 +99,7 @@ func writeStaleServiceServingCert(t *testing.T, stateDir string) {
 // use while leaving the certificates, which encode no port, untouched.
 func TestFollowAPIPort(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureCertificates(stateDir, 6443); err != nil {
+	if err := ensureCertificates(stateDir, defaultClusterName, 6443); err != nil {
 		t.Fatal(err)
 	}
 	caBefore := readFile(t, stateDir, certgen.CACertFilename)
@@ -116,7 +116,7 @@ func TestFollowAPIPort(t *testing.T) {
 			t.Fatalf("%s server = %q, want %q", name, server, apiServerURL(7443))
 		}
 	}
-	if err := ensureCertificates(stateDir, 7443); err != nil {
+	if err := ensureCertificates(stateDir, defaultClusterName, 7443); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(caBefore, readFile(t, stateDir, certgen.CACertFilename)) {
@@ -128,7 +128,7 @@ func TestFollowAPIPort(t *testing.T) {
 // the same port rewrites nothing.
 func TestFollowAPIPortLeavesMatchingKubeconfigs(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureCertificates(stateDir, 6443); err != nil {
+	if err := ensureCertificates(stateDir, defaultClusterName, 6443); err != nil {
 		t.Fatal(err)
 	}
 	before := readFile(t, stateDir, certgen.AdminKubeconfigFilename)
@@ -138,6 +138,128 @@ func TestFollowAPIPortLeavesMatchingKubeconfigs(t *testing.T) {
 	}
 	if after := readFile(t, stateDir, certgen.AdminKubeconfigFilename); !bytes.Equal(before, after) {
 		t.Fatal("kubeconfig was rewritten although the port already matched")
+	}
+}
+
+// rewindNames puts a kubeconfig's entries back on the generic names the
+// generator wrote before they were named after the cluster: the user
+// entry plain, everything else named coreshift. It is the shape a state
+// directory from before carries.
+func rewindNames(t *testing.T, path string) {
+	t.Helper()
+	config, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for contextName, context := range config.Contexts {
+		user, ok := strings.CutSuffix(contextName, "@"+defaultClusterName)
+		if !ok {
+			continue
+		}
+		if entry, ok := config.AuthInfos[contextName]; ok {
+			config.AuthInfos[user] = entry
+			delete(config.AuthInfos, contextName)
+		}
+		context.AuthInfo = user
+	}
+	if err := clientcmd.WriteToFile(*config, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFollowClusterName checks the naming contract: a warm boot of a
+// state directory whose kubeconfigs carry the generic names rewrites
+// every entry to the cluster's name, the references between them
+// included, while leaving the certificates, which encode no name,
+// untouched.
+func TestFollowClusterName(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := ensureCertificates(stateDir, defaultClusterName, 6443); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range kubeconfigFilenames {
+		rewindNames(t, filepath.Join(stateDir, name))
+	}
+	caBefore := readFile(t, stateDir, certgen.CACertFilename)
+
+	// A login context an oc login left behind: it keeps its name, and
+	// only its cluster reference follows the rename.
+	loginContext := "dev/127-0-0-1:6443"
+	adminPath := filepath.Join(stateDir, certgen.AdminKubeconfigFilename)
+	config, err := clientcmd.LoadFromFile(adminPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.AuthInfos[loginContext] = &clientcmdapi.AuthInfo{Token: "sha256~example"}
+	config.Contexts[loginContext] = &clientcmdapi.Context{Cluster: defaultClusterName, AuthInfo: loginContext}
+	config.CurrentContext = loginContext
+	if err := clientcmd.WriteToFile(*config, adminPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := followClusterName(stateDir, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range kubeconfigFilenames {
+		config, err := clientcmd.LoadFromFile(filepath.Join(stateDir, name))
+		if err != nil {
+			t.Fatalf("load %s: %v", name, err)
+		}
+		if config.Clusters["alpha"] == nil || config.Clusters[defaultClusterName] != nil {
+			t.Fatalf("%s: cluster entry not named for the cluster", name)
+		}
+		if err := clientcmd.ConfirmUsable(*config, ""); err != nil {
+			t.Fatalf("%s is not usable after the rename: %v", name, err)
+		}
+	}
+
+	config, err = clientcmd.LoadFromFile(adminPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	context := config.Contexts["admin@alpha"]
+	if context == nil || context.Cluster != "alpha" || context.AuthInfo != "admin@alpha" {
+		t.Fatalf("admin context = %#v, want it named for the cluster and pointing at the named user", context)
+	}
+	if config.AuthInfos["admin@alpha"] == nil || config.AuthInfos["admin"] != nil {
+		t.Fatal("admin user entry not named for the cluster")
+	}
+	if login := config.Contexts[loginContext]; login == nil || login.Cluster != "alpha" || login.AuthInfo != loginContext {
+		t.Fatalf("login context = %#v, want it kept with its cluster reference followed", login)
+	}
+	if config.AuthInfos[loginContext] == nil {
+		t.Fatal("login user entry was removed")
+	}
+	if err := restoreAdminContext(stateDir, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	config, err = clientcmd.LoadFromFile(adminPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.CurrentContext != "admin@alpha" {
+		t.Fatalf("current context = %q, want the named admin context", config.CurrentContext)
+	}
+	if !bytes.Equal(caBefore, readFile(t, stateDir, certgen.CACertFilename)) {
+		t.Fatal("the name change regenerated the certificates")
+	}
+}
+
+// TestFollowClusterNameLeavesNamedKubeconfigs checks that a warm boot of
+// a state directory whose kubeconfigs already carry the cluster's name
+// rewrites nothing.
+func TestFollowClusterNameLeavesNamedKubeconfigs(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := ensureCertificates(stateDir, "alpha", 6443); err != nil {
+		t.Fatal(err)
+	}
+	before := readFile(t, stateDir, certgen.AdminKubeconfigFilename)
+
+	if err := followClusterName(stateDir, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	if after := readFile(t, stateDir, certgen.AdminKubeconfigFilename); !bytes.Equal(before, after) {
+		t.Fatal("kubeconfig was rewritten although the entries already carried the cluster's name")
 	}
 }
 
@@ -157,7 +279,7 @@ func TestRefuseInvalidClusterName(t *testing.T) {
 
 func TestRestoreAdminContextSwitchesBackFromLoginContext(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureCertificates(stateDir, defaultAPIPort); err != nil {
+	if err := ensureCertificates(stateDir, "dev", defaultAPIPort); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(stateDir, certgen.AdminKubeconfigFilename)
@@ -169,13 +291,13 @@ func TestRestoreAdminContextSwitchesBackFromLoginContext(t *testing.T) {
 	}
 	loginContext := "dev/127-0-0-1:6443"
 	config.AuthInfos[loginContext] = &clientcmdapi.AuthInfo{Token: "sha256~example"}
-	config.Contexts[loginContext] = &clientcmdapi.Context{Cluster: "coreshift", AuthInfo: loginContext}
+	config.Contexts[loginContext] = &clientcmdapi.Context{Cluster: "dev", AuthInfo: loginContext}
 	config.CurrentContext = loginContext
 	if err := clientcmd.WriteToFile(*config, path); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := restoreAdminContext(stateDir); err != nil {
+	if err := restoreAdminContext(stateDir, "dev"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -183,8 +305,8 @@ func TestRestoreAdminContextSwitchesBackFromLoginContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.CurrentContext != "admin@coreshift" {
-		t.Fatalf("current context = %q, want admin@coreshift", config.CurrentContext)
+	if config.CurrentContext != "admin@dev" {
+		t.Fatalf("current context = %q, want admin@dev", config.CurrentContext)
 	}
 	if config.Contexts[loginContext] == nil || config.AuthInfos[loginContext] == nil {
 		t.Fatal("login context was removed")
@@ -193,12 +315,12 @@ func TestRestoreAdminContextSwitchesBackFromLoginContext(t *testing.T) {
 
 func TestRestoreAdminContextKeepsCorrectSelectionUntouched(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureCertificates(stateDir, defaultAPIPort); err != nil {
+	if err := ensureCertificates(stateDir, "dev", defaultAPIPort); err != nil {
 		t.Fatal(err)
 	}
 
 	before := readFile(t, stateDir, certgen.AdminKubeconfigFilename)
-	if err := restoreAdminContext(stateDir); err != nil {
+	if err := restoreAdminContext(stateDir, "dev"); err != nil {
 		t.Fatal(err)
 	}
 	if after := readFile(t, stateDir, certgen.AdminKubeconfigFilename); !bytes.Equal(before, after) {
@@ -212,7 +334,7 @@ func TestRestoreAdminContextKeepsCorrectSelectionUntouched(t *testing.T) {
 func TestGeneratedFilesFollowAPIPort(t *testing.T) {
 	stateDir := t.TempDir()
 	const port = 7443
-	if err := ensureCertificates(stateDir, port); err != nil {
+	if err := ensureCertificates(stateDir, "dev", port); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{
@@ -224,7 +346,7 @@ func TestGeneratedFilesFollowAPIPort(t *testing.T) {
 		if err != nil {
 			t.Fatalf("load %s: %v", name, err)
 		}
-		if server := config.Clusters["coreshift"].Server; server != apiServerURL(port) {
+		if server := config.Clusters["dev"].Server; server != apiServerURL(port) {
 			t.Fatalf("%s server = %q, want %q", name, server, apiServerURL(port))
 		}
 	}
@@ -236,11 +358,15 @@ func TestGeneratedFilesFollowAPIPort(t *testing.T) {
 		t.Fatalf("oauth metadata issuer does not follow the port:\n%s", metadata)
 	}
 
-	if _, err := writeTokenReviewKubeconfig(stateDir, port); err != nil {
+	if _, err := writeTokenReviewKubeconfig(stateDir, "dev", port); err != nil {
 		t.Fatal(err)
 	}
-	if kubeconfig := string(readFile(t, stateDir, "token-review.kubeconfig")); !strings.Contains(kubeconfig, apiServerURL(port)) {
+	kubeconfig := string(readFile(t, stateDir, "token-review.kubeconfig"))
+	if !strings.Contains(kubeconfig, apiServerURL(port)) {
 		t.Fatalf("token review kubeconfig does not follow the port:\n%s", kubeconfig)
+	}
+	if !strings.Contains(kubeconfig, "admin@dev") {
+		t.Fatalf("token review kubeconfig does not carry the cluster's name:\n%s", kubeconfig)
 	}
 
 	if _, err := writeKubeAPIServerConfig(stateDir, filepath.Join(stateDir, "oauth-metadata.json"), port); err != nil {
