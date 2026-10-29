@@ -37,7 +37,7 @@ preserves the data; cleanup destroys the data.
 - `coreshift create cluster`: run it in a managed container and wait for
   it to be ready.
 - `coreshift delete cluster [--name]`: stop a cluster's container and
-  remove it, preserving the state.
+  remove it and its workers, preserving the state.
 - `coreshift get clusters`: list the clusters with their port, release,
   and live readiness.
 - `coreshift get kubeconfig [--name]`: print the path to a cluster's
@@ -545,11 +545,15 @@ workloads run.
 
 `coreshift delete cluster` stops the named cluster's container and removes
 it. Stopping the container tears the control plane down in reverse startup
-order, like a host-mode shutdown. The state directory is deliberately
-preserved — deleting a cluster destroys nothing — and the command prints where
-the state is, with `coreshift cleanup` named as the way to remove it. A
-cluster whose container is already gone but whose state was preserved is
-reported as not running, with its state named.
+order, like a host-mode shutdown. The cluster's workers go with it: each
+one is deleted the same way `delete worker` deletes it — container stopped
+and removed, node and machine record cleaned out of the cluster — so no
+worker is left dialing a dead cluster. The state directory is deliberately
+preserved — deleting a cluster destroys nothing — and the command prints
+where the state is, with `coreshift cleanup` named as the way to remove
+it. A cluster whose container is already gone but whose state was
+preserved is reported as not running, with its state named; its workers
+still go.
 
 ```
 ./coreshift delete cluster
@@ -563,13 +567,35 @@ command uses, while the shared image cache is preserved either way. The
 command says in one line whether the state was preserved or removed, and
 where.
 
+`--preserve-workers` leaves the cluster's workers running when the
+cluster goes. This is the control-plane-restart workflow: delete the
+cluster with the flag, then create it again under the same name. The
+preserved state is the same cluster — same CA, same certificates, same
+node objects — so the workers' kubelets reconnect once the API returns
+and resume heartbeating against their still-existing nodes, tolerating
+the outage the way nodes do in any real cluster. The nodes return to the
+state they had, NotReady with the honest no-CNI reason, and no new
+certificates are issued: they are the same nodes, not fresh joins.
+Without the flag the workers are deleted, so a re-created cluster starts
+with a clean node list until new workers join. The flag cannot go with
+`--cleanup`: removing the state makes the preserved workers meaningless,
+because a cluster re-created without its state is a different one they
+cannot rejoin.
+
 ## The `delete worker` command
 
 `coreshift delete worker` stops the named worker's container and removes
 it, then removes the node and the machine record its join created, so
 the cluster's node list is clean again. The cluster must be running to
 remove them; when it is not, the container still goes, and the node
-stays until the cluster's data does.
+stays until the cluster's data does. When the cluster's state is already
+gone, the container still goes too, with a note that the node went with
+the cluster's data.
+
+Deleting a cluster without `--preserve-workers` deletes its workers the
+same way, one by one before the cluster's own container goes; see
+[the `delete cluster` command](#the-delete-cluster-command) for the
+restart workflow `--preserve-workers` leaves them running for.
 
 ```
 ./coreshift delete worker
