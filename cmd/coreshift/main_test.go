@@ -1735,7 +1735,7 @@ func TestGetCommandsRequirePodman(t *testing.T) {
 // podman when it is missing.
 func TestDeleteRequiresPodman(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	err := runDelete(context.Background(), "dev", false)
+	err := runDelete(context.Background(), "dev", false, false)
 	if err == nil || !strings.Contains(err.Error(), "podman") {
 		t.Fatalf("err = %v, want an error naming podman", err)
 	}
@@ -1802,7 +1802,7 @@ func TestRunDeleteStopsAndRemovesPreservingState(t *testing.T) {
 	writeStateTree(t, stateDir, "dev")
 
 	var delErr error
-	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false) })
+	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false, false) })
 	if delErr != nil {
 		t.Fatal(delErr)
 	}
@@ -1838,7 +1838,7 @@ func TestRunDeleteNotRunningPreservesState(t *testing.T) {
 	writeStateTree(t, stateDir, "dev")
 
 	var delErr error
-	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false) })
+	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false, false) })
 	if delErr != nil {
 		t.Fatal(delErr)
 	}
@@ -1870,7 +1870,7 @@ func TestRunDeleteCleanupRemovesState(t *testing.T) {
 	writeStateTree(t, stateDir, "dev")
 
 	var delErr error
-	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", true) })
+	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", true, false) })
 	if delErr != nil {
 		t.Fatal(delErr)
 	}
@@ -1898,7 +1898,7 @@ func TestRunDeleteCleanupRemovesState(t *testing.T) {
 func TestRunDeleteMissingCluster(t *testing.T) {
 	for _, cleanup := range []bool{false, true} {
 		writeFakePodman(t)
-		err := runDelete(context.Background(), "nope", cleanup)
+		err := runDelete(context.Background(), "nope", cleanup, false)
 		if err == nil || !strings.Contains(err.Error(), "no cluster named nope") {
 			t.Fatalf("cleanup=%v: err = %v, want a plain refusal", cleanup, err)
 		}
@@ -1927,7 +1927,7 @@ func TestRunDeleteCascadesWorkers(t *testing.T) {
 	writeStateTree(t, stateDir, "dev")
 
 	var delErr error
-	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false) })
+	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false, false) })
 	if delErr != nil {
 		t.Fatal(delErr)
 	}
@@ -1994,19 +1994,74 @@ func TestRunDeleteWorkerWithoutClusterState(t *testing.T) {
 	}
 }
 
+// TestRunDeletePreserveWorkersLeavesWorkers checks the flag's contract:
+// the cluster's container goes, its workers stay untouched, and the state
+// is preserved, so the workers reconnect when the cluster returns.
+func TestRunDeletePreserveWorkersLeavesWorkers(t *testing.T) {
+	writeFakePodman(t)
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	setContainers(t, "coreshift-dev", "coreshift-worker-worker1", "coreshift-worker-worker2")
+	setContainerLabel(t, "coreshift-worker-worker1", "dev")
+	setContainerLabel(t, "coreshift-worker-worker2", "dev")
+	stateDir, err := clusterDir("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeStateTree(t, stateDir, "dev")
+
+	var delErr error
+	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false, true) })
+	if delErr != nil {
+		t.Fatal(delErr)
+	}
+	calls := podmanCalls(t)
+	want := []string{
+		"container exists coreshift-dev",
+		"ps -a --format {{.Names}}",
+		`inspect --format {{index .Config.Labels "coreshift-cluster"}} coreshift-worker-worker1`,
+		`inspect --format {{index .Config.Labels "coreshift-cluster"}} coreshift-worker-worker2`,
+		"stop --timeout 120 coreshift-dev",
+		"rm coreshift-dev",
+	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("podman calls = %q\nwant %q", calls, want)
+	}
+	for _, want := range []string{
+		"Workers left running: worker1, worker2",
+		"State preserved at " + stateDir,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output = %q, want %q named", out, want)
+		}
+	}
+}
+
+// TestRunDeleteRefusesCleanupWithPreserveWorkers checks that asking for
+// both state removal and preserved workers is refused up front: with no
+// podman on PATH, the flag refusal is still the one that arrives.
+func TestRunDeleteRefusesCleanupWithPreserveWorkers(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	err := runDelete(context.Background(), "dev", true, true)
+	if err == nil || !strings.Contains(err.Error(), "meaningless") {
+		t.Fatalf("err = %v, want a refusal explaining why the pair is refused", err)
+	}
+}
+
 // TestDeleteClusterFlagDefaults checks that the delete command comes with
 // the documented defaults.
 func TestDeleteClusterFlagDefaults(t *testing.T) {
 	cmd := newDeleteClusterCommand()
-	if flag := cmd.Flags().Lookup("name"); flag == nil {
-		t.Fatal("flag --name is not defined")
-	} else if flag.DefValue != "coreshift" {
-		t.Fatalf("--name default = %q, want coreshift", flag.DefValue)
-	}
-	if flag := cmd.Flags().Lookup("cleanup"); flag == nil {
-		t.Fatal("flag --cleanup is not defined")
-	} else if flag.DefValue != "false" {
-		t.Fatalf("--cleanup default = %q, want false", flag.DefValue)
+	for name, want := range map[string]string{
+		"name":             "coreshift",
+		"cleanup":          "false",
+		"preserve-workers": "false",
+	} {
+		if flag := cmd.Flags().Lookup(name); flag == nil {
+			t.Fatalf("flag --%s is not defined", name)
+		} else if flag.DefValue != want {
+			t.Fatalf("--%s default = %q, want %q", name, flag.DefValue, want)
+		}
 	}
 }
 

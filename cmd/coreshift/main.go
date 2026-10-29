@@ -1632,20 +1632,22 @@ func newDeleteCommand() *cobra.Command {
 // newDeleteClusterCommand builds the command that deletes a cluster: its
 // workers go with it, then its container is stopped, torn down in reverse
 // order like a host-mode shutdown, and removed, while its state directory
-// is preserved unless the cleanup flag asks for its removal too.
+// is preserved unless the cleanup flag asks for its removal too. The
+// preserve-workers flag leaves the cluster's workers running instead.
 func newDeleteClusterCommand() *cobra.Command {
 	var name string
-	var cleanup bool
+	var cleanup, preserveWorkers bool
 	cmd := &cobra.Command{
 		Use:          "cluster",
 		Short:        "Delete a cluster, stopping its container and preserving its state",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDelete(cmd.Context(), name, cleanup)
+			return runDelete(cmd.Context(), name, cleanup, preserveWorkers)
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", defaultClusterName, "name of the cluster to delete")
 	cmd.Flags().BoolVar(&cleanup, "cleanup", false, "also remove the cluster's state directory")
+	cmd.Flags().BoolVar(&preserveWorkers, "preserve-workers", false, "leave the cluster's workers running, to reconnect when the cluster is re-created from its preserved state")
 	return cmd
 }
 
@@ -1658,10 +1660,16 @@ const containerStopSeconds = 120
 // runDelete deletes a cluster: its workers go with it, then its container
 // is stopped and removed. The state directory is preserved, because
 // deleting a cluster destroys nothing; the cleanup flag opts into removing
-// it too, with the same removal the cleanup command uses. A cluster whose
+// it too, with the same removal the cleanup command uses, and the
+// preserve-workers flag leaves the workers running instead of deleting
+// them, for the control-plane restart: a cluster re-created from preserved
+// state is the same cluster, and its workers reconnect. A cluster whose
 // container is already gone but whose state was preserved reports that and
 // where the state is.
-func runDelete(ctx context.Context, name string, cleanup bool) error {
+func runDelete(ctx context.Context, name string, cleanup, preserveWorkers bool) error {
+	if cleanup && preserveWorkers {
+		return fmt.Errorf("--cleanup and --preserve-workers do not go together: removing the state makes the preserved workers meaningless, because a cluster re-created without its state is a different one they cannot rejoin")
+	}
 	if _, err := exec.LookPath("podman"); err != nil {
 		return fmt.Errorf("podman is required to delete clusters: %w", err)
 	}
@@ -1677,15 +1685,17 @@ func runDelete(ctx context.Context, name string, cleanup bool) error {
 		}
 		fmt.Printf("Cluster %s is not running\n", name)
 	}
-	// The workers go before the cluster container, so each one's node is
-	// removed while the cluster's API still answers.
 	workers, err := clusterWorkers(name)
 	if err != nil {
 		return err
 	}
-	for _, worker := range workers {
-		if err := deleteWorker(ctx, worker, name); err != nil {
-			return err
+	if !preserveWorkers {
+		// The workers go before the cluster container, so each one's
+		// node is removed while the cluster's API still answers.
+		for _, worker := range workers {
+			if err := deleteWorker(ctx, worker, name); err != nil {
+				return err
+			}
 		}
 	}
 	if running {
@@ -1699,6 +1709,9 @@ func runDelete(ctx context.Context, name string, cleanup bool) error {
 			return fmt.Errorf("remove container: %w", err)
 		}
 		fmt.Printf("Deleted cluster %s\n", name)
+	}
+	if preserveWorkers && len(workers) > 0 {
+		fmt.Printf("Workers left running: %s\n", strings.Join(workers, ", "))
 	}
 	if cleanup {
 		if _, err := os.Stat(stateDir); err == nil {
