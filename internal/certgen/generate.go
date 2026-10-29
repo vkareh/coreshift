@@ -12,9 +12,16 @@ type Options struct {
 	// APIServerURL is the API server endpoint referenced by the admin
 	// kubeconfig. Defaults to https://127.0.0.1:6443.
 	APIServerURL string
+	// ClusterName is the name the kubeconfig entries — cluster, context,
+	// and user — carry, so the kubeconfig files of several clusters merge
+	// without colliding. Defaults to coreshift.
+	ClusterName string
 }
 
-const defaultAPIServerURL = "https://127.0.0.1:6443"
+const (
+	defaultAPIServerURL = "https://127.0.0.1:6443"
+	defaultClusterName  = "coreshift"
+)
 
 // Artifacts written by GenerateAll into the output directory.
 const (
@@ -111,42 +118,46 @@ func GenerateAll(outputDir string, opts Options) error {
 	if serverURL == "" {
 		serverURL = defaultAPIServerURL
 	}
-	kubeconfig, err := generateKubeconfig(serverURL, "admin", caCertPEM, adminCertPEM, adminKeyPEM)
+	clusterName := opts.ClusterName
+	if clusterName == "" {
+		clusterName = defaultClusterName
+	}
+	kubeconfig, err := generateKubeconfig(serverURL, "admin", clusterName, caCertPEM, adminCertPEM, adminKeyPEM)
 	if err != nil {
 		return fmt.Errorf("generate admin kubeconfig: %w", err)
 	}
-	controllerManagerKubeconfig, err := generateComponentKubeconfig("system:kube-controller-manager", serverURL, caCertPEM, caKeyPEM)
+	controllerManagerKubeconfig, err := generateComponentKubeconfig("system:kube-controller-manager", serverURL, clusterName, caCertPEM, caKeyPEM)
 	if err != nil {
 		return fmt.Errorf("generate kube-controller-manager kubeconfig: %w", err)
 	}
-	schedulerKubeconfig, err := generateComponentKubeconfig("system:kube-scheduler", serverURL, caCertPEM, caKeyPEM)
+	schedulerKubeconfig, err := generateComponentKubeconfig("system:kube-scheduler", serverURL, clusterName, caCertPEM, caKeyPEM)
 	if err != nil {
 		return fmt.Errorf("generate kube-scheduler kubeconfig: %w", err)
 	}
-	openshiftAPIServerKubeconfig, err := generateAdminKubeconfig(serverURL, caCertPEM, caKeyPEM)
+	openshiftAPIServerKubeconfig, err := generateAdminKubeconfig(serverURL, clusterName, caCertPEM, caKeyPEM)
 	if err != nil {
 		return fmt.Errorf("generate openshift-apiserver kubeconfig: %w", err)
 	}
-	oauthAPIServerKubeconfig, err := generateAdminKubeconfig(serverURL, caCertPEM, caKeyPEM)
+	oauthAPIServerKubeconfig, err := generateAdminKubeconfig(serverURL, clusterName, caCertPEM, caKeyPEM)
 	if err != nil {
 		return fmt.Errorf("generate oauth-apiserver kubeconfig: %w", err)
 	}
-	oauthServerKubeconfig, err := generateAdminKubeconfig(serverURL, caCertPEM, caKeyPEM)
+	oauthServerKubeconfig, err := generateAdminKubeconfig(serverURL, clusterName, caCertPEM, caKeyPEM)
 	if err != nil {
 		return fmt.Errorf("generate oauth-server kubeconfig: %w", err)
 	}
-	openShiftControllerManagerKubeconfig, err := generateAdminKubeconfig(serverURL, caCertPEM, caKeyPEM)
+	openShiftControllerManagerKubeconfig, err := generateAdminKubeconfig(serverURL, clusterName, caCertPEM, caKeyPEM)
 	if err != nil {
 		return fmt.Errorf("generate openshift-controller-manager kubeconfig: %w", err)
 	}
-	clusterPolicyControllerKubeconfig, err := generateAdminKubeconfig(serverURL, caCertPEM, caKeyPEM)
+	clusterPolicyControllerKubeconfig, err := generateAdminKubeconfig(serverURL, clusterName, caCertPEM, caKeyPEM)
 	if err != nil {
 		return fmt.Errorf("generate cluster-policy-controller kubeconfig: %w", err)
 	}
 	// The machine approver runs with its own controller identity rather
 	// than the admin identity, the way its deployment does in real
 	// clusters; the permissions behind the identity are seeded.
-	clusterMachineApproverKubeconfig, err := generateComponentKubeconfig("system:openshift:controller:machine-approver", serverURL, caCertPEM, caKeyPEM)
+	clusterMachineApproverKubeconfig, err := generateComponentKubeconfig("system:openshift:controller:machine-approver", serverURL, clusterName, caCertPEM, caKeyPEM)
 	if err != nil {
 		return fmt.Errorf("generate cluster-machine-approver kubeconfig: %w", err)
 	}

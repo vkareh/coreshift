@@ -54,9 +54,13 @@ func TestGenerateAll(t *testing.T) {
 	if !bytes.Equal(cluster.CertificateAuthorityData, caCertPEM) {
 		t.Fatal("kubeconfig CA data does not match ca.crt")
 	}
-	user := config.AuthInfos["admin"]
+	user := config.AuthInfos["admin@coreshift"]
 	if user == nil || !bytes.Equal(user.ClientCertificateData, adminCertPEM) {
 		t.Fatalf("unexpected user config: %#v", user)
+	}
+	context := config.Contexts["admin@coreshift"]
+	if context == nil || context.Cluster != "coreshift" || context.AuthInfo != "admin@coreshift" {
+		t.Fatalf("unexpected context config: %#v", context)
 	}
 	if config.CurrentContext != "admin@coreshift" {
 		t.Fatalf("unexpected current context: %q", config.CurrentContext)
@@ -70,7 +74,7 @@ func TestGenerateAll(t *testing.T) {
 		if err != nil {
 			t.Fatalf("load %s: %v", name, err)
 		}
-		user, ok := config.AuthInfos["system:admin"]
+		user, ok := config.AuthInfos["system:admin@coreshift"]
 		if !ok {
 			t.Fatalf("%s has no system:admin user", name)
 		}
@@ -95,7 +99,7 @@ func TestGenerateAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load %s: %v", ClusterMachineApproverKubeconfigFilename, err)
 	}
-	user, ok := config.AuthInfos["system:openshift:controller:machine-approver"]
+	user, ok := config.AuthInfos["system:openshift:controller:machine-approver@coreshift"]
 	if !ok {
 		t.Fatalf("%s has no machine approver user", ClusterMachineApproverKubeconfigFilename)
 	}
@@ -108,6 +112,43 @@ func TestGenerateAll(t *testing.T) {
 	}
 	if err := cert.CheckSignatureFrom(caCert); err != nil {
 		t.Fatalf("%s client certificate is not signed by CA: %v", ClusterMachineApproverKubeconfigFilename, err)
+	}
+}
+
+// TestGenerateAllNamesEntriesForCluster checks that every kubeconfig
+// entry — cluster, context, and user — carries the cluster's name, so
+// the kubeconfig files of several clusters merge without colliding.
+func TestGenerateAllNamesEntriesForCluster(t *testing.T) {
+	outputDir := t.TempDir()
+
+	if err := GenerateAll(outputDir, Options{ClusterName: "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, user := range map[string]string{
+		AdminKubeconfigFilename:                  "admin",
+		ControllerManagerKubeconfigFilename:      "system:kube-controller-manager",
+		OpenShiftAPIServerKubeconfigFilename:     "system:admin",
+		ClusterMachineApproverKubeconfigFilename: "system:openshift:controller:machine-approver",
+	} {
+		config, err := clientcmd.Load(readFile(t, outputDir, name))
+		if err != nil {
+			t.Fatalf("load %s: %v", name, err)
+		}
+		if config.Clusters["alpha"] == nil {
+			t.Fatalf("%s has no cluster entry named for the cluster", name)
+		}
+		entry := user + "@alpha"
+		context := config.Contexts[entry]
+		if context == nil || context.Cluster != "alpha" || context.AuthInfo != entry {
+			t.Fatalf("%s context entry = %#v, want %s pointing at the cluster and the user", name, context, entry)
+		}
+		if config.AuthInfos[entry] == nil {
+			t.Fatalf("%s has no user entry named for the cluster", name)
+		}
+		if config.CurrentContext != entry {
+			t.Fatalf("%s current context = %q, want %q", name, config.CurrentContext, entry)
+		}
 	}
 }
 

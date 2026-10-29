@@ -67,7 +67,7 @@ func GenerateAdminKubeconfig(caCertPEM, caKeyPEM []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate client certificate: %w", err)
 	}
-	return generateKubeconfig(defaultAPIServerURL, "admin", caCertPEM, clientCertPEM, clientKeyPEM)
+	return generateKubeconfig(defaultAPIServerURL, "admin", defaultClusterName, caCertPEM, clientCertPEM, clientKeyPEM)
 }
 
 // generateComponentKubeconfig creates a directly usable kubeconfig for a
@@ -75,12 +75,12 @@ func GenerateAdminKubeconfig(caCertPEM, caKeyPEM []byte) ([]byte, error) {
 // client certificate carries no organization, unlike the admin client: these
 // identities get their permissions from kube-apiserver's built-in bootstrap
 // RBAC, so a privileged group would be unnecessary over-privilege.
-func generateComponentKubeconfig(commonName, serverURL string, caCertPEM, caKeyPEM []byte) ([]byte, error) {
+func generateComponentKubeconfig(commonName, serverURL, clusterName string, caCertPEM, caKeyPEM []byte) ([]byte, error) {
 	clientCertPEM, clientKeyPEM, err := generateClientCert(caCertPEM, caKeyPEM, pkix.Name{CommonName: commonName})
 	if err != nil {
 		return nil, fmt.Errorf("generate client certificate: %w", err)
 	}
-	return generateKubeconfig(serverURL, commonName, caCertPEM, clientCertPEM, clientKeyPEM)
+	return generateKubeconfig(serverURL, commonName, clusterName, caCertPEM, clientCertPEM, clientKeyPEM)
 }
 
 // generateAdminKubeconfig creates a directly usable kubeconfig for a
@@ -88,7 +88,7 @@ func generateComponentKubeconfig(commonName, serverURL string, caCertPEM, caKeyP
 // the aggregated API servers, the OAuth server, and the two controller
 // managers. These components run as the system:admin identity so their
 // calls work without seeding any component-specific RBAC.
-func generateAdminKubeconfig(serverURL string, caCertPEM, caKeyPEM []byte) ([]byte, error) {
+func generateAdminKubeconfig(serverURL, clusterName string, caCertPEM, caKeyPEM []byte) ([]byte, error) {
 	clientCertPEM, clientKeyPEM, err := generateClientCert(caCertPEM, caKeyPEM, pkix.Name{
 		CommonName:   "system:admin",
 		Organization: []string{"system:masters"},
@@ -96,24 +96,28 @@ func generateAdminKubeconfig(serverURL string, caCertPEM, caKeyPEM []byte) ([]by
 	if err != nil {
 		return nil, fmt.Errorf("generate client certificate: %w", err)
 	}
-	return generateKubeconfig(serverURL, "system:admin", caCertPEM, clientCertPEM, clientKeyPEM)
+	return generateKubeconfig(serverURL, "system:admin", clusterName, caCertPEM, clientCertPEM, clientKeyPEM)
 }
 
-func generateKubeconfig(serverURL, user string, caCertPEM, clientCertPEM, clientKeyPEM []byte) ([]byte, error) {
+// generateKubeconfig creates a directly usable kubeconfig for a user
+// against the named cluster. Every entry — cluster, context, and user —
+// carries the cluster's name, so the kubeconfig files of several clusters
+// merge without colliding.
+func generateKubeconfig(serverURL, user, clusterName string, caCertPEM, clientCertPEM, clientKeyPEM []byte) ([]byte, error) {
 	config := clientcmdapi.NewConfig()
-	config.Clusters["coreshift"] = &clientcmdapi.Cluster{
+	config.Clusters[clusterName] = &clientcmdapi.Cluster{
 		Server:                   serverURL,
 		CertificateAuthorityData: caCertPEM,
 	}
-	config.AuthInfos[user] = &clientcmdapi.AuthInfo{
+	config.AuthInfos[user+"@"+clusterName] = &clientcmdapi.AuthInfo{
 		ClientCertificateData: clientCertPEM,
 		ClientKeyData:         clientKeyPEM,
 	}
-	config.Contexts[user+"@coreshift"] = &clientcmdapi.Context{
-		Cluster:  "coreshift",
-		AuthInfo: user,
+	config.Contexts[user+"@"+clusterName] = &clientcmdapi.Context{
+		Cluster:  clusterName,
+		AuthInfo: user + "@" + clusterName,
 	}
-	config.CurrentContext = user + "@coreshift"
+	config.CurrentContext = user + "@" + clusterName
 
 	return clientcmd.Write(*config)
 }
