@@ -26,6 +26,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/vkareh/coreshift/internal/certgen"
 	"github.com/vkareh/coreshift/internal/oauth"
 	"github.com/vkareh/coreshift/pkg/image"
@@ -1703,7 +1707,8 @@ func TestDeleteClusterFlagDefaults(t *testing.T) {
 }
 
 // TestCreateWorkerFlagDefaults checks that the worker creation flags are
-// accepted and come with the documented defaults.
+// accepted and come with the documented defaults, and that the pull
+// secret is optional: the cluster's stored one is the default.
 func TestCreateWorkerFlagDefaults(t *testing.T) {
 	cmd := newCreateWorkerCommand()
 	for name, want := range map[string]string{
@@ -1718,8 +1723,8 @@ func TestCreateWorkerFlagDefaults(t *testing.T) {
 			t.Fatalf("--%s default = %q, want %q", name, flag.DefValue, want)
 		}
 	}
-	if err := cmd.MarkFlagRequired("pull-secret"); err != nil {
-		t.Fatalf("pull secret is not required: %v", err)
+	if _, required := cmd.Flags().Lookup("pull-secret").Annotations[cobra.BashCompOneRequiredFlag]; required {
+		t.Fatal("pull secret must not be required: the cluster's stored one is the default")
 	}
 }
 
@@ -1760,8 +1765,8 @@ func TestWorkerRunArgs(t *testing.T) {
 // TestRunCreateWorkerRefusals checks the refusals that must arrive before
 // anything is minted: a name the objects cannot carry, a taken worker
 // name, an unknown cluster, and a cluster whose API is not answering.
+// None needs a pull secret flag, since the refusals precede its use.
 func TestRunCreateWorkerRefusals(t *testing.T) {
-	secret := writePullSecret(t)
 	for name, tc := range map[string]struct {
 		worker  string
 		cluster string
@@ -1777,13 +1782,129 @@ func TestRunCreateWorkerRefusals(t *testing.T) {
 		setContainers(t, "coreshift-worker-w1", "coreshift-dev")
 		setContainerPort(t, "coreshift-dev", 17443)
 
-		err := runCreateWorker(context.Background(), tc.worker, tc.cluster, secret, false)
+		err := runCreateWorker(context.Background(), tc.worker, tc.cluster, "", false)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: err = %v, want a refusal containing %q", name, err, tc.want)
 		}
 		// A refusal before the first podman call leaves no call log.
 		if calls, err := os.ReadFile(os.Getenv("PODMAN_LOG")); err == nil && strings.Contains(string(calls), "build") {
 			t.Fatalf("%s: an image was minted despite the refusal", name)
+		}
+	}
+}
+
+// TestRunCreateWorkerRefusesMissingFlagFile checks that a pull secret
+// flag pointing at no file is refused before anything is minted.
+func TestRunCreateWorkerRefusesMissingFlagFile(t *testing.T) {
+	writeFakePodman(t)
+	err := runCreateWorker(context.Background(), "fresh", "coreshift", "/nonexistent/pull-secret", false)
+	if err == nil || !strings.Contains(err.Error(), "read pull secret") {
+		t.Fatalf("err = %v, want a refusal naming the pull secret", err)
+	}
+}
+
+// writeClusterPullSecret stands up a plain-HTTP stand-in for a cluster's
+// API serving the pull secret read — the given secret's JSON, or
+// not-found when none is given — and writes an admin kubeconfig pointing
+// at it into the state directory, the way a real cluster's state
+// directory holds one.
+func writeClusterPullSecret(t *testing.T, stateDir string, pullSecret []byte) {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/namespaces/openshift-config/secrets/pull-secret", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if pullSecret == nil {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(metav1.Status{
+				Status: metav1.StatusFailure,
+				Reason: metav1.StatusReasonNotFound,
+				Code:   http.StatusNotFound,
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "pull-secret", Namespace: "openshift-config"},
+			Type:       corev1.SecretTypeDockerConfigJson,
+			Data:       map[string][]byte{corev1.DockerConfigJsonKey: pullSecret},
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	config := clientcmdapi.NewConfig()
+	config.Clusters["coreshift"] = &clientcmdapi.Cluster{Server: server.URL}
+	config.AuthInfos["admin"] = &clientcmdapi.AuthInfo{}
+	config.Contexts["admin@coreshift"] = &clientcmdapi.Context{Cluster: "coreshift", AuthInfo: "admin"}
+	config.CurrentContext = "admin@coreshift"
+	if err := clientcmd.WriteToFile(*config, filepath.Join(stateDir, certgen.AdminKubeconfigFilename)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestWorkerPullSecretReadsClusterSecret checks the default path: with
+// no flag, the Secret the cluster stores becomes both the build's
+// credentials and its throwaway auth file, which the cleanup removes.
+func TestWorkerPullSecretReadsClusterSecret(t *testing.T) {
+	secret := []byte(`{"auths":{"quay.io":{"auth":"dXNlcjpwYXNz"}}}`)
+	stateDir := t.TempDir()
+	writeClusterPullSecret(t, stateDir, secret)
+
+	pullSecret, authfile, cleanup, err := workerPullSecret(context.Background(), "dev", stateDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(pullSecret, secret) {
+		t.Fatalf("pull secret = %q, want the cluster's stored one", pullSecret)
+	}
+	data, err := os.ReadFile(authfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, secret) {
+		t.Fatalf("auth file holds %q, want the cluster's secret", data)
+	}
+	cleanup()
+	if _, err := os.Stat(authfile); !os.IsNotExist(err) {
+		t.Fatal("cleanup left the throwaway auth file behind")
+	}
+}
+
+// TestWorkerPullSecretFlagWins checks that a given flag file is used as
+// the build's authfile itself, whatever the cluster stores.
+func TestWorkerPullSecretFlagWins(t *testing.T) {
+	stateDir := t.TempDir()
+	writeClusterPullSecret(t, stateDir, []byte(`{"auths":{"other.example":{"auth":"other"}}}`))
+	flagPath := writePullSecret(t)
+
+	pullSecret, authfile, cleanup, err := workerPullSecret(context.Background(), "dev", stateDir, flagPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup != nil {
+		t.Fatal("the flag's own file needs no cleanup")
+	}
+	if authfile != flagPath {
+		t.Fatalf("authfile = %q, want the flag's file", authfile)
+	}
+	if want := readFile(t, filepath.Dir(flagPath), filepath.Base(flagPath)); !bytes.Equal(pullSecret, want) {
+		t.Fatalf("pull secret = %q, want the flag's file content", pullSecret)
+	}
+}
+
+// TestWorkerPullSecretRefusesClusterWithoutSecret checks the fallback's
+// refusal: a cluster storing no pull secret, the shape one created
+// before the Secret existed has, is refused naming the flag and the
+// re-creation.
+func TestWorkerPullSecretRefusesClusterWithoutSecret(t *testing.T) {
+	stateDir := t.TempDir()
+	writeClusterPullSecret(t, stateDir, nil)
+
+	_, _, _, err := workerPullSecret(context.Background(), "dev", stateDir, "")
+	if err == nil {
+		t.Fatal("expected a refusal for a cluster storing no pull secret")
+	}
+	for _, want := range []string{"stores no pull secret", "--pull-secret", "re-create"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal missing %q:\n%v", want, err)
 		}
 	}
 }
