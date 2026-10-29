@@ -53,9 +53,13 @@ func TestGenerateClientCertAndAdminKubeconfig(t *testing.T) {
 	if cluster == nil || cluster.Server != "https://127.0.0.1:6443" || len(cluster.CertificateAuthorityData) == 0 {
 		t.Fatalf("unexpected cluster config: %#v", cluster)
 	}
-	user := config.AuthInfos["admin"]
+	user := config.AuthInfos["admin@coreshift"]
 	if user == nil || len(user.ClientCertificateData) == 0 || len(user.ClientKeyData) == 0 {
 		t.Fatalf("unexpected user config: %#v", user)
+	}
+	context := config.Contexts["admin@coreshift"]
+	if context == nil || context.Cluster != "coreshift" || context.AuthInfo != "admin@coreshift" {
+		t.Fatalf("unexpected context config: %#v", context)
 	}
 	if config.CurrentContext != "admin@coreshift" {
 		t.Fatalf("unexpected current context: %q", config.CurrentContext)
@@ -71,7 +75,7 @@ func TestGenerateComponentKubeconfigs(t *testing.T) {
 
 	for _, component := range []string{"system:kube-controller-manager", "system:kube-scheduler"} {
 		t.Run(component, func(t *testing.T) {
-			kubeconfig, err := generateComponentKubeconfig(component, defaultAPIServerURL, caCertPEM, caKeyPEM)
+			kubeconfig, err := generateComponentKubeconfig(component, defaultAPIServerURL, defaultClusterName, caCertPEM, caKeyPEM)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -79,18 +83,19 @@ func TestGenerateComponentKubeconfigs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("load kubeconfig: %v", err)
 			}
-			cluster := config.Clusters["coreshift"]
+			cluster := config.Clusters[defaultClusterName]
 			if cluster == nil || cluster.Server != "https://127.0.0.1:6443" {
 				t.Fatalf("unexpected cluster config: %#v", cluster)
 			}
 			if !bytes.Equal(cluster.CertificateAuthorityData, caCertPEM) {
 				t.Fatal("kubeconfig does not embed the CA certificate")
 			}
-			user := config.AuthInfos[component]
+			entry := component + "@" + defaultClusterName
+			user := config.AuthInfos[entry]
 			if user == nil || len(user.ClientCertificateData) == 0 || len(user.ClientKeyData) == 0 {
 				t.Fatalf("unexpected user config: %#v", user)
 			}
-			if config.CurrentContext != component+"@coreshift" {
+			if config.CurrentContext != entry {
 				t.Fatalf("unexpected current context: %q", config.CurrentContext)
 			}
 
