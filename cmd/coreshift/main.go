@@ -926,7 +926,7 @@ const (
 // from the running binary unless --image names one, starts the container
 // detached, streams its boot output, and polls readiness from the host. On
 // success the container keeps running; on any failure it is removed while
-// the state is kept.
+// the state is preserved.
 func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, imagePath, pullSecretPath string, release releaseOptions) error {
 	if err := refuseReservedPort(port); err != nil {
 		return err
@@ -1207,7 +1207,7 @@ func kubeconfigPointsAt(path string, port int) bool {
 // containerFailure reports a cluster container that did not become ready:
 // the error carries the tail of the container's log and the state
 // directory's full logs, a state-directory conflict gains the create-side
-// remedies, and the container is removed while the state is kept.
+// remedies, and the container is removed while the state is preserved.
 func containerFailure(container, stateDir string, err error) error {
 	tail := containerLogTail(container)
 	if hint := stateConflictHint(tail); hint != "" {
@@ -1322,7 +1322,7 @@ func newCreateWorkerCommand() *cobra.Command {
 // mints the join material and the worker image, starts the container
 // detached, streams its boot output, and waits for the worker's node to
 // register. On success the container keeps running; on any failure it is
-// removed, with the join material, while the cluster's state is kept.
+// removed, with the join material, while the cluster's state is preserved.
 func runCreateWorker(ctx context.Context, name string, explicit bool, cluster, pullSecretPath string, verbose bool) error {
 	// A counted name is worker<number> and always fits; only a typed
 	// name can carry a shape the objects cannot.
@@ -1592,7 +1592,7 @@ func printWorkerSummary(container, stateDir, name string) {
 // workerFailure reports a worker container that did not join: the error
 // carries the tail of the container's log, a join that failed on the
 // cgroup hierarchy gains the rootful remedy, and the container is
-// removed while the cluster's state is kept.
+// removed while the cluster's state is preserved.
 func workerFailure(container, stateDir, name string, err error) error {
 	tail := containerLogTail(container)
 	if strings.Contains(tail, worker.CgroupDelegationMark) {
@@ -1631,14 +1631,14 @@ func newDeleteCommand() *cobra.Command {
 
 // newDeleteClusterCommand builds the command that deletes a cluster: its
 // container is stopped, torn down in reverse order like a host-mode
-// shutdown, and removed, while its state directory is kept unless the
+// shutdown, and removed, while its state directory is preserved unless the
 // cleanup flag asks for its removal too.
 func newDeleteClusterCommand() *cobra.Command {
 	var name string
 	var cleanup bool
 	cmd := &cobra.Command{
 		Use:          "cluster",
-		Short:        "Delete a cluster, stopping its container and keeping its state",
+		Short:        "Delete a cluster, stopping its container and preserving its state",
 		SilenceUsage: true,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return runDelete(name, cleanup)
@@ -1656,10 +1656,10 @@ func newDeleteClusterCommand() *cobra.Command {
 const containerStopSeconds = 120
 
 // runDelete deletes a cluster: its container is stopped and removed. The
-// state directory is kept, because deleting a cluster destroys nothing;
+// state directory is preserved, because deleting a cluster destroys nothing;
 // the cleanup flag opts into removing it too, with the same removal the
 // cleanup command uses. A cluster whose container is already gone but
-// whose state was kept reports that and where the state is.
+// whose state was preserved reports that and where the state is.
 func runDelete(name string, cleanup bool) error {
 	if _, err := exec.LookPath("podman"); err != nil {
 		return fmt.Errorf("podman is required to delete clusters: %w", err)
@@ -1695,7 +1695,7 @@ func runDelete(name string, cleanup bool) error {
 		fmt.Printf("State removed at %s\n", stateDir)
 		return nil
 	}
-	fmt.Printf("State kept at %s; coreshift cleanup removes it\n", stateDir)
+	fmt.Printf("State preserved at %s; coreshift cleanup removes it\n", stateDir)
 	return nil
 }
 

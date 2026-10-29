@@ -1785,12 +1785,12 @@ func TestDeleteUnknownNounPrintsHelp(t *testing.T) {
 	}
 }
 
-// TestRunDeleteStopsAndRemovesKeepingState checks the delete contract:
+// TestRunDeleteStopsAndRemovesPreservingState checks the delete contract:
 // the container is stopped with a timeout generous enough for the control
 // plane's teardown and then removed, while the state directory and its
 // marker are left intact. The state directory comes from the name; the
 // container's port is never asked.
-func TestRunDeleteStopsAndRemovesKeepingState(t *testing.T) {
+func TestRunDeleteStopsAndRemovesPreservingState(t *testing.T) {
 	writeFakePodman(t)
 	setContainers(t, "coreshift-dev")
 	base := t.TempDir()
@@ -1815,18 +1815,18 @@ func TestRunDeleteStopsAndRemovesKeepingState(t *testing.T) {
 	if !slices.Equal(calls, want) {
 		t.Fatalf("podman calls = %q\nwant %q", calls, want)
 	}
-	if !strings.Contains(out, "State kept at "+stateDir) {
-		t.Fatalf("output = %q, want the kept state named", out)
+	if !strings.Contains(out, "State preserved at "+stateDir) {
+		t.Fatalf("output = %q, want the preserved state named", out)
 	}
 	if _, err := os.Stat(filepath.Join(stateDir, clusterMarkerFilename)); err != nil {
 		t.Fatal("delete removed the state directory")
 	}
 }
 
-// TestRunDeleteNotRunningKeepsState checks the delete of a cluster whose
-// container is already gone but whose state was kept: nothing is stopped,
-// and the kept state is named.
-func TestRunDeleteNotRunningKeepsState(t *testing.T) {
+// TestRunDeleteNotRunningPreservesState checks the delete of a cluster whose
+// container is already gone but whose state was preserved: nothing is
+// stopped, and the preserved state is named.
+func TestRunDeleteNotRunningPreservesState(t *testing.T) {
 	writeFakePodman(t)
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
@@ -1844,8 +1844,8 @@ func TestRunDeleteNotRunningKeepsState(t *testing.T) {
 	if calls := podmanCalls(t); len(calls) != 1 || calls[0] != "container exists coreshift-dev" {
 		t.Fatalf("podman calls = %q, want only the existence check", calls)
 	}
-	if !strings.Contains(out, "not running") || !strings.Contains(out, "State kept at "+stateDir) {
-		t.Fatalf("output = %q, want the cluster reported not running with its kept state named", out)
+	if !strings.Contains(out, "not running") || !strings.Contains(out, "State preserved at "+stateDir) {
+		t.Fatalf("output = %q, want the cluster reported not running with its preserved state named", out)
 	}
 }
 
