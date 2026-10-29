@@ -20,7 +20,7 @@ defaulting behavior — without the cost and complexity of a full cluster.
 
 The command names follow one rule: run means here in this terminal;
 create means in a managed container; delete removes the container and
-keeps the data; cleanup destroys the data.
+preserves the data; cleanup destroys the data.
 
 | | `coreshift run cluster` | `coreshift create cluster` |
 |---|---|---|
@@ -37,7 +37,7 @@ keeps the data; cleanup destroys the data.
 - `coreshift create cluster`: run it in a managed container and wait for
   it to be ready.
 - `coreshift delete cluster [--name]`: stop a cluster's container and
-  remove it, keeping the state.
+  remove it, preserving the state.
 - `coreshift get clusters`: list the clusters with their port, release,
   and live readiness.
 - `coreshift get kubeconfig [--name]`: print the path to a cluster's
@@ -308,7 +308,7 @@ cluster`. Then check what is running, and stop it without losing the data:
 ./coreshift delete cluster
 ```
 
-`delete` prints where the state was kept, and the next create with the
+`delete` prints where the state was preserved, and the next create with the
 same name picks it back up — on whatever port, warm.
 
 ### Flags
@@ -368,7 +368,7 @@ certificates and data.
 A container that exits before the control plane becomes ready fails the
 create: the error quotes the tail of the container's log, points at the
 full logs in the state directory, and the container is removed while the
-state is kept. Ctrl-C during the wait aborts the same way. A failure
+state is preserved. Ctrl-C during the wait aborts the same way. A failure
 caused by the state directory refusing reuse says so and names `--fresh`
 and a different `--name` as the remedies.
 
@@ -404,7 +404,7 @@ none, so every worker's node shows NotReady; that is the honest
 readiness `get workers` lists. When a worker fails — its container exits,
 or its node never registers — the error quotes the tail of the
 container's log, the container is removed, and the cluster's state is
-kept.
+preserved.
 
 ### Quickstart
 
@@ -546,9 +546,9 @@ workloads run.
 `coreshift delete cluster` stops the named cluster's container and removes
 it. Stopping the container tears the control plane down in reverse startup
 order, like a host-mode shutdown. The state directory is deliberately
-kept — deleting a cluster destroys nothing — and the command prints where
+preserved — deleting a cluster destroys nothing — and the command prints where
 the state is, with `coreshift cleanup` named as the way to remove it. A
-cluster whose container is already gone but whose state was kept is
+cluster whose container is already gone but whose state was preserved is
 reported as not running, with its state named.
 
 ```
@@ -559,8 +559,8 @@ reported as not running, with its state named.
 
 `--cleanup` opts into destroying the data as well: once the container is
 down, the state directory is removed with the same removal the cleanup
-command uses, while the shared image cache is kept either way. The
-command says in one line whether the state was kept or removed, and
+command uses, while the shared image cache is preserved either way. The
+command says in one line whether the state was preserved or removed, and
 where.
 
 ## The `delete worker` command
