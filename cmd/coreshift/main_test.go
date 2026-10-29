@@ -141,6 +141,20 @@ func TestFollowAPIPortLeavesMatchingKubeconfigs(t *testing.T) {
 	}
 }
 
+// TestRefuseInvalidClusterName checks that a cluster name naming a
+// directory under the state root must be a DNS label, and that the
+// default name passes.
+func TestRefuseInvalidClusterName(t *testing.T) {
+	for _, name := range []string{"../escape", "a/b", "Bad Name", ""} {
+		if err := refuseInvalidClusterName(name); err == nil {
+			t.Fatalf("name %q: expected a refusal", name)
+		}
+	}
+	if err := refuseInvalidClusterName(defaultClusterName); err != nil {
+		t.Fatalf("default name refused: %v", err)
+	}
+}
+
 func TestRestoreAdminContextSwitchesBackFromLoginContext(t *testing.T) {
 	stateDir := t.TempDir()
 	if err := ensureCertificates(stateDir, defaultAPIPort); err != nil {
@@ -267,27 +281,19 @@ func TestKubeAPIServerConfigBindsLoopbackOnHost(t *testing.T) {
 	}
 }
 
-// TestAPIStateDirPerPort checks that the default port keeps the original
-// state directory while any other port gets its own subdirectory, so runs
-// on different ports stay independent.
-func TestAPIStateDirPerPort(t *testing.T) {
+// TestClusterDirByName checks that a cluster's state directory comes from
+// its name, so every command resolves the same directory for it whatever
+// port its API server binds.
+func TestClusterDirByName(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
 
-	def, err := apiStateDir(defaultAPIPort)
+	dir, err := clusterDir("dev")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(base, "coreshift", "api"); def != want {
-		t.Fatalf("default port state dir = %q, want %q", def, want)
-	}
-
-	other, err := apiStateDir(7443)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := filepath.Join(base, "coreshift", "api", "7443"); other != want {
-		t.Fatalf("port 7443 state dir = %q, want %q", other, want)
+	if want := filepath.Join(base, "coreshift", "clusters", "dev"); dir != want {
+		t.Fatalf("cluster state dir = %q, want %q", dir, want)
 	}
 }
 
@@ -309,75 +315,88 @@ func TestStateRootEmptyVariableStaysBelowHome(t *testing.T) {
 	}
 }
 
-// writeStateTree fills a state directory with a marker file, the way a
-// run does, so cleanup has something to measure and remove.
-func writeStateTree(t *testing.T, dir string) {
+// writeStateTree fills a cluster's state directory with a marker file,
+// the way a boot does, so cleanup has something to measure and remove.
+func writeStateTree(t *testing.T, dir, name string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, releaseMarkerFilename), []byte("reg.example/ocp-release:4.22.8-x86_64"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeMarker(t, dir, name, "reg.example/ocp-release:4.22.8-x86_64")
 }
 
 func TestCleanupRemovesDefaultStateDir(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
-	stateDir := filepath.Join(base, "coreshift", "api")
-	writeStateTree(t, stateDir)
-
-	if err := runCleanup(defaultAPIPort, false, false); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
-		t.Fatal("default state directory still exists")
-	}
-}
-
-func TestCleanupRemovesPortStateDirOnly(t *testing.T) {
-	base := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", base)
-	stateDir, err := apiStateDir(7443)
+	stateDir, err := clusterDir(defaultClusterName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeStateTree(t, stateDir)
-	writeStateTree(t, filepath.Dir(stateDir))
+	writeStateTree(t, stateDir, defaultClusterName)
 
-	if err := runCleanup(7443, false, false); err != nil {
+	if err := runCleanup(defaultClusterName, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
-		t.Fatal("port state directory still exists")
-	}
-	if _, err := os.Stat(filepath.Join(filepath.Dir(stateDir), releaseMarkerFilename)); err != nil {
-		t.Fatalf("default state directory was removed too: %v", err)
+		t.Fatal("cluster state directory still exists")
 	}
 }
 
-func TestCleanupAllSweepsEveryStateDir(t *testing.T) {
+func TestCleanupRemovesNamedClusterOnly(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
-	apiRoot := filepath.Join(base, "coreshift", "api")
-	writeStateTree(t, apiRoot)
-	writeStateTree(t, filepath.Join(apiRoot, "7443"))
-	writeStateTree(t, filepath.Join(apiRoot, "8443"))
-
-	if err := runCleanup(defaultAPIPort, true, false); err != nil {
+	removed, err := clusterDir("dev")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(apiRoot); !os.IsNotExist(err) {
-		t.Fatal("state directories still exist after --all")
+	kept, err := clusterDir("other")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(base, "coreshift")); !os.IsNotExist(err) {
-		t.Fatal("empty state root was left behind")
+	writeStateTree(t, removed, "dev")
+	writeStateTree(t, kept, "other")
+
+	if err := runCleanup("dev", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(removed); !os.IsNotExist(err) {
+		t.Fatal("named cluster's state directory still exists")
+	}
+	if _, err := os.Stat(filepath.Join(kept, clusterMarkerFilename)); err != nil {
+		t.Fatalf("another cluster's state directory was removed too: %v", err)
+	}
+}
+
+func TestCleanupAllSweepsClustersTree(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	tree, err := clustersTree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeStateTree(t, filepath.Join(tree, "alpha"), "alpha")
+	writeStateTree(t, filepath.Join(tree, "beta"), "beta")
+	// An unrelated directory kept under the state root by choice: a full
+	// cleanup owns the clusters tree and nothing else.
+	sibling := filepath.Join(base, "coreshift", "keepme")
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runCleanup(defaultClusterName, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(tree); !os.IsNotExist(err) {
+		t.Fatal("clusters tree still exists after --all")
+	}
+	if _, err := os.Stat(sibling); err != nil {
+		t.Fatalf("unrelated directory under the state root was removed: %v", err)
 	}
 }
 
 func TestCleanupMissingStateDirIsNotAnError(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if err := runCleanup(defaultAPIPort, false, false); err != nil {
+	if err := runCleanup(defaultClusterName, false, false); err != nil {
 		t.Fatalf("missing state directory must not fail: %v", err)
 	}
 }
@@ -387,9 +406,9 @@ func TestCleanupCache(t *testing.T) {
 	cacheBase := t.TempDir()
 	t.Setenv("XDG_CACHE_HOME", cacheBase)
 	cacheDir := filepath.Join(cacheBase, "coreshift")
-	writeStateTree(t, cacheDir)
+	writeStateTree(t, cacheDir, defaultClusterName)
 
-	if err := runCleanup(defaultAPIPort, false, true); err != nil {
+	if err := runCleanup(defaultClusterName, false, true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
@@ -397,11 +416,11 @@ func TestCleanupCache(t *testing.T) {
 	}
 }
 
-func TestCleanupRefusesAllWithPort(t *testing.T) {
+func TestCleanupRefusesAllWithName(t *testing.T) {
 	cmd := newCleanupCommand()
-	cmd.SetArgs([]string{"--all", "--port", "7443"})
-	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "--port") {
-		t.Fatalf("err = %v, want --all and --port together refused", err)
+	cmd.SetArgs([]string{"--all", "--name", "dev"})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "--name") {
+		t.Fatalf("err = %v, want --all and --name together refused", err)
 	}
 }
 
@@ -424,14 +443,17 @@ func startStandbyProcess(t *testing.T, extraArg string) {
 func TestCleanupRefusesWhileChildProcessRuns(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
-	stateDir := filepath.Join(base, "coreshift", "api")
-	writeStateTree(t, stateDir)
+	stateDir, err := clusterDir("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeStateTree(t, stateDir, "dev")
 
 	// A stand-in for a control plane child: its command line carries the
 	// state directory the way etcd's --data-dir does.
 	startStandbyProcess(t, "--data-dir="+filepath.Join(stateDir, "etcd-data"))
 
-	err := runCleanup(defaultAPIPort, false, false)
+	err = runCleanup("dev", false, false)
 	if err == nil || !strings.Contains(err.Error(), "Stop it first") {
 		t.Fatalf("err = %v, want a refusal naming the running control plane", err)
 	}
@@ -454,9 +476,9 @@ func TestIsControlPlaneArgs(t *testing.T) {
 		{[]string{"./coreshift", "run"}, false},
 		{[]string{"./coreshift", "cleanup"}, false},
 		{[]string{"./coreshift"}, false},
-		{[]string{"etcd", "--data-dir=" + state + "/api/etcd-data"}, true},
-		{[]string{"kube-scheduler", "--config=" + state + "/api/kube-scheduler-config.yaml"}, true},
-		{[]string{"oc", "login", "--kubeconfig=" + state + "/api/admin.kubeconfig"}, true},
+		{[]string{"etcd", "--data-dir=" + state + "/clusters/dev/etcd-data"}, true},
+		{[]string{"kube-scheduler", "--config=" + state + "/clusters/dev/kube-scheduler-config.yaml"}, true},
+		{[]string{"oc", "login", "--kubeconfig=" + state + "/clusters/dev/admin.kubeconfig"}, true},
 		{[]string{"etcd", "--data-dir=/elsewhere/etcd-data"}, false},
 		{[]string{"sh", "-c", "sleep 30; true", "--config=" + cache + "/components/x/y"}, true},
 		{[]string{"sh", "-c", "sleep 30; true", "--namespace=default"}, false},
@@ -582,27 +604,28 @@ func TestCreateCommandFlagDefaults(t *testing.T) {
 
 // TestPodmanRunArgs checks the podman command line that starts a cluster
 // container: the loopback identity mapping for the API port, the XDG
-// environment pointing at the bind-mounted state and cache roots, the
-// read-only pull secret, and the release flags and port passed through to
-// the run inside.
+// environment pointing at the bind-mounted state and cache paths, the
+// read-only pull secret, and the name, release flags, and port passed
+// through to the run inside.
 func TestPodmanRunArgs(t *testing.T) {
 	release := releaseOptions{
 		image:    "reg.example/ocp-release:4.22.8-x86_64",
 		registry: "quay.io/openshift-release-dev/ocp-release",
 		arch:     "x86_64",
 	}
-	got := podmanRunArgs("coreshift-dev", 7443, "/state/root", "/cache/root", "/secret/pull-secret", "localhost/coreshift:v1", release)
+	got := podmanRunArgs("coreshift-dev", "dev", 7443, "/state/root/clusters/dev", "/cache/root", "/secret/pull-secret", "localhost/coreshift:v1", release)
 	want := []string{
 		"run", "--detach",
 		"--name", "coreshift-dev",
 		"--publish", "127.0.0.1:7443:7443",
 		"--env", "XDG_STATE_HOME=/var/lib/coreshift/state",
 		"--env", "XDG_CACHE_HOME=/var/lib/coreshift/cache",
-		"--volume", "/state/root:/var/lib/coreshift/state/coreshift:z",
+		"--volume", "/state/root/clusters/dev:/var/lib/coreshift/state/coreshift/clusters/dev:z",
 		"--volume", "/cache/root:/var/lib/coreshift/cache/coreshift:z",
 		"--volume", "/secret/pull-secret:/etc/coreshift/pull-secret:ro,z",
 		"localhost/coreshift:v1",
 		"--pull-secret=/etc/coreshift/pull-secret",
+		"--name=dev",
 		"--port=7443",
 		"--release-image=reg.example/ocp-release:4.22.8-x86_64",
 		"--version=",
@@ -681,9 +704,9 @@ func TestRefuseIfPortBusy(t *testing.T) {
 // directory refusing reuse gains the create-side remedies, and that an
 // ordinary failure gains none.
 func TestStateConflictHint(t *testing.T) {
-	refusal := "Error: state directory /state/api was created by release 4.22.8 and cannot be reused by 4.19.3"
+	refusal := "Error: state directory /state/clusters/dev was created by release 4.22.8 and cannot be reused by 4.19.3"
 	hint := stateConflictHint(refusal)
-	for _, want := range []string{"--fresh", "--port"} {
+	for _, want := range []string{"--fresh", "--name"} {
 		if !strings.Contains(hint, want) {
 			t.Fatalf("hint = %q, want it to name %s", hint, want)
 		}
@@ -727,6 +750,7 @@ func TestClusterCommandResolutionFlagDefaults(t *testing.T) {
 	}
 	cmd := newClusterCommand()
 	for name, want := range map[string]string{
+		"name":          "coreshift",
 		"version":       "",
 		"release-image": "",
 		"registry":      "quay.io/openshift-release-dev/ocp-release",
@@ -821,66 +845,78 @@ func TestWriteOpenShiftAPIServerConfigContents(t *testing.T) {
 	}
 }
 
-func TestEnsureReleaseMarkerTracksFreshDirectory(t *testing.T) {
+func TestEnsureClusterMarkerTracksFreshDirectory(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.8-x86_64"); err != nil {
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64"); err != nil {
 		t.Fatal(err)
 	}
-	if got := string(readFile(t, stateDir, releaseMarkerFilename)); got != "reg.example/ocp-release:4.22.8-x86_64" {
-		t.Fatalf("marker = %q, want the release image reference", got)
+	marker, err := readClusterMarker(stateDir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The same release reuses the directory unchanged.
-	if err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.8-x86_64"); err != nil {
+	if marker != (clusterMarker{Name: "dev", Release: "reg.example/ocp-release:4.22.8-x86_64"}) {
+		t.Fatalf("marker = %+v, want the cluster's name and the release image reference", marker)
+	}
+	// The same name and release reuse the directory unchanged.
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64"); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestEnsureReleaseMarkerRefusesDifferentRelease(t *testing.T) {
+func TestEnsureClusterMarkerRefusesDifferentRelease(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.8-x86_64"); err != nil {
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64"); err != nil {
 		t.Fatal(err)
 	}
 
-	err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.19.3-x86_64")
+	err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.19.3-x86_64")
 	if err == nil {
 		t.Fatal("expected a refusal for a different release")
 	}
-	for _, want := range []string{"4.22.8", "4.19.3", stateDir, "--port"} {
+	for _, want := range []string{"4.22.8", "4.19.3", stateDir, "--name"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("refusal missing %q:\n%v", want, err)
 		}
 	}
-	if got := string(readFile(t, stateDir, releaseMarkerFilename)); got != "reg.example/ocp-release:4.22.8-x86_64" {
-		t.Fatalf("refusal overwrote the marker, now %q", got)
+	marker, err := readClusterMarker(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marker.Release != "reg.example/ocp-release:4.22.8-x86_64" {
+		t.Fatalf("refusal overwrote the marker, now %+v", marker)
 	}
 }
 
-// TestEnsureReleaseMarkerUpgradesPatchInPlace checks the relaxed rule's
+// TestEnsureClusterMarkerUpgradesPatchInPlace checks the relaxed rule's
 // accepting side: a newer patch of the same minor stream reuses the
 // directory, recording the upgrade, the same move a real cluster makes.
-func TestEnsureReleaseMarkerUpgradesPatchInPlace(t *testing.T) {
+func TestEnsureClusterMarkerUpgradesPatchInPlace(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.8-x86_64"); err != nil {
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.9-x86_64"); err != nil {
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.9-x86_64"); err != nil {
 		t.Fatal(err)
 	}
-	if got := string(readFile(t, stateDir, releaseMarkerFilename)); got != "reg.example/ocp-release:4.22.9-x86_64" {
-		t.Fatalf("marker = %q, want the upgrading release recorded", got)
+	marker, err := readClusterMarker(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marker != (clusterMarker{Name: "dev", Release: "reg.example/ocp-release:4.22.9-x86_64"}) {
+		t.Fatalf("marker = %+v, want the upgrading release recorded", marker)
 	}
 }
 
-// TestEnsureReleaseMarkerRefusesPatchDowngrade checks that a same-stream
+// TestEnsureClusterMarkerRefusesPatchDowngrade checks that a same-stream
 // older patch still refuses, stating the rule.
-func TestEnsureReleaseMarkerRefusesPatchDowngrade(t *testing.T) {
+func TestEnsureClusterMarkerRefusesPatchDowngrade(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.9-x86_64"); err != nil {
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.9-x86_64"); err != nil {
 		t.Fatal(err)
 	}
 
-	err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.8-x86_64")
+	err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64")
 	if err == nil {
 		t.Fatal("expected a refusal for a patch downgrade")
 	}
@@ -889,37 +925,45 @@ func TestEnsureReleaseMarkerRefusesPatchDowngrade(t *testing.T) {
 			t.Fatalf("refusal missing %q:\n%v", want, err)
 		}
 	}
-	if got := string(readFile(t, stateDir, releaseMarkerFilename)); got != "reg.example/ocp-release:4.22.9-x86_64" {
-		t.Fatalf("refusal overwrote the marker, now %q", got)
+	marker, err := readClusterMarker(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marker.Release != "reg.example/ocp-release:4.22.9-x86_64" {
+		t.Fatalf("refusal overwrote the marker, now %+v", marker)
 	}
 }
 
-// TestEnsureReleaseMarkerExactMatchWithoutVersion checks the fallback for
+// TestEnsureClusterMarkerExactMatchWithoutVersion checks the fallback for
 // references carrying no parseable version: only an exact match reuses
 // the directory, as before, rather than guessing at an upgrade.
-func TestEnsureReleaseMarkerExactMatchWithoutVersion(t *testing.T) {
+func TestEnsureClusterMarkerExactMatchWithoutVersion(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:nightly"); err != nil {
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:nightly"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:nightly"); err != nil {
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:nightly"); err != nil {
 		t.Fatal(err)
 	}
 
-	err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.9-x86_64")
+	err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.9-x86_64")
 	if err == nil {
 		t.Fatal("expected a refusal without a parseable version to compare")
 	}
-	if got := string(readFile(t, stateDir, releaseMarkerFilename)); got != "reg.example/ocp-release:nightly" {
-		t.Fatalf("refusal overwrote the marker, now %q", got)
+	marker, err := readClusterMarker(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marker.Release != "reg.example/ocp-release:nightly" {
+		t.Fatalf("refusal overwrote the marker, now %+v", marker)
 	}
 }
 
-// writeMarker records a release image reference in a state directory, the
-// way a boot does.
-func writeMarker(t *testing.T, stateDir, releaseRef string) {
+// writeMarker records a cluster's name and release image reference in a
+// state directory, the way a boot does.
+func writeMarker(t *testing.T, stateDir, name, releaseRef string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(stateDir, releaseMarkerFilename), []byte(releaseRef), 0o644); err != nil {
+	if err := writeClusterMarker(stateDir, clusterMarker{Name: name, Release: releaseRef}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -956,7 +1000,7 @@ func newTagRegistry(t *testing.T, tags ...string) string {
 // registry is still checked for a newer patch of its stream to mention.
 func TestBootReleaseReusesRecordedRelease(t *testing.T) {
 	stateDir := t.TempDir()
-	writeMarker(t, stateDir, "reg.example/ocp-release:4.22.8-x86_64")
+	writeMarker(t, stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64")
 	repo := newTagRegistry(t, "4.22.8-x86_64", "4.22.11-x86_64")
 	release := releaseOptions{registry: repo, arch: "x86_64"}
 
@@ -984,7 +1028,7 @@ func TestBootReleaseNoteOnlyForNewerPatch(t *testing.T) {
 		"registry unreachable": nil,
 	} {
 		stateDir := t.TempDir()
-		writeMarker(t, stateDir, "reg.example/ocp-release:4.22.11-x86_64")
+		writeMarker(t, stateDir, "dev", "reg.example/ocp-release:4.22.11-x86_64")
 		var repo string
 		if tags != nil {
 			repo = newTagRegistry(t, tags...)
@@ -1007,7 +1051,7 @@ func TestBootReleaseNoteOnlyForNewerPatch(t *testing.T) {
 // version still resolves from the registry, even with a recorded release.
 func TestBootReleaseRequestedReleaseWins(t *testing.T) {
 	stateDir := t.TempDir()
-	writeMarker(t, stateDir, "reg.example/ocp-release:4.22.8-x86_64")
+	writeMarker(t, stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64")
 	repo := newTagRegistry(t, "4.22.8-x86_64", "4.22.11-x86_64")
 	release := releaseOptions{registry: repo, version: "4.22.11", arch: "x86_64"}
 
@@ -1020,26 +1064,6 @@ func TestBootReleaseRequestedReleaseWins(t *testing.T) {
 	}
 	if note != "" {
 		t.Fatalf("note = %q, want none for an explicitly requested release", note)
-	}
-}
-
-func TestEnsureReleaseMarkerRefusesUntrackedEtcdData(t *testing.T) {
-	stateDir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(stateDir, "etcd-data"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	err := ensureReleaseMarker(stateDir, "reg.example/ocp-release:4.22.8-x86_64")
-	if err == nil {
-		t.Fatal("expected a refusal for untracked etcd data")
-	}
-	for _, want := range []string{"before releases were recorded", stateDir, "--port"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("refusal missing %q:\n%v", want, err)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(stateDir, releaseMarkerFilename)); !os.IsNotExist(err) {
-		t.Fatalf("refusal wrote a marker anyway: %v", err)
 	}
 }
 
@@ -1078,7 +1102,7 @@ func TestParseYesNo(t *testing.T) {
 
 func TestStartFreshRemovesStateDirOnYes(t *testing.T) {
 	stateDir := t.TempDir()
-	writeStateTree(t, stateDir)
+	writeStateTree(t, stateDir, "dev")
 
 	if err := startFresh("y\n", stateDir, fmt.Errorf("refusal")); err != nil {
 		t.Fatal(err)
@@ -1091,7 +1115,7 @@ func TestStartFreshRemovesStateDirOnYes(t *testing.T) {
 func TestStartFreshKeepsStateDirOtherwise(t *testing.T) {
 	for _, answer := range []string{"\n", "n\n", "no\n", "yes please\n"} {
 		stateDir := t.TempDir()
-		writeStateTree(t, stateDir)
+		writeStateTree(t, stateDir, "dev")
 		refusal := fmt.Errorf("refusal")
 
 		if err := startFresh(answer, stateDir, refusal); err != refusal {
@@ -1119,11 +1143,11 @@ func TestOfferFreshStartWithoutTerminal(t *testing.T) {
 	swapStdin(t, r)
 
 	refusal := fmt.Errorf("state directory cannot be reused")
-	err = offerFreshStart("/state/api", 7443, refusal)
+	err = offerFreshStart("/state/clusters/dev", "dev", refusal)
 	if err == nil {
 		t.Fatal("expected a refusal without a terminal")
 	}
-	for _, want := range []string{"state directory cannot be reused", "coreshift cleanup --port 7443"} {
+	for _, want := range []string{"state directory cannot be reused", "coreshift cleanup --name dev"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("refusal missing %q:\n%v", want, err)
 		}
@@ -1144,11 +1168,11 @@ func TestOfferFreshStartWithoutTerminalOnNullDevice(t *testing.T) {
 	swapStdin(t, devNull)
 
 	refusal := fmt.Errorf("state directory cannot be reused")
-	err = offerFreshStart("/state/api", 7443, refusal)
+	err = offerFreshStart("/state/clusters/dev", "dev", refusal)
 	if err == nil {
 		t.Fatal("expected a refusal without a terminal")
 	}
-	for _, want := range []string{"state directory cannot be reused", "coreshift cleanup --port 7443"} {
+	for _, want := range []string{"state directory cannot be reused", "coreshift cleanup --name dev"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("refusal missing %q:\n%v", want, err)
 		}
@@ -1206,7 +1230,7 @@ func TestCheckCreateStateAcceptsCompatibleReleases(t *testing.T) {
 		},
 	} {
 		stateDir := t.TempDir()
-		writeMarker(t, stateDir, tc.marker)
+		writeMarker(t, stateDir, "dev", tc.marker)
 		if err := checkCreateState(context.Background(), stateDir, tc.release, secret); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -1248,7 +1272,7 @@ func TestCheckCreateStateRefusesConflicts(t *testing.T) {
 	} {
 		noTerminal(t)
 		stateDir := t.TempDir()
-		writeMarker(t, stateDir, tc.marker)
+		writeMarker(t, stateDir, "dev", tc.marker)
 
 		err := checkCreateState(context.Background(), stateDir, tc.release, secret)
 		if err == nil {
@@ -1259,28 +1283,8 @@ func TestCheckCreateStateRefusesConflicts(t *testing.T) {
 				t.Fatalf("%s: refusal missing %q:\n%v", name, want, err)
 			}
 		}
-		if _, statErr := os.Stat(filepath.Join(stateDir, releaseMarkerFilename)); statErr != nil {
+		if _, statErr := os.Stat(filepath.Join(stateDir, clusterMarkerFilename)); statErr != nil {
 			t.Fatalf("%s: refusal removed the state directory: %v", name, statErr)
-		}
-	}
-}
-
-// TestCheckCreateStateRefusesUntrackedLeftovers checks the plain naming
-// of state data that records no release: a deleted cluster's leftovers.
-func TestCheckCreateStateRefusesUntrackedLeftovers(t *testing.T) {
-	noTerminal(t)
-	stateDir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(stateDir, "etcd-data"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	err := checkCreateState(context.Background(), stateDir, releaseOptions{}, writePullSecret(t))
-	if err == nil {
-		t.Fatal("expected a refusal for untracked state data")
-	}
-	for _, want := range []string{"left over from a deleted cluster", "--fresh"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("refusal missing %q:\n%v", want, err)
 		}
 	}
 }
@@ -1482,10 +1486,10 @@ func TestRunGetClustersEmpty(t *testing.T) {
 }
 
 // TestRunGetClustersListsClusters checks the row each cluster gets: its
-// name, the port its container publishes, the release its state directory
-// records, and readiness from a live probe, so a cluster with nothing
-// answering on its port shows as not ready and one without a state
-// directory yet shows an unknown release.
+// name, the port its container publishes, the release its state
+// directory records, and readiness from a live probe, so a cluster with
+// nothing answering on its port shows as not ready and one without a
+// state directory yet shows an unknown release.
 func TestRunGetClustersListsClusters(t *testing.T) {
 	writeFakePodman(t)
 	base := t.TempDir()
@@ -1507,12 +1511,12 @@ func TestRunGetClustersListsClusters(t *testing.T) {
 	setContainerPort(t, "coreshift-booting", 17443)
 	setContainerPort(t, "coreshift-early", 18443)
 	setContainerPort(t, "coreshift-ready", readyPort)
-	for _, port := range []int{17443, readyPort} {
-		stateDir, err := apiStateDir(port)
+	for _, name := range []string{"booting", "ready"} {
+		stateDir, err := clusterDir(name)
 		if err != nil {
 			t.Fatal(err)
 		}
-		writeStateTree(t, stateDir)
+		writeStateTree(t, stateDir, name)
 	}
 
 	out := captureStdout(t, func() { err = runGetClusters() })
@@ -1547,40 +1551,52 @@ func TestRunGetClustersListsClusters(t *testing.T) {
 }
 
 func TestRunGetKubeconfigPrintsPath(t *testing.T) {
-	writeFakePodman(t)
-	setContainers(t, "coreshift-dev")
-	setContainerPort(t, "coreshift-dev", 7443)
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
-
-	var err error
-	out := captureStdout(t, func() { err = runGetKubeconfig("dev") })
+	stateDir, err := clusterDir("dev")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(base, "coreshift", "api", "7443", certgen.AdminKubeconfigFilename)
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, certgen.AdminKubeconfigFilename), []byte("kubeconfig"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var outErr error
+	out := captureStdout(t, func() { outErr = runGetKubeconfig("dev") })
+	if outErr != nil {
+		t.Fatal(outErr)
+	}
+	want := filepath.Join(stateDir, certgen.AdminKubeconfigFilename)
 	if got := strings.TrimSpace(out); got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
 }
 
 // TestRunGetKubeconfigMissingCluster checks that a missing cluster is
-// refused plainly.
+// refused, listing the clusters that exist.
 func TestRunGetKubeconfigMissingCluster(t *testing.T) {
-	writeFakePodman(t)
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	writeStateTree(t, filepath.Join(base, "coreshift", "clusters", "alpha"), "alpha")
+
 	err := runGetKubeconfig("nope")
 	if err == nil || !strings.Contains(err.Error(), "no cluster named nope") {
 		t.Fatalf("err = %v, want a plain refusal", err)
 	}
+	if !strings.Contains(err.Error(), "alpha") {
+		t.Fatalf("err = %v, want the existing cluster listed", err)
+	}
 }
 
-// TestGetCommandsRequirePodman checks that the get commands fail naming
+// TestGetCommandsRequirePodman checks that get clusters fails naming
 // podman when it is missing.
 func TestGetCommandsRequirePodman(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	for name, run := range map[string]func() error{
-		"get clusters":   func() error { return runGetClusters() },
-		"get kubeconfig": func() error { return runGetKubeconfig("dev") },
+		"get clusters": func() error { return runGetClusters() },
 	} {
 		err := run()
 		if err == nil || !strings.Contains(err.Error(), "podman") {
@@ -1646,18 +1662,18 @@ func TestDeleteUnknownNounPrintsHelp(t *testing.T) {
 // TestRunDeleteStopsAndRemovesKeepingState checks the delete contract:
 // the container is stopped with a timeout generous enough for the control
 // plane's teardown and then removed, while the state directory and its
-// release marker are left intact.
+// marker are left intact. The state directory comes from the name; the
+// container's port is never asked.
 func TestRunDeleteStopsAndRemovesKeepingState(t *testing.T) {
 	writeFakePodman(t)
 	setContainers(t, "coreshift-dev")
-	setContainerPort(t, "coreshift-dev", 7443)
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
-	stateDir, err := apiStateDir(7443)
+	stateDir, err := clusterDir("dev")
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeStateTree(t, stateDir)
+	writeStateTree(t, stateDir, "dev")
 
 	var delErr error
 	out := captureStdout(t, func() { delErr = runDelete("dev", false) })
@@ -1667,7 +1683,6 @@ func TestRunDeleteStopsAndRemovesKeepingState(t *testing.T) {
 	calls := podmanCalls(t)
 	want := []string{
 		"container exists coreshift-dev",
-		"inspect --format {{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{.HostPort}}{{end}}{{end}} coreshift-dev",
 		"stop --timeout 120 coreshift-dev",
 		"rm coreshift-dev",
 	}
@@ -1677,8 +1692,34 @@ func TestRunDeleteStopsAndRemovesKeepingState(t *testing.T) {
 	if !strings.Contains(out, "State kept at "+stateDir) {
 		t.Fatalf("output = %q, want the kept state named", out)
 	}
-	if _, err := os.Stat(filepath.Join(stateDir, releaseMarkerFilename)); err != nil {
+	if _, err := os.Stat(filepath.Join(stateDir, clusterMarkerFilename)); err != nil {
 		t.Fatal("delete removed the state directory")
+	}
+}
+
+// TestRunDeleteNotRunningKeepsState checks the delete of a cluster whose
+// container is already gone but whose state was kept: nothing is stopped,
+// and the kept state is named.
+func TestRunDeleteNotRunningKeepsState(t *testing.T) {
+	writeFakePodman(t)
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	stateDir, err := clusterDir("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeStateTree(t, stateDir, "dev")
+
+	var delErr error
+	out := captureStdout(t, func() { delErr = runDelete("dev", false) })
+	if delErr != nil {
+		t.Fatal(delErr)
+	}
+	if calls := podmanCalls(t); len(calls) != 1 || calls[0] != "container exists coreshift-dev" {
+		t.Fatalf("podman calls = %q, want only the existence check", calls)
+	}
+	if !strings.Contains(out, "not running") || !strings.Contains(out, "State kept at "+stateDir) {
+		t.Fatalf("output = %q, want the cluster reported not running with its kept state named", out)
 	}
 }
 
@@ -1689,14 +1730,13 @@ func TestRunDeleteStopsAndRemovesKeepingState(t *testing.T) {
 func TestRunDeleteCleanupRemovesState(t *testing.T) {
 	writeFakePodman(t)
 	setContainers(t, "coreshift-dev")
-	setContainerPort(t, "coreshift-dev", 7443)
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
-	stateDir, err := apiStateDir(7443)
+	stateDir, err := clusterDir("dev")
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeStateTree(t, stateDir)
+	writeStateTree(t, stateDir, "dev")
 
 	var delErr error
 	out := captureStdout(t, func() { delErr = runDelete("dev", true) })
@@ -1706,7 +1746,6 @@ func TestRunDeleteCleanupRemovesState(t *testing.T) {
 	calls := podmanCalls(t)
 	want := []string{
 		"container exists coreshift-dev",
-		"inspect --format {{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{.HostPort}}{{end}}{{end}} coreshift-dev",
 		"stop --timeout 120 coreshift-dev",
 		"rm coreshift-dev",
 	}
@@ -2052,8 +2091,9 @@ func TestWorkerPullSecretRefusesClusterWithoutSecret(t *testing.T) {
 }
 
 // TestWorkerClusterTarget checks how a worker's cluster is resolved: a
-// container cluster through its published port, and the default cluster
-// at the default port when it runs host-side, which no container marks.
+// cluster in a container through its published port, and a host-mode
+// cluster, which has no container to ask, through the port its admin
+// kubeconfig records.
 func TestWorkerClusterTarget(t *testing.T) {
 	writeFakePodman(t)
 	base := t.TempDir()
@@ -2065,24 +2105,27 @@ func TestWorkerClusterTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if port != 7443 || dir != filepath.Join(base, "coreshift", "api", "7443") {
+	if port != 7443 || dir != filepath.Join(base, "coreshift", "clusters", "dev") {
 		t.Fatalf("container cluster: port %d, dir %q", port, dir)
 	}
 
-	// Host mode: no cluster container, but the default state directory
-	// holds the admin kubeconfig a run wrote.
-	stateDir := filepath.Join(base, "coreshift", "api")
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+	// Host mode: no cluster container, but the cluster's state directory
+	// holds the admin kubeconfig a run wrote, pointing at its port.
+	stateDir := filepath.Join(base, "coreshift", "clusters", "coreshift")
+	writeClusterPullSecret(t, stateDir, nil)
+	config, err := clientcmd.LoadFromFile(filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(stateDir, certgen.AdminKubeconfigFilename), []byte("kubeconfig"), 0o600); err != nil {
+	config.Clusters["coreshift"].Server = "https://127.0.0.1:16443"
+	if err := clientcmd.WriteToFile(*config, filepath.Join(stateDir, certgen.AdminKubeconfigFilename)); err != nil {
 		t.Fatal(err)
 	}
 	port, dir, err = workerClusterTarget("coreshift")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if port != defaultAPIPort || dir != stateDir {
+	if port != 16443 || dir != stateDir {
 		t.Fatalf("host-mode cluster: port %d, dir %q", port, dir)
 	}
 

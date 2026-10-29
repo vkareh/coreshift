@@ -6,12 +6,14 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -220,7 +222,7 @@ func newVersionCommand() *cobra.Command {
 }
 
 func newClusterCommand() *cobra.Command {
-	var pullSecretPath string
+	var pullSecretPath, name string
 	var port int
 	var verbose bool
 	var release releaseOptions
@@ -238,10 +240,11 @@ func newClusterCommand() *cobra.Command {
 		// after them would bury it.
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAPI(cmd.Context(), pullSecretPath, port, verbose, release)
+			return runAPI(cmd.Context(), pullSecretPath, name, port, verbose, release)
 		},
 	}
 	cmd.Flags().StringVar(&pullSecretPath, "pull-secret", "", "path to a Red Hat pull secret with credentials for the release image registry (required)")
+	cmd.Flags().StringVar(&name, "name", defaultClusterName, "name of the cluster; its state lives in clusters/<name> under the state root")
 	cmd.Flags().IntVar(&port, "port", defaultAPIPort, "port the API server listens on")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "stream child process logs to the terminal")
 	cmd.Flags().StringVar(&release.image, "release-image", "", "exact release image reference to run, e.g. quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64")
@@ -273,8 +276,11 @@ func newWorkerCommand() *cobra.Command {
 	}
 }
 
-func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, release releaseOptions) error {
+func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose bool, release releaseOptions) error {
 	if err := refuseReservedPort(port); err != nil {
+		return err
+	}
+	if err := refuseInvalidClusterName(name); err != nil {
 		return err
 	}
 	if verbose {
@@ -282,7 +288,7 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 		// them again, like the live child logs.
 		image.Logger.SetOutput(os.Stderr)
 	}
-	stateDir, err := apiStateDir(port)
+	stateDir, err := clusterDir(name)
 	if err != nil {
 		return err
 	}
@@ -308,16 +314,16 @@ func runAPI(ctx context.Context, pullSecretPath string, port int, verbose bool, 
 	if note != "" {
 		fmt.Println(note)
 	}
-	if err := ensureReleaseMarker(stateDir, releaseRef); err != nil {
-		if err := offerFreshStart(stateDir, port, err); err != nil {
+	if err := ensureClusterMarker(stateDir, name, releaseRef); err != nil {
+		if err := offerFreshStart(stateDir, name, err); err != nil {
 			return err
 		}
 		// The offer removed the directory: rebuild it the way a first
-		// boot does, certificates and release marker included.
+		// boot does, certificates and marker included.
 		if err := prepareState(stateDir, port); err != nil {
 			return err
 		}
-		if err := ensureReleaseMarker(stateDir, releaseRef); err != nil {
+		if err := ensureClusterMarker(stateDir, name, releaseRef); err != nil {
 			return err
 		}
 	}
@@ -821,10 +827,10 @@ func newCreateClusterCommand() *cobra.Command {
 }
 
 // The container's XDG homes, and where the pull secret is mounted. The
-// host's state and cache roots are bind-mounted onto the .../coreshift
-// paths the run inside derives from its XDG environment, so
-// container-side state lands exactly where the host expects to find the
-// kubeconfig and CA.
+// cluster's state directory and the shared image cache are bind-mounted
+// onto the .../coreshift paths the run inside derives from its XDG
+// environment, so container-side state lands exactly where the host
+// expects to find the kubeconfig and CA.
 const (
 	containerStateHome  = "/var/lib/coreshift/state"
 	containerCacheHome  = "/var/lib/coreshift/cache"
@@ -832,14 +838,18 @@ const (
 )
 
 // runCreate creates a cluster container and waits for it to be ready. It
-// refuses a reserved or otherwise taken port, a taken container name, or a
-// state directory that cannot run the requested release before touching
-// anything, mints the container image from the running binary unless
-// --image names one, starts the container detached, streams its boot
-// output, and polls readiness from the host. On success the container
-// keeps running; on any failure it is removed while the state is kept.
+// refuses a reserved or otherwise taken port, a taken container name, an
+// unusable cluster name, or a state directory that cannot run the
+// requested release before touching anything, mints the container image
+// from the running binary unless --image names one, starts the container
+// detached, streams its boot output, and polls readiness from the host. On
+// success the container keeps running; on any failure it is removed while
+// the state is kept.
 func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, imagePath, pullSecretPath string, release releaseOptions) error {
 	if err := refuseReservedPort(port); err != nil {
+		return err
+	}
+	if err := refuseInvalidClusterName(name); err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
@@ -855,7 +865,7 @@ func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, 
 	if _, err := os.Stat(pullSecretPath); err != nil {
 		return fmt.Errorf("read pull secret: %w", err)
 	}
-	stateDir, err := apiStateDir(port)
+	stateDir, err := clusterDir(name)
 	if err != nil {
 		return err
 	}
@@ -882,22 +892,18 @@ func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, 
 			return err
 		}
 	}
-	stateRoot, err := stateRoot()
-	if err != nil {
-		return err
-	}
 	cacheRoot, err := image.CacheRoot()
 	if err != nil {
 		return err
 	}
-	for _, dir := range []string{stateRoot, cacheRoot} {
+	for _, dir := range []string{stateDir, cacheRoot} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
 	}
 
 	fmt.Printf("Starting container %s\n", container)
-	args := podmanRunArgs(container, port, stateRoot, cacheRoot, pullSecretPath, imageRef, release)
+	args := podmanRunArgs(container, name, port, stateDir, cacheRoot, pullSecretPath, imageRef, release)
 	run := exec.CommandContext(ctx, "podman", args...)
 	run.Stdout = io.Discard // the detached run only prints the container ID
 	run.Stderr = os.Stderr
@@ -911,11 +917,12 @@ func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, 
 // container: detached and named, the API port published as an identity
 // mapping on loopback only (bare port publishing would bind every
 // interface, and exposing the API to the network must stay an explicit
-// act), the state and cache roots bind-mounted, the pull secret mounted
-// read-only, and the release flags and port passed through to the run
-// inside. The image's entrypoint is `coreshift run cluster`, so the
-// arguments after the image reference land on it.
-func podmanRunArgs(container string, port int, stateRoot, cacheRoot, pullSecretPath, imageRef string, release releaseOptions) []string {
+// act), the cluster's state directory and the shared image cache
+// bind-mounted, the pull secret mounted read-only, and the name, the
+// release flags, and the port passed through to the run inside. The
+// image's entrypoint is `coreshift run cluster`, so the arguments after
+// the image reference land on it.
+func podmanRunArgs(container, name string, port int, stateDir, cacheRoot, pullSecretPath, imageRef string, release releaseOptions) []string {
 	return []string{
 		"run", "--detach",
 		"--name", container,
@@ -924,11 +931,12 @@ func podmanRunArgs(container string, port int, stateRoot, cacheRoot, pullSecretP
 		"--env", "XDG_CACHE_HOME=" + containerCacheHome,
 		// Shared relabeling, because host-mode runs and further
 		// cluster containers keep using the same directories.
-		"--volume", stateRoot + ":" + containerStateHome + "/coreshift:z",
+		"--volume", stateDir + ":" + filepath.Join(containerStateHome, "coreshift", clustersDirName, name) + ":z",
 		"--volume", cacheRoot + ":" + containerCacheHome + "/coreshift:z",
 		"--volume", pullSecretPath + ":" + containerPullSecret + ":ro,z",
 		imageRef,
 		"--pull-secret=" + containerPullSecret,
+		"--name=" + name,
 		"--port=" + strconv.Itoa(port),
 		"--release-image=" + release.image,
 		"--version=" + release.version,
@@ -941,19 +949,12 @@ func podmanRunArgs(container string, port int, stateRoot, cacheRoot, pullSecretP
 // release the cluster would boot, before an image is minted or a
 // container started. It resolves the requested release the same way the
 // run inside will and applies the marker's reuse rule to it, so only a
-// cross-stream move or a patch downgrade is a conflict. State data with
-// no recorded release is a deleted cluster's leftovers. On a terminal a
+// cross-stream move or a patch downgrade is a conflict. On a terminal a
 // conflict asks the same default-no fresh-start question run cluster
 // asks; without one it refuses naming --fresh.
 func checkCreateState(ctx context.Context, stateDir string, release releaseOptions, pullSecretPath string) error {
 	recorded := stateRelease(stateDir)
 	if recorded == "" {
-		if _, err := os.Stat(filepath.Join(stateDir, "etcd-data")); err == nil {
-			return offerCreateFreshStart(stateDir, fmt.Errorf(
-				"state directory %s holds data left over from a deleted cluster, with no release recorded\n"+
-					"etcd data only works with the release that created it.\n"+
-					"Use --fresh to remove it and start fresh, or a different --port to get a separate one", stateDir))
-		}
 		return nil
 	}
 	if release.image == "" && release.version == "" {
@@ -976,7 +977,7 @@ func checkCreateState(ctx context.Context, stateDir string, release releaseOptio
 		return nil
 	}
 	return offerCreateFreshStart(stateDir, stateRefusal(stateDir, recorded, releaseRef,
-		"Use --fresh to remove it and start fresh, or a different --port to get a separate one"))
+		"Use --fresh to remove it and start fresh, or a different --name to get a separate one"))
 }
 
 // refuseIfContainerExists refuses to create a container whose name is
@@ -1003,7 +1004,7 @@ func refuseIfPortBusy(port int) error {
 // waiting for the control plane's readiness from the host.
 func streamUntilReady(ctx context.Context, container, stateDir string, port int) error {
 	return streamUntil(ctx, container, "the control plane became ready",
-		func(ctx context.Context) error { return waitContainerReady(ctx, stateDir) },
+		func(ctx context.Context) error { return waitContainerReady(ctx, stateDir, port) },
 		func() {
 			printReadySummary(stateDir, port)
 			fmt.Printf("Container %s is running in the background\n", container)
@@ -1084,17 +1085,16 @@ func containerRunning(container string) (bool, error) {
 const containerReadyTimeout = 30 * time.Minute
 
 // waitContainerReady waits for the created cluster's readiness from the
-// host: first for the kubeconfig the container's boot writes into the
-// bind-mounted state directory, then for the control plane's readiness
-// through the published port, the same wait host mode runs after boot.
-func waitContainerReady(ctx context.Context, stateDir string) error {
+// host: first for the kubeconfig in the bind-mounted state directory to
+// point at the published port, then for the control plane's readiness
+// through it, the same wait host mode runs after boot. A warm re-create
+// keeps a kubeconfig from the previous port; the boot rewrites it early,
+// and the readiness client must be built from the rewritten URL.
+func waitContainerReady(ctx context.Context, stateDir string, port int) error {
 	ctx, cancel := context.WithTimeout(ctx, containerReadyTimeout)
 	defer cancel()
 	kubeconfig := filepath.Join(stateDir, certgen.AdminKubeconfigFilename)
-	for {
-		if _, err := os.Stat(kubeconfig); err == nil {
-			break
-		}
+	for !kubeconfigPointsAt(kubeconfig, port) {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -1105,6 +1105,21 @@ func waitContainerReady(ctx context.Context, stateDir string) error {
 		return fmt.Errorf("control plane not ready: %w", err)
 	}
 	return nil
+}
+
+// kubeconfigPointsAt reports whether the admin kubeconfig's server URL
+// names the given port.
+func kubeconfigPointsAt(path string, port int) bool {
+	config, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		return false
+	}
+	for _, cluster := range config.Clusters {
+		if cluster.Server == apiServerURL(port) {
+			return true
+		}
+	}
+	return false
 }
 
 // containerFailure reports a cluster container that did not become ready:
@@ -1149,10 +1164,8 @@ func containerLogTail(container string) string {
 // questions without a terminal, so its own hint names host-mode commands
 // that do not apply here.
 func stateConflictHint(logTail string) string {
-	for _, mark := range []string{"cannot be reused by", "before releases were recorded in it"} {
-		if strings.Contains(logTail, mark) {
-			return "Use --fresh to remove the state directory and start fresh, or a different --port to get a separate one"
-		}
+	if strings.Contains(logTail, "cannot be reused by") {
+		return "Use --fresh to remove the state directory and start fresh, or a different --name to get a separate one"
 	}
 	return ""
 }
@@ -1182,6 +1195,21 @@ const (
 // flag names another one.
 const defaultClusterName = "coreshift"
 
+// dnsLabelPattern is what a cluster's or worker's name may look like: a
+// DNS label, the strictest shape the node and machine objects accept. The
+// names also name directories, so they cannot carry separators.
+var dnsLabelPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+// refuseInvalidClusterName refuses a cluster name that is not a DNS
+// label: the name names the cluster's container and its state directory,
+// so it cannot carry separators.
+func refuseInvalidClusterName(name string) error {
+	if dnsLabelPattern.MatchString(name) && len(name) <= 63 {
+		return nil
+	}
+	return fmt.Errorf("cluster name %q is not a DNS label of at most 63 characters: lowercase letters, digits, and dashes", name)
+}
+
 // newCreateWorkerCommand builds the command that joins a worker to a
 // running cluster: it mints the worker's container image and join
 // material, starts one privileged worker container, and waits for the
@@ -1205,12 +1233,6 @@ func newCreateWorkerCommand() *cobra.Command {
 	return cmd
 }
 
-// workerNamePattern is what a worker's name may look like: a DNS label,
-// the strictest shape its node and machine objects accept. The name also
-// names a directory below the cluster's state directory, so it cannot
-// carry separators.
-var workerNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
-
 // runCreateWorker joins a worker to a running cluster. The name comes
 // from --name exactly as typed, or, without the flag, from counting the
 // cluster's workers. It refuses a taken worker name, an unknown cluster,
@@ -1222,7 +1244,7 @@ var workerNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 func runCreateWorker(ctx context.Context, name string, explicit bool, cluster, pullSecretPath string, verbose bool) error {
 	// A counted name is worker<number> and always fits; only a typed
 	// name can carry a shape the objects cannot.
-	if explicit && (!workerNamePattern.MatchString(name) || len(name) > 63) {
+	if explicit && (!dnsLabelPattern.MatchString(name) || len(name) > 63) {
 		return fmt.Errorf("worker name %q is not a DNS label of at most 63 characters: lowercase letters, digits, and dashes", name)
 	}
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
@@ -1540,7 +1562,7 @@ func newDeleteClusterCommand() *cobra.Command {
 			return runDelete(name, cleanup)
 		},
 	}
-	cmd.Flags().StringVar(&name, "name", "coreshift", "name of the cluster to delete")
+	cmd.Flags().StringVar(&name, "name", defaultClusterName, "name of the cluster to delete")
 	cmd.Flags().BoolVar(&cleanup, "cleanup", false, "also remove the cluster's state directory")
 	return cmd
 }
@@ -1554,26 +1576,34 @@ const containerStopSeconds = 120
 // runDelete deletes a cluster: its container is stopped and removed. The
 // state directory is kept, because deleting a cluster destroys nothing;
 // the cleanup flag opts into removing it too, with the same removal the
-// cleanup command uses.
+// cleanup command uses. A cluster whose container is already gone but
+// whose state was kept reports that and where the state is.
 func runDelete(name string, cleanup bool) error {
 	if _, err := exec.LookPath("podman"); err != nil {
 		return fmt.Errorf("podman is required to delete clusters: %w", err)
 	}
-	stateDir, err := clusterStateDir(name)
+	stateDir, err := clusterDir(name)
 	if err != nil {
 		return err
 	}
 	container := clusterContainerPrefix + name
-	fmt.Printf("Stopping container %s\n", container)
-	stop := exec.Command("podman", "stop", "--timeout", strconv.Itoa(containerStopSeconds), container)
-	stop.Stderr = os.Stderr
-	if err := stop.Run(); err != nil {
-		return fmt.Errorf("stop container: %w", err)
+	if exec.Command("podman", "container", "exists", container).Run() != nil {
+		if _, statErr := os.Stat(stateDir); statErr != nil {
+			return unknownCluster(name)
+		}
+		fmt.Printf("Cluster %s is not running\n", name)
+	} else {
+		fmt.Printf("Stopping container %s\n", container)
+		stop := exec.Command("podman", "stop", "--timeout", strconv.Itoa(containerStopSeconds), container)
+		stop.Stderr = os.Stderr
+		if err := stop.Run(); err != nil {
+			return fmt.Errorf("stop container: %w", err)
+		}
+		if err := exec.Command("podman", "rm", container).Run(); err != nil {
+			return fmt.Errorf("remove container: %w", err)
+		}
+		fmt.Printf("Deleted cluster %s\n", name)
 	}
-	if err := exec.Command("podman", "rm", container).Run(); err != nil {
-		return fmt.Errorf("remove container: %w", err)
-	}
-	fmt.Printf("Deleted cluster %s\n", name)
 	if cleanup {
 		if _, err := os.Stat(stateDir); err == nil {
 			if _, err := removeStateDir(stateDir); err != nil {
@@ -1709,7 +1739,7 @@ func runGetClusters() error {
 		if err != nil {
 			return err
 		}
-		stateDir, err := apiStateDir(port)
+		stateDir, err := clusterDir(name)
 		if err != nil {
 			return err
 		}
@@ -1738,19 +1768,19 @@ func newGetKubeconfigCommand() *cobra.Command {
 			return runGetKubeconfig(name)
 		},
 	}
-	cmd.Flags().StringVar(&name, "name", "coreshift", "name of the cluster")
+	cmd.Flags().StringVar(&name, "name", defaultClusterName, "name of the cluster")
 	return cmd
 }
 
 // runGetKubeconfig prints the path to the named cluster's admin
-// kubeconfig.
+// kubeconfig, refusing when no state exists for the name.
 func runGetKubeconfig(name string) error {
-	if _, err := exec.LookPath("podman"); err != nil {
-		return fmt.Errorf("podman is required to find a cluster's kubeconfig: %w", err)
-	}
-	stateDir, err := clusterStateDir(name)
+	stateDir, err := clusterDir(name)
 	if err != nil {
 		return err
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, certgen.AdminKubeconfigFilename)); err != nil {
+		return unknownCluster(name)
 	}
 	fmt.Println(filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
 	return nil
@@ -1861,55 +1891,63 @@ func containersNamed(prefix string) ([]string, error) {
 	return containers, nil
 }
 
-// clusterStateDir returns the named cluster's state directory, refusing
-// when no cluster with that name exists. The port the cluster's container
-// publishes decides the directory, the same resolution every other
-// command uses.
-func clusterStateDir(name string) (string, error) {
-	_, dir, err := clusterTarget(name)
-	return dir, err
-}
-
-// clusterTarget resolves a container-mode cluster to its port and state
-// directory through its published port, refusing when no cluster with
-// that name exists.
+// clusterTarget resolves a cluster running in a container to its port and
+// state directory, refusing when no cluster with that name exists. The
+// state directory comes from the name directly; only the port is asked of
+// the container, which is where this deployment's API server binds.
 func clusterTarget(name string) (int, string, error) {
 	container := clusterContainerPrefix + name
 	if exec.Command("podman", "container", "exists", container).Run() != nil {
-		return 0, "", fmt.Errorf("no cluster named %s", name)
+		return 0, "", unknownCluster(name)
 	}
 	port, err := containerPort(container)
 	if err != nil {
 		return 0, "", err
 	}
-	dir, err := apiStateDir(port)
+	dir, err := clusterDir(name)
 	if err != nil {
 		return 0, "", err
 	}
 	return port, dir, nil
 }
 
-// workerClusterTarget resolves the cluster a worker joins to its port
-// and state directory: a container cluster through its published port,
-// the way every other cluster command resolves it, and the default
-// cluster at the default port when it runs host-side, where no container
-// exists to ask. The admin kubeconfig in the default state directory
-// marks a host-side cluster.
+// workerClusterTarget resolves the cluster a worker joins to its port and
+// state directory: a cluster in a container through its published port,
+// and a host-mode cluster, which has no container to ask, through the
+// port its admin kubeconfig records — boot rewrites the kubeconfig to the
+// port in use, so it names where a running cluster answers.
 func workerClusterTarget(cluster string) (int, string, error) {
 	port, stateDir, err := clusterTarget(cluster)
 	if err == nil {
 		return port, stateDir, nil
 	}
-	if cluster == defaultClusterName {
-		stateDir, dirErr := apiStateDir(defaultAPIPort)
-		if dirErr != nil {
-			return 0, "", dirErr
-		}
-		if _, statErr := os.Stat(filepath.Join(stateDir, certgen.AdminKubeconfigFilename)); statErr == nil {
-			return defaultAPIPort, stateDir, nil
-		}
+	dir, dirErr := clusterDir(cluster)
+	if dirErr != nil {
+		return 0, "", dirErr
+	}
+	if port := kubeconfigServerPort(dir); port != 0 {
+		return port, dir, nil
 	}
 	return 0, "", err
+}
+
+// kubeconfigServerPort returns the port the admin kubeconfig's server URL
+// names, or zero when there is none to read.
+func kubeconfigServerPort(stateDir string) int {
+	config, err := clientcmd.LoadFromFile(filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
+	if err != nil {
+		return 0
+	}
+	for _, cluster := range config.Clusters {
+		server, err := url.Parse(cluster.Server)
+		if err != nil {
+			continue
+		}
+		if port, err := strconv.Atoi(server.Port()); err == nil {
+			return port
+		}
+	}
+	return 0
 }
 
 // containerLabel returns the value of a container's label, or an empty
@@ -1938,16 +1976,6 @@ func containerPort(container string) (int, error) {
 		return 0, fmt.Errorf("read %s's published port: %w", container, err)
 	}
 	return port, nil
-}
-
-// stateRelease returns the release image reference recorded in a state
-// directory, or an empty string when it records none.
-func stateRelease(stateDir string) string {
-	release, err := os.ReadFile(filepath.Join(stateDir, releaseMarkerFilename))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(release))
 }
 
 // bootRelease returns the release image reference this run boots, with a
@@ -2011,24 +2039,24 @@ func clusterReady(port int) bool {
 }
 
 // newCleanupCommand builds the command that removes CoreShift's on-disk
-// artifacts: the state directories, and with --cache the shared image
+// artifacts: cluster state directories, and with --cache the shared image
 // cache.
 func newCleanupCommand() *cobra.Command {
-	var port int
+	var name string
 	var all bool
 	var clearCache bool
 	cmd := &cobra.Command{
 		Use:   "cleanup",
-		Short: "Remove CoreShift state directories and cache",
+		Short: "Remove CoreShift cluster state and cache",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if all && cmd.Flags().Changed("port") {
-				return fmt.Errorf("--all already removes every state directory; drop --port")
+			if all && cmd.Flags().Changed("name") {
+				return fmt.Errorf("--all already removes every cluster's state; drop --name")
 			}
-			return runCleanup(port, all, clearCache)
+			return runCleanup(name, all, clearCache)
 		},
 	}
-	cmd.Flags().IntVar(&port, "port", defaultAPIPort, "port whose state directory is removed")
-	cmd.Flags().BoolVar(&all, "all", false, "remove every state directory: the default one and all per-port ones")
+	cmd.Flags().StringVar(&name, "name", defaultClusterName, "name of the cluster whose state directory is removed")
+	cmd.Flags().BoolVar(&all, "all", false, "remove every cluster's state: the whole clusters tree")
 	cmd.Flags().BoolVar(&clearCache, "cache", false, "also remove the shared image cache, which the next run rebuilds by re-pulling")
 	return cmd
 }
@@ -2040,12 +2068,14 @@ type cleanupTarget struct {
 	kind string
 }
 
-// runCleanup removes the chosen state directories and, with clearCache,
-// the shared image cache. It refuses while a control plane is running,
-// because cleaning under a live instance would pull its data out from
-// under it. A missing directory is reported, not an error, so the command
-// is safe to re-run and to call from scripts.
-func runCleanup(port int, all, clearCache bool) error {
+// runCleanup removes the chosen cluster state and, with clearCache, the
+// shared image cache. It owns the clusters tree and nothing else under
+// the state root, so unrelated directories kept there survive. It refuses
+// while a control plane is running, because cleaning under a live
+// instance would pull its data out from under it. A missing directory is
+// reported, not an error, so the command is safe to re-run and to call
+// from scripts.
+func runCleanup(name string, all, clearCache bool) error {
 	running, err := runningControlPlane()
 	if err != nil {
 		return err
@@ -2054,7 +2084,7 @@ func runCleanup(port int, all, clearCache bool) error {
 		return fmt.Errorf("a CoreShift control plane is running:\n  %s\n"+
 			"Stop it first; cleaning up under a running control plane would pull its data out from under it", running)
 	}
-	targets, err := cleanupTargets(port, all)
+	targets, err := cleanupTargets(name, all)
 	if err != nil {
 		return err
 	}
@@ -2079,59 +2109,52 @@ func runCleanup(port int, all, clearCache bool) error {
 		freed += size
 		removed = true
 	}
-	// A full cleanup leaves nothing behind: drop the state directories'
-	// parents once they are empty. Removing a non-empty parent fails and
-	// is ignored.
-	apiRoot, err := apiStateDir(defaultAPIPort)
+	// A cleanup leaves no empty shells behind: the clusters tree and the
+	// state root go too once they are empty. Removing a non-empty
+	// directory fails and is ignored, so kept siblings survive.
+	tree, err := clustersTree()
 	if err != nil {
 		return err
 	}
-	_ = os.Remove(apiRoot)
-	_ = os.Remove(filepath.Dir(apiRoot))
+	_ = os.Remove(tree)
+	_ = os.Remove(filepath.Dir(tree))
 	if removed {
 		fmt.Printf("Freed %s\n", humanSize(freed))
 	}
 	return nil
 }
 
-// cleanupTargets lists the state directories to remove: one port's, or
-// with all every per-port directory followed by the default one. The
-// default one comes last so its size, measured right before its removal,
-// counts only the content the earlier removals left.
-func cleanupTargets(port int, all bool) ([]cleanupTarget, error) {
+// cleanupTargets lists the state to remove: the named cluster's
+// directory, or with all every cluster directory followed by the clusters
+// tree itself. The tree comes last so its size, measured right before its
+// removal, counts only the content the earlier removals left.
+func cleanupTargets(name string, all bool) ([]cleanupTarget, error) {
 	if !all {
-		dir, err := apiStateDir(port)
+		dir, err := clusterDir(name)
 		if err != nil {
 			return nil, err
 		}
 		return []cleanupTarget{{path: dir, kind: "state directory"}}, nil
 	}
-	apiRoot, err := apiStateDir(defaultAPIPort)
+	tree, err := clustersTree()
 	if err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(apiRoot)
+	entries, err := os.ReadDir(tree)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return []cleanupTarget{{path: apiRoot, kind: "state directory"}}, nil
+			return []cleanupTarget{{path: tree, kind: "clusters tree"}}, nil
 		}
 		return nil, err
 	}
 	var targets []cleanupTarget
 	for _, entry := range entries {
-		if !entry.IsDir() || !isPortName(entry.Name()) {
+		if !entry.IsDir() {
 			continue
 		}
-		targets = append(targets, cleanupTarget{path: filepath.Join(apiRoot, entry.Name()), kind: "state directory"})
+		targets = append(targets, cleanupTarget{path: filepath.Join(tree, entry.Name()), kind: "state directory"})
 	}
-	return append(targets, cleanupTarget{path: apiRoot, kind: "state directory"}), nil
-}
-
-// isPortName reports whether name names a per-port state directory; the
-// layout names them after their port, and nothing else there is.
-func isPortName(name string) bool {
-	_, err := strconv.Atoi(name)
-	return err == nil
+	return append(targets, cleanupTarget{path: tree, kind: "clusters tree"}), nil
 }
 
 // runningControlPlane returns the command line of a running CoreShift
@@ -2254,21 +2277,61 @@ func humanSize(size int64) string {
 	}
 }
 
-// apiStateDir returns the XDG state directory holding the generated
-// certificates and etcd data, so they survive across runs. The default
-// port keeps the original location; any other port gets its own
-// subdirectory, so runs on different ports do not share certificates
-// or etcd data.
-func apiStateDir(port int) (string, error) {
+// clustersDirName is the directory under the state root holding every
+// cluster's state: one directory per cluster, named after it. The name is
+// the cluster's identity in state; the port its API server binds this
+// deployment appears nowhere in it.
+const clustersDirName = "clusters"
+
+// clusterDir returns the named cluster's state directory.
+func clusterDir(name string) (string, error) {
 	root, err := stateRoot()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(root, "api")
-	if port != defaultAPIPort {
-		dir = filepath.Join(dir, strconv.Itoa(port))
+	return filepath.Join(root, clustersDirName, name), nil
+}
+
+// clustersTree returns the directory holding every cluster's state.
+func clustersTree() (string, error) {
+	root, err := stateRoot()
+	if err != nil {
+		return "", err
 	}
-	return dir, nil
+	return filepath.Join(root, clustersDirName), nil
+}
+
+// existingClusters lists the names of the clusters that exist: the
+// directories under the clusters tree.
+func existingClusters() ([]string, error) {
+	tree, err := clustersTree()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(tree)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			names = append(names, entry.Name())
+		}
+	}
+	return names, nil
+}
+
+// unknownCluster is the error for a name no cluster exists under, naming
+// the clusters that do.
+func unknownCluster(name string) error {
+	clusters, err := existingClusters()
+	if err != nil || len(clusters) == 0 {
+		return fmt.Errorf("no cluster named %s", name)
+	}
+	return fmt.Errorf("no cluster named %s; clusters that exist: %s", name, strings.Join(clusters, ", "))
 }
 
 // stateRoot returns the directory CoreShift keeps its state below:
@@ -2285,48 +2348,78 @@ func stateRoot() (string, error) {
 	return filepath.Join(base, "coreshift"), nil
 }
 
-// releaseMarkerFilename records which release image created the state
-// directory's etcd data. etcd data only moves within the release's minor
-// stream, so the marker is checked before anything starts: a newer patch
+// clusterMarkerFilename records a cluster state directory's name and the
+// release image that created its etcd data, so the directory is
+// self-describing. etcd data only moves within the release's minor
+// stream, so the release is checked before anything starts: a newer patch
 // of the stream upgrades the directory in place, anything else refuses.
-const releaseMarkerFilename = "release-image"
+const clusterMarkerFilename = "cluster"
 
-// ensureReleaseMarker refuses to reuse a state directory whose etcd data
-// cannot run the release this run resolved, and records the release on a
-// fresh directory. A newer patch of the same minor stream reuses the
-// directory as an in-place upgrade, the same move a real OpenShift
-// cluster makes on a patch update; anything else refuses.
-func ensureReleaseMarker(stateDir, releaseRef string) error {
-	marker := filepath.Join(stateDir, releaseMarkerFilename)
-	recorded, err := os.ReadFile(marker)
-	if err == nil {
-		created := strings.TrimSpace(string(recorded))
-		if releaseReuse(created, releaseRef) {
-			if created == releaseRef {
-				return nil
-			}
-			// An in-place upgrade: the marker moves to the new release.
-			if err := os.WriteFile(marker, []byte(releaseRef), 0o644); err != nil {
-				return fmt.Errorf("write release marker: %w", err)
-			}
-			return nil
-		}
-		return stateRefusal(stateDir, created, releaseRef,
-			fmt.Sprintf("Use a different --port to get a separate state directory, or remove %s to start fresh", stateDir))
+// clusterMarker is the content of a cluster state directory's marker.
+type clusterMarker struct {
+	Name    string `json:"name"`
+	Release string `json:"release"`
+}
+
+// readClusterMarker returns the marker a state directory records, or the
+// zero marker when it records none.
+func readClusterMarker(stateDir string) (clusterMarker, error) {
+	data, err := os.ReadFile(filepath.Join(stateDir, clusterMarkerFilename))
+	if os.IsNotExist(err) {
+		return clusterMarker{}, nil
 	}
-	if !os.IsNotExist(err) {
-		return fmt.Errorf("read release marker: %w", err)
+	if err != nil {
+		return clusterMarker{}, fmt.Errorf("read cluster marker: %w", err)
 	}
-	if _, err := os.Stat(filepath.Join(stateDir, "etcd-data")); err == nil {
-		return fmt.Errorf("state directory %s has etcd data from before releases were recorded in it\n"+
-			"etcd data only works with the release that created it.\n"+
-			"Use a different --port to get a separate state directory, or remove %s to start fresh",
-			stateDir, stateDir)
+	var marker clusterMarker
+	if err := json.Unmarshal(data, &marker); err != nil {
+		return clusterMarker{}, fmt.Errorf("parse cluster marker: %w", err)
 	}
-	if err := os.WriteFile(marker, []byte(releaseRef), 0o644); err != nil {
-		return fmt.Errorf("write release marker: %w", err)
+	return marker, nil
+}
+
+// writeClusterMarker records a cluster's name and release in its state
+// directory.
+func writeClusterMarker(stateDir string, marker clusterMarker) error {
+	data, err := json.Marshal(marker)
+	if err != nil {
+		return fmt.Errorf("encode cluster marker: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, clusterMarkerFilename), data, 0o644); err != nil {
+		return fmt.Errorf("write cluster marker: %w", err)
 	}
 	return nil
+}
+
+// stateRelease returns the release a state directory's marker records, or
+// an empty string when it records none.
+func stateRelease(stateDir string) string {
+	marker, err := readClusterMarker(stateDir)
+	if err != nil {
+		return ""
+	}
+	return marker.Release
+}
+
+// ensureClusterMarker refuses to reuse a state directory whose etcd data
+// cannot run the release this run resolved, and records the cluster's
+// name and the release on a fresh directory. A newer patch of the same
+// minor stream reuses the directory as an in-place upgrade, the same move
+// a real OpenShift cluster makes on a patch update; anything else
+// refuses.
+func ensureClusterMarker(stateDir, name, releaseRef string) error {
+	marker, err := readClusterMarker(stateDir)
+	if err != nil {
+		return err
+	}
+	if marker.Release != "" && !releaseReuse(marker.Release, releaseRef) {
+		return stateRefusal(stateDir, marker.Release, releaseRef,
+			fmt.Sprintf("Use a different --name to get a separate state directory, or remove %s to start fresh", stateDir))
+	}
+	if marker.Name == name && marker.Release == releaseRef {
+		return nil
+	}
+	return writeClusterMarker(stateDir, clusterMarker{Name: name, Release: releaseRef})
 }
 
 // releaseReuse reports whether a state directory recorded as created by
@@ -2359,9 +2452,9 @@ func stateRefusal(stateDir, recorded, releaseRef, remedy string) error {
 // removes it and returns nil, so the run continues from scratch. Any
 // other answer returns the refusal. Without a terminal it does not ask
 // and returns the refusal with a hint at the cleanup command.
-func offerFreshStart(stateDir string, port int, refusal error) error {
+func offerFreshStart(stateDir, name string, refusal error) error {
 	return askFreshStart(stateDir, refusal,
-		fmt.Sprintf("To remove it without a prompt, run: coreshift cleanup --port %d", port))
+		fmt.Sprintf("To remove it without a prompt, run: coreshift cleanup --name %s", name))
 }
 
 // offerCreateFreshStart offers the same for a create, whose scripted
