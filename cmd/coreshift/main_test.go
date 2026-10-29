@@ -1735,7 +1735,7 @@ func TestGetCommandsRequirePodman(t *testing.T) {
 // podman when it is missing.
 func TestDeleteRequiresPodman(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	err := runDelete("dev", false)
+	err := runDelete(context.Background(), "dev", false)
 	if err == nil || !strings.Contains(err.Error(), "podman") {
 		t.Fatalf("err = %v, want an error naming podman", err)
 	}
@@ -1802,13 +1802,14 @@ func TestRunDeleteStopsAndRemovesPreservingState(t *testing.T) {
 	writeStateTree(t, stateDir, "dev")
 
 	var delErr error
-	out := captureStdout(t, func() { delErr = runDelete("dev", false) })
+	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false) })
 	if delErr != nil {
 		t.Fatal(delErr)
 	}
 	calls := podmanCalls(t)
 	want := []string{
 		"container exists coreshift-dev",
+		"ps -a --format {{.Names}}",
 		"stop --timeout 120 coreshift-dev",
 		"rm coreshift-dev",
 	}
@@ -1837,12 +1838,16 @@ func TestRunDeleteNotRunningPreservesState(t *testing.T) {
 	writeStateTree(t, stateDir, "dev")
 
 	var delErr error
-	out := captureStdout(t, func() { delErr = runDelete("dev", false) })
+	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false) })
 	if delErr != nil {
 		t.Fatal(delErr)
 	}
-	if calls := podmanCalls(t); len(calls) != 1 || calls[0] != "container exists coreshift-dev" {
-		t.Fatalf("podman calls = %q, want only the existence check", calls)
+	want := []string{
+		"container exists coreshift-dev",
+		"ps -a --format {{.Names}}",
+	}
+	if calls := podmanCalls(t); !slices.Equal(calls, want) {
+		t.Fatalf("podman calls = %q, want only the existence check and the worker listing", calls)
 	}
 	if !strings.Contains(out, "not running") || !strings.Contains(out, "State preserved at "+stateDir) {
 		t.Fatalf("output = %q, want the cluster reported not running with its preserved state named", out)
@@ -1865,13 +1870,14 @@ func TestRunDeleteCleanupRemovesState(t *testing.T) {
 	writeStateTree(t, stateDir, "dev")
 
 	var delErr error
-	out := captureStdout(t, func() { delErr = runDelete("dev", true) })
+	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", true) })
 	if delErr != nil {
 		t.Fatal(delErr)
 	}
 	calls := podmanCalls(t)
 	want := []string{
 		"container exists coreshift-dev",
+		"ps -a --format {{.Names}}",
 		"stop --timeout 120 coreshift-dev",
 		"rm coreshift-dev",
 	}
@@ -1892,13 +1898,99 @@ func TestRunDeleteCleanupRemovesState(t *testing.T) {
 func TestRunDeleteMissingCluster(t *testing.T) {
 	for _, cleanup := range []bool{false, true} {
 		writeFakePodman(t)
-		err := runDelete("nope", cleanup)
+		err := runDelete(context.Background(), "nope", cleanup)
 		if err == nil || !strings.Contains(err.Error(), "no cluster named nope") {
 			t.Fatalf("cleanup=%v: err = %v, want a plain refusal", cleanup, err)
 		}
 		if calls := podmanCalls(t); len(calls) != 1 || calls[0] != "container exists coreshift-nope" {
 			t.Fatalf("cleanup=%v: podman calls = %q, want only the existence check", cleanup, calls)
 		}
+	}
+}
+
+// TestRunDeleteCascadesWorkers checks the cascade: deleting a cluster
+// deletes each of its workers the way delete worker does, containers
+// stopped and removed, before the cluster's own container goes. Another
+// cluster's workers are left alone.
+func TestRunDeleteCascadesWorkers(t *testing.T) {
+	writeFakePodman(t)
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	setContainers(t, "coreshift-dev", "coreshift-worker-worker1", "coreshift-worker-worker2", "coreshift-worker-foreign")
+	setContainerLabel(t, "coreshift-worker-worker1", "dev")
+	setContainerLabel(t, "coreshift-worker-worker2", "dev")
+	setContainerLabel(t, "coreshift-worker-foreign", "nope")
+	stateDir, err := clusterDir("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeStateTree(t, stateDir, "dev")
+
+	var delErr error
+	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false) })
+	if delErr != nil {
+		t.Fatal(delErr)
+	}
+	var stops []string
+	for _, call := range podmanCalls(t) {
+		if strings.HasPrefix(call, "stop --timeout") {
+			stops = append(stops, call)
+		}
+	}
+	want := []string{
+		"stop --timeout 120 coreshift-worker-worker1",
+		"stop --timeout 120 coreshift-worker-worker2",
+		"stop --timeout 120 coreshift-dev",
+	}
+	if !slices.Equal(stops, want) {
+		t.Fatalf("stops = %q\nwant %q", stops, want)
+	}
+	for _, want := range []string{
+		"Deleted worker worker1",
+		"Deleted worker worker2",
+		"Deleted cluster dev",
+		"State preserved at " + stateDir,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output = %q, want %q named", out, want)
+		}
+	}
+	if strings.Contains(out, "foreign") {
+		t.Fatalf("another cluster's worker was deleted too:\n%s", out)
+	}
+}
+
+// TestRunDeleteWorkerWithoutClusterState checks the edge a cascade can
+// hit too: a worker whose cluster's state directory is gone is still
+// stopped and removed, with a note that its node went with the data.
+func TestRunDeleteWorkerWithoutClusterState(t *testing.T) {
+	writeFakePodman(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	setContainers(t, "coreshift-worker-w1")
+	setContainerLabel(t, "coreshift-worker-w1", "dev")
+
+	var delErr error
+	out := captureStdout(t, func() { delErr = runDeleteWorker(context.Background(), "w1") })
+	if delErr != nil {
+		t.Fatal(delErr)
+	}
+	calls := podmanCalls(t)
+	want := []string{
+		"container exists coreshift-worker-w1",
+		`inspect --format {{index .Config.Labels "coreshift-cluster"}} coreshift-worker-w1`,
+		"stop --timeout 120 coreshift-worker-w1",
+		"rm coreshift-worker-w1",
+	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("podman calls = %q\nwant %q", calls, want)
+	}
+	for _, want := range []string{"Deleted worker w1", "no state left"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output = %q, want %q named", out, want)
+		}
+	}
+	if strings.Contains(out, "not running") {
+		t.Fatalf("output = %q, want the state-gone note, not the not-running one", out)
 	}
 }
 
