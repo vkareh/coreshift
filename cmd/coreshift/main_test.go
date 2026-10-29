@@ -94,6 +94,53 @@ func writeStaleServiceServingCert(t *testing.T, stateDir string) {
 	}
 }
 
+// TestFollowAPIPort checks the port mobility contract: a warm boot on a
+// different port rewrites every kubeconfig's server URL to the port in
+// use while leaving the certificates, which encode no port, untouched.
+func TestFollowAPIPort(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := ensureCertificates(stateDir, 6443); err != nil {
+		t.Fatal(err)
+	}
+	caBefore := readFile(t, stateDir, certgen.CACertFilename)
+
+	if err := followAPIPort(stateDir, 7443); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range kubeconfigFilenames {
+		config, err := clientcmd.LoadFromFile(filepath.Join(stateDir, name))
+		if err != nil {
+			t.Fatalf("load %s: %v", name, err)
+		}
+		if server := config.Clusters["coreshift"].Server; server != apiServerURL(7443) {
+			t.Fatalf("%s server = %q, want %q", name, server, apiServerURL(7443))
+		}
+	}
+	if err := ensureCertificates(stateDir, 7443); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(caBefore, readFile(t, stateDir, certgen.CACertFilename)) {
+		t.Fatal("the port change regenerated the certificates")
+	}
+}
+
+// TestFollowAPIPortLeavesMatchingKubeconfigs checks that a warm boot on
+// the same port rewrites nothing.
+func TestFollowAPIPortLeavesMatchingKubeconfigs(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := ensureCertificates(stateDir, 6443); err != nil {
+		t.Fatal(err)
+	}
+	before := readFile(t, stateDir, certgen.AdminKubeconfigFilename)
+
+	if err := followAPIPort(stateDir, 6443); err != nil {
+		t.Fatal(err)
+	}
+	if after := readFile(t, stateDir, certgen.AdminKubeconfigFilename); !bytes.Equal(before, after) {
+		t.Fatal("kubeconfig was rewritten although the port already matched")
+	}
+}
+
 func TestRestoreAdminContextSwitchesBackFromLoginContext(t *testing.T) {
 	stateDir := t.TempDir()
 	if err := ensureCertificates(stateDir, defaultAPIPort); err != nil {
