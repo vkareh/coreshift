@@ -1135,7 +1135,8 @@ const defaultClusterName = "coreshift"
 // newCreateWorkerCommand builds the command that joins a worker to a
 // running cluster: it mints the worker's container image and join
 // material, starts one privileged worker container, and waits for the
-// worker's node to register.
+// worker's node to register. Without --name the worker is named by
+// counting the cluster's workers.
 func newCreateWorkerCommand() *cobra.Command {
 	var pullSecretPath, name, cluster string
 	var verbose bool
@@ -1144,11 +1145,11 @@ func newCreateWorkerCommand() *cobra.Command {
 		Short:        "Join a worker to a cluster in a podman container",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runCreateWorker(cmd.Context(), name, cluster, pullSecretPath, verbose)
+			return runCreateWorker(cmd.Context(), name, cmd.Flags().Changed("name"), cluster, pullSecretPath, verbose)
 		},
 	}
 	cmd.Flags().StringVar(&pullSecretPath, "pull-secret", "", "path to a Red Hat pull secret, as a fallback for clusters created before the cluster stored one")
-	cmd.Flags().StringVar(&name, "name", "worker1", "name of the worker; its container is called coreshift-worker-<name> and its node carries the name")
+	cmd.Flags().StringVar(&name, "name", "", "name of the worker; defaults to worker<number>, one past the cluster's worker count, skipping names in use; its container is called coreshift-worker-<name> and its node carries the name")
 	cmd.Flags().StringVar(&cluster, "cluster", defaultClusterName, "name of the cluster the worker joins")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "stream the image build's output to the terminal")
 	return cmd
@@ -1160,15 +1161,18 @@ func newCreateWorkerCommand() *cobra.Command {
 // carry separators.
 var workerNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
-// runCreateWorker joins a worker to a running cluster. It refuses a
-// taken worker name, an unknown cluster, or a cluster whose API is not
-// answering before touching anything, mints the join material and the
-// worker image, starts the container detached, streams its boot output,
-// and waits for the worker's node to register. On success the container
-// keeps running; on any failure it is removed, with the join material,
-// while the cluster's state is kept.
-func runCreateWorker(ctx context.Context, name, cluster, pullSecretPath string, verbose bool) error {
-	if !workerNamePattern.MatchString(name) || len(name) > 63 {
+// runCreateWorker joins a worker to a running cluster. The name comes
+// from --name exactly as typed, or, without the flag, from counting the
+// cluster's workers. It refuses a taken worker name, an unknown cluster,
+// or a cluster whose API is not answering before touching anything,
+// mints the join material and the worker image, starts the container
+// detached, streams its boot output, and waits for the worker's node to
+// register. On success the container keeps running; on any failure it is
+// removed, with the join material, while the cluster's state is kept.
+func runCreateWorker(ctx context.Context, name string, explicit bool, cluster, pullSecretPath string, verbose bool) error {
+	// A counted name is worker<number> and always fits; only a typed
+	// name can carry a shape the objects cannot.
+	if explicit && (!workerNamePattern.MatchString(name) || len(name) > 63) {
 		return fmt.Errorf("worker name %q is not a DNS label of at most 63 characters: lowercase letters, digits, and dashes", name)
 	}
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
@@ -1176,6 +1180,14 @@ func runCreateWorker(ctx context.Context, name, cluster, pullSecretPath string, 
 
 	if _, err := exec.LookPath("podman"); err != nil {
 		return fmt.Errorf("podman is required to create workers: %w", err)
+	}
+	if !explicit {
+		counted, err := nextWorkerName(cluster)
+		if err != nil {
+			return err
+		}
+		name = counted
+		fmt.Printf("Worker name: %s\n", name)
 	}
 	if pullSecretPath != "" {
 		abs, err := filepath.Abs(pullSecretPath)
@@ -1211,6 +1223,29 @@ func runCreateWorker(ctx context.Context, name, cluster, pullSecretPath string, 
 		return err
 	}
 	return nil
+}
+
+// nextWorkerName picks the name a bare worker creation takes: the number
+// is one past the count of the cluster's existing workers — not the
+// first free slot — and skips upward past any worker name already in
+// use, so repeated bare commands scale out without colliding.
+func nextWorkerName(cluster string) (string, error) {
+	containers, err := containersNamed(workerContainerPrefix)
+	if err != nil {
+		return "", err
+	}
+	count := 0
+	for _, container := range containers {
+		if label, err := containerLabel(container, workerClusterLabel); err == nil && label == cluster {
+			count++
+		}
+	}
+	for n := count + 1; ; n++ {
+		name := fmt.Sprintf("worker%d", n)
+		if exec.Command("podman", "container", "exists", workerContainerPrefix+name).Run() != nil {
+			return name, nil
+		}
+	}
 }
 
 // launchWorker mints the worker image from the release the cluster

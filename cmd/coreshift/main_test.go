@@ -1707,12 +1707,13 @@ func TestDeleteClusterFlagDefaults(t *testing.T) {
 }
 
 // TestCreateWorkerFlagDefaults checks that the worker creation flags are
-// accepted and come with the documented defaults, and that the pull
-// secret is optional: the cluster's stored one is the default.
+// accepted and come with the documented defaults — the name has none,
+// because a bare creation counts it — and that the pull secret is
+// optional: the cluster's stored one is the default.
 func TestCreateWorkerFlagDefaults(t *testing.T) {
 	cmd := newCreateWorkerCommand()
 	for name, want := range map[string]string{
-		"name":        "worker1",
+		"name":        "",
 		"cluster":     "coreshift",
 		"verbose":     "false",
 		"pull-secret": "",
@@ -1722,6 +1723,9 @@ func TestCreateWorkerFlagDefaults(t *testing.T) {
 		} else if flag.DefValue != want {
 			t.Fatalf("--%s default = %q, want %q", name, flag.DefValue, want)
 		}
+	}
+	if usage := cmd.Flags().Lookup("name").Usage; !strings.Contains(usage, "count") {
+		t.Fatalf("--name usage = %q, want the counting default described", usage)
 	}
 	if _, required := cmd.Flags().Lookup("pull-secret").Annotations[cobra.BashCompOneRequiredFlag]; required {
 		t.Fatal("pull secret must not be required: the cluster's stored one is the default")
@@ -1782,7 +1786,7 @@ func TestRunCreateWorkerRefusals(t *testing.T) {
 		setContainers(t, "coreshift-worker-w1", "coreshift-dev")
 		setContainerPort(t, "coreshift-dev", 17443)
 
-		err := runCreateWorker(context.Background(), tc.worker, tc.cluster, "", false)
+		err := runCreateWorker(context.Background(), tc.worker, true, tc.cluster, "", false)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: err = %v, want a refusal containing %q", name, err, tc.want)
 		}
@@ -1797,9 +1801,100 @@ func TestRunCreateWorkerRefusals(t *testing.T) {
 // flag pointing at no file is refused before anything is minted.
 func TestRunCreateWorkerRefusesMissingFlagFile(t *testing.T) {
 	writeFakePodman(t)
-	err := runCreateWorker(context.Background(), "fresh", "coreshift", "/nonexistent/pull-secret", false)
+	err := runCreateWorker(context.Background(), "fresh", true, "coreshift", "/nonexistent/pull-secret", false)
 	if err == nil || !strings.Contains(err.Error(), "read pull secret") {
 		t.Fatalf("err = %v, want a refusal naming the pull secret", err)
+	}
+}
+
+// TestNextWorkerName checks the counting rule a bare worker creation
+// names by: the number is one past the cluster's worker count — not the
+// first free slot — and skips upward past any name already in use, so
+// gaps left by deletions never cause a collision.
+func TestNextWorkerName(t *testing.T) {
+	for name, tc := range map[string]struct {
+		cluster string
+		workers map[string]string // worker container → its cluster label
+		want    string
+	}{
+		"fresh cluster": {
+			cluster: "dev",
+			want:    "worker1",
+		},
+		"one worker named foo": {
+			cluster: "dev",
+			workers: map[string]string{"coreshift-worker-foo": "dev"},
+			want:    "worker2",
+		},
+		"three workers count to the fourth": {
+			cluster: "dev",
+			workers: map[string]string{
+				"coreshift-worker-worker1": "dev",
+				"coreshift-worker-worker2": "dev",
+				"coreshift-worker-worker3": "dev",
+			},
+			want: "worker4",
+		},
+		"deleted middle leaves the number skipped": {
+			cluster: "dev",
+			workers: map[string]string{
+				"coreshift-worker-worker1": "dev",
+				"coreshift-worker-worker3": "dev",
+			},
+			want: "worker4",
+		},
+		"another cluster's workers do not count": {
+			cluster: "dev",
+			workers: map[string]string{
+				"coreshift-worker-foo":     "dev",
+				"coreshift-worker-worker1": "other",
+			},
+			want: "worker2",
+		},
+		"a name taken by another cluster's worker is skipped": {
+			cluster: "dev",
+			workers: map[string]string{
+				"coreshift-worker-foo":     "dev",
+				"coreshift-worker-worker2": "other",
+			},
+			want: "worker3",
+		},
+	} {
+		writeFakePodman(t)
+		names := make([]string, 0, len(tc.workers))
+		for container, label := range tc.workers {
+			names = append(names, container)
+			setContainerLabel(t, container, label)
+		}
+		setContainers(t, names...)
+
+		got, err := nextWorkerName(tc.cluster)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != tc.want {
+			t.Fatalf("%s: name = %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
+// TestRunCreateWorkerBarePrintsCountedName checks that a bare creation
+// picks the counted name and prints it, so the command is never
+// mysterious about what it is creating.
+func TestRunCreateWorkerBarePrintsCountedName(t *testing.T) {
+	writeFakePodman(t)
+	setContainers(t, "coreshift-worker-foo")
+	setContainerLabel(t, "coreshift-worker-foo", "nope")
+
+	var err error
+	out := captureStdout(t, func() {
+		err = runCreateWorker(context.Background(), "", false, "nope", "", false)
+	})
+	if err == nil || !strings.Contains(err.Error(), "no cluster named nope") {
+		t.Fatalf("err = %v, want the unknown-cluster refusal after the pick", err)
+	}
+	if !strings.Contains(out, "Worker name: worker2") {
+		t.Fatalf("output = %q, want the counted name printed prominently", out)
 	}
 }
 

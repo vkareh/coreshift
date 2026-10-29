@@ -404,6 +404,13 @@ cluster` terminal alone and use another one — join a worker to it:
 ./coreshift create worker
 ```
 
+The worker's name is picked by counting: with no `--name`, the number is
+one past the count of the cluster's workers — the first worker is
+`worker1`, the next `worker2` — and any name already in use is skipped
+past, so repeated bare commands scale out without flags and never
+collide with each other. The chosen name prints before anything is
+minted.
+
 The command mints the join material, mints the worker image from the
 release the cluster records — pulling the rhel-coreos base with the pull
 secret the cluster stores, kept only as a throwaway credentials file for
@@ -413,6 +420,7 @@ appears the first time only; a later create skips it, because the image
 is tagged from the running binary:
 
 ```
+Worker name: worker1
 Minting the bootstrap identity
 Minting the machine stand-in
 Building container image localhost/coreshift-worker:46637e0-80ad7a553365
@@ -498,9 +506,13 @@ starts from nothing.
   build pulls the rhel-coreos base with the stored secret otherwise; a
   cluster that stores none is refused without this flag, naming the
   flag and the re-creation as the ways through.
-- `--name`: the worker's name, `worker1` by default. The container is
-  called `coreshift-worker-<name>`, the node carries the name, and a
-  second worker needs its own.
+- `--name`: the worker's name, used exactly as typed. Without it the name
+  is `worker<number>`, where the number is one past the count of the
+  cluster's existing workers — a cluster holding one worker named `foo`
+  gets `worker2` — and skips upward past any name already in use, so a
+  bare command after deletions never collides with a survivor. The
+  container is called `coreshift-worker-<name>` and the node carries
+  the name.
 - `--cluster`: the cluster the worker joins, `coreshift` by default.
 - `--verbose`: stream the image build's output to the terminal.
 
