@@ -131,6 +131,11 @@ there the next time.
   floating to the newest, and prints a one-line note when a newer patch of
   that stream exists, since the directory can be upgraded in place with
   `--version`.
+- Pull secret: stored in cluster state, as the `pull-secret` Secret in
+  the `openshift-config` namespace — the global pull secret a real
+  cluster keeps, seeded by the startup from the file the run was given.
+  It lives in the state directory's etcd data and is destroyed with it
+  by `coreshift cleanup`. Worker creation reads it from there.
 - Image cache: `~/.cache/coreshift/`, shared by all runs regardless of port;
   see [Cache](#cache).
 
@@ -163,7 +168,6 @@ it up through the admin kubeconfig while the control plane is running (the
 htpasswd -c -B -b users.htpasswd developer password
 
 export KUBECONFIG=~/.local/state/coreshift/api/admin.kubeconfig
-oc create namespace openshift-config
 oc create secret generic htpasswd-secret --from-file=htpasswd=users.htpasswd -n openshift-config
 oc apply -f - <<'EOF'
 apiVersion: config.openshift.io/v1
@@ -340,6 +344,10 @@ on the same port reuses a cluster's certificates and data.
   non-default port — the same directories as host mode.
 - Child logs: one file per child under the `logs` folder of the state
   directory, written through the bind mount.
+- Pull secret: stored in cluster state, as the `pull-secret` Secret in
+  the `openshift-config` namespace — the same object host mode stores,
+  seeded by the run inside the container. It lives in the state
+  directory's etcd data and is destroyed with it by `coreshift cleanup`.
 - Cached images: `~/.cache/coreshift/`, shared by everything; see
   [Cache](#cache).
 - The container's own boot output: kept by podman; `podman logs
@@ -393,11 +401,13 @@ With a cluster running in either mode — in host mode, leave the `run
 cluster` terminal alone and use another one — join a worker to it:
 
 ```
-./coreshift create worker --pull-secret ~/pull-secret
+./coreshift create worker
 ```
 
 The command mints the join material, mints the worker image from the
-release the cluster records, starts the worker container, and streams
+release the cluster records — pulling the rhel-coreos base with the pull
+secret the cluster stores, kept only as a throwaway credentials file for
+the duration of the build — starts the worker container, and streams
 its boot while waiting for the node to register. The image build line
 appears the first time only; a later create skips it, because the image
 is tagged from the running binary:
@@ -483,8 +493,11 @@ starts from nothing.
 
 ### Flags
 
-- `--pull-secret` (required): path to the pull secret JSON file; the
-  image build pulls the rhel-coreos base with it.
+- `--pull-secret` (optional): path to a pull secret JSON file, as a
+  fallback for clusters created before the cluster stored one. The image
+  build pulls the rhel-coreos base with the stored secret otherwise; a
+  cluster that stores none is refused without this flag, naming the
+  flag and the re-creation as the ways through.
 - `--name`: the worker's name, `worker1` by default. The container is
   called `coreshift-worker-<name>`, the node carries the name, and a
   second worker needs its own.
