@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	clientcmd "k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	"github.com/vkareh/coreshift/internal/aggregation"
 	"github.com/vkareh/coreshift/internal/certgen"
@@ -292,7 +293,7 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 	if err != nil {
 		return err
 	}
-	if err := prepareState(stateDir, port); err != nil {
+	if err := prepareState(stateDir, name, port); err != nil {
 		return err
 	}
 
@@ -320,7 +321,7 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 		}
 		// The offer removed the directory: rebuild it the way a first
 		// boot does, certificates and marker included.
-		if err := prepareState(stateDir, port); err != nil {
+		if err := prepareState(stateDir, name, port); err != nil {
 			return err
 		}
 		if err := ensureClusterMarker(stateDir, name, releaseRef); err != nil {
@@ -380,7 +381,7 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 		return err
 	}
 
-	tokenReviewKubeconfig, err := writeTokenReviewKubeconfig(stateDir, port)
+	tokenReviewKubeconfig, err := writeTokenReviewKubeconfig(stateDir, name, port)
 	if err != nil {
 		return err
 	}
@@ -694,18 +695,22 @@ func ensureGpgmeDir() (string, error) {
 }
 
 // prepareState writes the certificate set into stateDir and points the
-// kubeconfigs and the admin context at the port in use. A fresh start,
-// after the old directory was removed, runs it again on the empty
-// directory.
-func prepareState(stateDir string, port int) error {
+// kubeconfigs at the port in use, names their entries after the cluster,
+// and points the admin kubeconfig's selection back at the admin context.
+// A fresh start, after the old directory was removed, runs it again on
+// the empty directory.
+func prepareState(stateDir, name string, port int) error {
 	fmt.Println("Preparing certificates")
-	if err := ensureCertificates(stateDir, port); err != nil {
+	if err := ensureCertificates(stateDir, name, port); err != nil {
 		return err
 	}
 	if err := followAPIPort(stateDir, port); err != nil {
 		return err
 	}
-	return restoreAdminContext(stateDir)
+	if err := followClusterName(stateDir, name); err != nil {
+		return err
+	}
+	return restoreAdminContext(stateDir, name)
 }
 
 // kubeconfigFilenames are the kubeconfigs in a cluster's state directory.
@@ -752,6 +757,83 @@ func followAPIPort(stateDir string, port int) error {
 		}
 	}
 	return nil
+}
+
+// followClusterName names the kubeconfig entries after the cluster. The
+// name is the cluster's identity, and the entries carrying it is what
+// lets the kubeconfig files of several clusters merge — the standard way
+// to work with several at once — instead of silently colliding on the
+// generic names every cluster used to share. A state directory from
+// before the entries were named is rewritten here, with no certificate
+// regeneration: certificates encode no name.
+func followClusterName(stateDir, name string) error {
+	for _, filename := range kubeconfigFilenames {
+		path := filepath.Join(stateDir, filename)
+		config, err := clientcmd.LoadFromFile(path)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", filename, err)
+		}
+		if !renameClusterEntries(config, name) {
+			continue
+		}
+		if err := clientcmd.WriteToFile(*config, path); err != nil {
+			return fmt.Errorf("write %s: %w", filename, err)
+		}
+	}
+	return nil
+}
+
+// renameClusterEntries renames a kubeconfig's generated entries from the
+// generic name to the cluster's own: the cluster entry, and the context
+// and user entries derived from it, with every reference between them,
+// the current context included, followed along. Contexts an oc login
+// added keep their names; only their cluster reference follows. It
+// reports whether anything changed.
+func renameClusterEntries(config *clientcmdapi.Config, name string) bool {
+	changed := renameEntry(config.Clusters, defaultClusterName, name)
+	for contextName, context := range config.Contexts {
+		user, generated := strings.CutSuffix(contextName, "@"+defaultClusterName)
+		if !generated {
+			if context.Cluster == defaultClusterName && defaultClusterName != name {
+				context.Cluster = name
+				changed = true
+			}
+			continue
+		}
+		named := user + "@" + name
+		if renameEntry(config.AuthInfos, user, named) {
+			changed = true
+			if context.AuthInfo == user {
+				context.AuthInfo = named
+			}
+		}
+		if renameEntry(config.Contexts, contextName, named) {
+			if config.CurrentContext == contextName {
+				config.CurrentContext = named
+			}
+			changed = true
+		}
+		if context.Cluster == defaultClusterName && defaultClusterName != name {
+			context.Cluster = name
+			changed = true
+		}
+	}
+	return changed
+}
+
+// renameEntry moves a map entry from one key to another, reporting
+// whether the map changed. Same-key and missing entries change nothing.
+func renameEntry[T any](entries map[string]*T, from, to string) bool {
+	if from == to {
+		return false
+	}
+	entry, ok := entries[from]
+	if !ok {
+		return false
+	}
+	entries[to] = entry
+	delete(entries, from)
+	return true
 }
 
 // printReadySummary prints what a client needs to use the running control
@@ -2517,7 +2599,7 @@ func stdinIsTerminal() bool {
 // directory and leave etcd data trusted by a CA nothing signs for anymore.
 // A set whose service-serving certificate lacks the loopback address counts
 // as incomplete, so it is regenerated rather than reused.
-func ensureCertificates(stateDir string, port int) error {
+func ensureCertificates(stateDir, name string, port int) error {
 	artifacts := []string{
 		certgen.CACertFilename, certgen.CAKeyFilename,
 		certgen.APIServerCertFilename, certgen.APIServerKeyFilename,
@@ -2548,7 +2630,7 @@ func ensureCertificates(stateDir string, port int) error {
 	if complete && serviceServingCertHasLoopback(stateDir) {
 		return nil
 	}
-	return certgen.GenerateAll(stateDir, certgen.Options{APIServerURL: apiServerURL(port)})
+	return certgen.GenerateAll(stateDir, certgen.Options{APIServerURL: apiServerURL(port), ClusterName: name})
 }
 
 // serviceServingCertHasLoopback reports whether the saved service-serving
@@ -2571,29 +2653,27 @@ func serviceServingCertHasLoopback(stateDir string) bool {
 	return cert.VerifyHostname("127.0.0.1") == nil
 }
 
-// adminContextName is the certificate-based context the generated admin
-// kubeconfig selects.
-const adminContextName = "admin@coreshift"
-
-// restoreAdminContext points the admin kubeconfig's current context back at
-// the certificate-based admin context. Logging in with oc adds token
-// contexts to the file and makes one of them current; a startup would then
-// try the token before the OAuth API that validates it exists, and stall
-// until the seeding timeouts fail the run. Login contexts are kept; only
-// the selection is corrected.
-func restoreAdminContext(stateDir string) error {
+// restoreAdminContext points the admin kubeconfig's current context back
+// at the certificate-based admin context, which carries the cluster's
+// name like every generated entry. Logging in with oc adds token
+// contexts to the file and makes one of them current; a startup would
+// then try the token before the OAuth API that validates it exists, and
+// stall until the seeding timeouts fail the run. Login contexts are
+// kept; only the selection is corrected.
+func restoreAdminContext(stateDir, name string) error {
 	path := filepath.Join(stateDir, certgen.AdminKubeconfigFilename)
 	config, err := clientcmd.LoadFromFile(path)
 	if err != nil {
 		return fmt.Errorf("read admin kubeconfig: %w", err)
 	}
-	if config.CurrentContext == adminContextName {
+	contextName := "admin@" + name
+	if config.CurrentContext == contextName {
 		return nil
 	}
-	if _, ok := config.Contexts[adminContextName]; !ok {
-		return fmt.Errorf("admin kubeconfig has no %s context", adminContextName)
+	if _, ok := config.Contexts[contextName]; !ok {
+		return fmt.Errorf("admin kubeconfig has no %s context", contextName)
 	}
-	config.CurrentContext = adminContextName
+	config.CurrentContext = contextName
 	if err := clientcmd.WriteToFile(*config, path); err != nil {
 		return fmt.Errorf("write admin kubeconfig: %w", err)
 	}
@@ -2752,29 +2832,33 @@ func writeOAuthMetadata(stateDir string, port int) (string, error) {
 // writeTokenReviewKubeconfig writes the kubeconfig kube-apiserver uses to
 // have OAuth access tokens reviewed: it points at the aggregated OAuth API
 // server's token review endpoint and authenticates with the generated
-// admin identity, whose permissions cover the review call.
-func writeTokenReviewKubeconfig(stateDir string, port int) (string, error) {
+// admin identity, whose permissions cover the review call. The entries
+// carry the cluster's name, like every generated kubeconfig's.
+func writeTokenReviewKubeconfig(stateDir, name string, port int) (string, error) {
 	path := filepath.Join(stateDir, "token-review.kubeconfig")
+	admin := "admin@" + name
 	kubeconfig := fmt.Sprintf(`apiVersion: v1
 kind: Config
 clusters:
-- name: coreshift
+- name: %s
   cluster:
     certificate-authority: %s
     server: %s/apis/oauth.openshift.io/v1/tokenreviews
 contexts:
-- name: admin@coreshift
+- name: %s
   context:
-    cluster: coreshift
-    user: admin
-current-context: admin@coreshift
+    cluster: %s
+    user: %s
+current-context: %s
 users:
-- name: admin
+- name: %s
   user:
     client-certificate: %s
     client-key: %s
-`, filepath.Join(stateDir, certgen.CACertFilename),
+`, name,
+		filepath.Join(stateDir, certgen.CACertFilename),
 		apiServerURL(port),
+		admin, name, admin, admin, admin,
 		filepath.Join(stateDir, certgen.AdminCertFilename),
 		filepath.Join(stateDir, certgen.AdminKeyFilename))
 	if err := os.WriteFile(path, []byte(kubeconfig), 0o600); err != nil {
