@@ -28,7 +28,7 @@ keeps the data; cleanup destroys the data.
 | RBAC/SCC/admission | Real | Real |
 | Runtime dependency | None (bare processes) | podman |
 | Lifecycle | Foreground; Ctrl-C stops it | Background container; `delete cluster` stops it |
-| Several clusters at once | No (the components share fixed ports) | Yes; one per `--name` and `--port` |
+| Several clusters at once | No (the components share fixed ports) | Yes; one per `--name`, each published on its own `--port` |
 | Best for | Machines without a container runtime; CI gating, PR checks | Clusters that outlive the terminal; side-by-side clusters |
 
 ## The commands
@@ -48,8 +48,8 @@ keeps the data; cleanup destroys the data.
   remove it, along with its node.
 - `coreshift get workers`: list the workers with their cluster and live
   readiness.
-- `coreshift cleanup`: remove state directories and, with `--cache`, the
-  shared image cache.
+- `coreshift cleanup [--name | --all]`: remove cluster state and, with
+  `--cache`, the shared image cache.
 - `coreshift version`: print the version the binary was built with.
 
 ## The `run cluster` command
@@ -90,11 +90,16 @@ there the next time.
 ### Flags
 
 - `--pull-secret` (required): path to the pull secret JSON file.
-- `--port`: the port the API server listens on, 6443 by default. Use it when
-  something else already occupies 6443. A non-default port gets its own state
-  directory, but etcd and the other components always listen on the same
-  fixed ports, so this is for avoiding a port collision, not for running two
-  instances side by side. The reserved ports, refused up front, are 2379,
+- `--name`: the cluster's name, `coreshift` by default. The name is the
+  cluster's identity: its state lives in `clusters/<name>` under the
+  state root, and the name picks which cluster's state a run boots.
+- `--port`: the port the API server listens on, 6443 by default. Use it
+  when something else already occupies 6443. The port is not part of the
+  cluster's identity — the state directory does not depend on it, and a
+  cluster re-created on a different port reuses its state warm — but etcd
+  and the other components always listen on the same fixed ports, so this
+  is for avoiding a port collision, not for running two instances side by
+  side. The reserved ports, refused up front, are 2379,
   2380 (etcd), 8443, 8444, 8445, 8446, 9191, and 10357 (the OpenShift
   components).
 - `--verbose`: stream each child's logs live to the terminal, prefixed with
@@ -111,33 +116,32 @@ there the next time.
 
 ### Where things live
 
-- State directory: `~/.local/state/coreshift/api/` by default
-  (`$XDG_STATE_HOME/coreshift/api`). It holds the generated certificates and
-  kubeconfigs, the etcd data, and the child logs, and it is reused across
-  runs. A non-default port uses `~/.local/state/coreshift/api/<port>/`
-  instead, so runs on different ports never share certificates or data.
-  Run `coreshift cleanup` to start over. Each directory records the release
-  image that created it. A newer patch of the same minor stream reuses the
-  directory and upgrades it in place, the same move a real OpenShift cluster
-  makes on a patch update; a different minor stream, or an older patch,
-  refuses, because etcd data only moves forward within its stream. Run on
-  another port to keep both. On a terminal the refusal offers to remove the
-  directory and start fresh; everything in it is lost, including anything
-  created through the API, and only an explicit yes goes ahead. Without a
-  terminal the refusal names `coreshift cleanup` as the way to remove the
-  directory from a script. Directories with etcd data from before this
-  record existed get the same treatment, for the same reason. A run with
-  no release flags reuses the release the directory records instead of
-  floating to the newest, and prints a one-line note when a newer patch of
-  that stream exists, since the directory can be upgraded in place with
+- State directory: `~/.local/state/coreshift/clusters/<name>/` by
+  default (`$XDG_STATE_HOME/coreshift/clusters/<name>`). It holds the
+  generated certificates and kubeconfigs, the etcd data, and the child
+  logs, and it is reused across runs whatever port the API server binds.
+  Run `coreshift cleanup` to start over. Each directory records the
+  cluster's name and the release image that created it in its marker, so
+  it is self-describing. A newer patch of the same minor stream reuses the
+  directory and upgrades it in place, the same move a real OpenShift
+  cluster makes on a patch update; a different minor stream, or an older
+  patch, refuses, because etcd data only moves forward within its stream.
+  Run under another name to keep both. On a terminal the refusal offers to
+  remove the directory and start fresh; everything in it is lost,
+  including anything created through the API, and only an explicit yes
+  goes ahead. Without a terminal the refusal names `coreshift cleanup`
+  as the way to remove the directory from a script. A run with no release
+  flags reuses the release the directory records instead of floating to
+  the newest, and prints a one-line note when a newer patch of that
+  stream exists, since the directory can be upgraded in place with
   `--version`.
 - Pull secret: stored in cluster state, as the `pull-secret` Secret in
   the `openshift-config` namespace — the global pull secret a real
   cluster keeps, seeded by the startup from the file the run was given.
   It lives in the state directory's etcd data and is destroyed with it
   by `coreshift cleanup`. Worker creation reads it from there.
-- Image cache: `~/.cache/coreshift/`, shared by all runs regardless of port;
-  see [Cache](#cache).
+- Image cache: `~/.cache/coreshift/`, shared by all runs regardless of
+  cluster; see [Cache](#cache).
 
 ### Logging
 
@@ -147,8 +151,8 @@ and a summary once the control plane is ready:
 ```
 Control plane ready
   API endpoint: https://127.0.0.1:6443
-  Kubeconfig:   /home/you/.local/state/coreshift/api/admin.kubeconfig
-  Log in with:  oc login https://127.0.0.1:6443 --certificate-authority=/home/you/.local/state/coreshift/api/ca.crt -u <username> -p <password>
+  Kubeconfig:   /home/you/.local/state/coreshift/clusters/coreshift/admin.kubeconfig
+  Log in with:  oc login https://127.0.0.1:6443 --certificate-authority=/home/you/.local/state/coreshift/clusters/coreshift/ca.crt -u <username> -p <password>
 ```
 
 When a child fails, the run tears down and the error names the failed
@@ -167,7 +171,7 @@ it up through the admin kubeconfig while the control plane is running (the
 ```
 htpasswd -c -B -b users.htpasswd developer password
 
-export KUBECONFIG=~/.local/state/coreshift/api/admin.kubeconfig
+export KUBECONFIG=~/.local/state/coreshift/clusters/coreshift/admin.kubeconfig
 oc create secret generic htpasswd-secret --from-file=htpasswd=users.htpasswd -n openshift-config
 oc apply -f - <<'EOF'
 apiVersion: config.openshift.io/v1
@@ -194,7 +198,7 @@ the control plane — `coreshift run cluster` again in host mode, or
 mode — then log in with the command from the ready summary:
 
 ```
-oc login https://127.0.0.1:6443 --certificate-authority=/home/you/.local/state/coreshift/api/ca.crt -u developer -p password
+oc login https://127.0.0.1:6443 --certificate-authority=/home/you/.local/state/coreshift/clusters/coreshift/ca.crt -u developer -p password
 ```
 
 ### Choosing the release
@@ -256,13 +260,12 @@ the container image from the running binary (or takes one with `--image`),
 starts a detached container named `coreshift-<name>`, streams the boot
 output while polling readiness from the host, and prints the same ready
 summary as host mode. Before building or starting anything it reads the
-state directory's recorded release and applies the same reuse rule host
+named cluster's recorded release and applies the same reuse rule host
 mode applies: a newer patch of the same minor stream upgrades in place
 with no question, while a cross-stream move or a patch downgrade is
 refused up front — on a terminal with the same default-no fresh-start
 question `run cluster` asks, without one with the `--fresh` remedy — so a
-doomed run fails before an image is minted. State data that records no
-release is refused as the leftovers of a deleted cluster. The container
+doomed run fails before an image is minted. The container
 keeps running in the background when the command returns; closing the
 terminal does not stop it. The API is published on `127.0.0.1:<port>`
 only, so exposing it to the network stays an explicit act.
@@ -291,8 +294,8 @@ plane is ready, the summary matches host mode plus one line:
 ```
 Control plane ready
   API endpoint: https://127.0.0.1:6443
-  Kubeconfig:   /home/you/.local/state/coreshift/api/admin.kubeconfig
-  Log in with:  oc login https://127.0.0.1:6443 --certificate-authority=/home/you/.local/state/coreshift/api/ca.crt -u <username> -p <password>
+  Kubeconfig:   /home/you/.local/state/coreshift/clusters/coreshift/admin.kubeconfig
+  Log in with:  oc login https://127.0.0.1:6443 --certificate-authority=/home/you/.local/state/coreshift/clusters/coreshift/ca.crt -u <username> -p <password>
 Container coreshift is running in the background
 ```
 
@@ -305,19 +308,24 @@ cluster`. Then check what is running, and stop it without losing the data:
 ./coreshift delete cluster
 ```
 
-`delete` prints where the state was kept, and the next create on the same
-port picks it back up.
+`delete` prints where the state was kept, and the next create with the
+same name picks it back up — on whatever port, warm.
 
 ### Flags
 
 - `--pull-secret` (required): path to the pull secret JSON file.
-- `--port`: the port the API is published on, 6443 by default. Like host
-  mode, a non-default port gets its own state directory. Create refuses a
-  port something already listens on, and one of the control plane's
-  reserved ports listed under host mode.
+- `--port`: the port the API is published on, 6443 by default. The state
+  directory does not depend on it, so a cluster re-created on a different
+  port reuses its state warm, with the kubeconfig's server URL rewritten
+  on boot to match the port in use. Create refuses a port something
+  already listens on, and one of the control plane's reserved ports
+  listed under host mode.
 - `--name`: the cluster's name, `coreshift` by default; the container is
-  called `coreshift-<name>`. Create refuses a taken name, so a second
-  cluster needs its own name and port.
+  called `coreshift-<name>` and the state lives in
+  `clusters/<name>` under the state root, the same directory host mode
+  uses. The name is passed through to the run inside the container.
+  Create refuses a taken name, so a second cluster needs its own name,
+  with its own port to publish on.
 - `--fresh`: remove the state directory before starting, without asking.
   This is the container-mode answer to a state directory that refuses
   reuse: a cross-stream move or a patch downgrade.
@@ -334,14 +342,15 @@ port picks it back up.
 
 ### Where things live
 
-The container bind-mounts the host's state and cache roots into itself,
-so everything lands exactly where host mode puts it, and the modes share
-it: a release cached for one is cached for the other, and a host-mode run
-on the same port reuses a cluster's certificates and data.
+The container bind-mounts the named cluster's state directory and the
+shared image cache into itself, so everything lands exactly where host
+mode puts it, and the modes share it: a release cached for one is cached
+for the other, and a host-mode run of the same cluster name reuses its
+certificates and data.
 
-- State directory: `~/.local/state/coreshift/api/` by default
-  (`$XDG_STATE_HOME/coreshift/api`), with `/<port>` appended for a
-  non-default port — the same directories as host mode.
+- State directory: `~/.local/state/coreshift/clusters/<name>/` by
+  default (`$XDG_STATE_HOME/coreshift/clusters/<name>`) — the same
+  directory host mode uses, whatever port the API is published on.
 - Child logs: one file per child under the `logs` folder of the state
   directory, written through the bind mount.
 - Pull secret: stored in cluster state, as the `pull-secret` Secret in
@@ -361,13 +370,15 @@ create: the error quotes the tail of the container's log, points at the
 full logs in the state directory, and the container is removed while the
 state is kept. Ctrl-C during the wait aborts the same way. A failure
 caused by the state directory refusing reuse says so and names `--fresh`
-and a different `--port` as the remedies.
+and a different `--name` as the remedies.
 
 ## The `create worker` command
 
 `coreshift create worker` joins a worker to a running cluster, in either
-mode: the default cluster at the default port when it runs host-side, or
-any container cluster by name with `--cluster`. The worker is as real as
+mode: the default cluster by name, or any other cluster with
+`--cluster`, resolved by name — a cluster in a container through its
+published port, and a host-mode cluster through the port its admin
+kubeconfig records. The worker is as real as
 the control plane. Its container image is minted from the payload's
 rhel-coreos image of the release the cluster records — carrying the node
 binaries (kubelet, CRI-O, the CNI plugins) matched to that release, with
@@ -434,14 +445,14 @@ Waiting for the node to register
 
 Worker joined
   Node:       worker1, reporting NotReady until a CNI exists
-  Kubeconfig: /home/you/.local/state/coreshift/api/admin.kubeconfig
+  Kubeconfig: /home/you/.local/state/coreshift/clusters/coreshift/admin.kubeconfig
   Container coreshift-worker-worker1 is running in the background
 ```
 
 Then watch the node, with the kubeconfig from the summary:
 
 ```
-export KUBECONFIG=~/.local/state/coreshift/api/admin.kubeconfig
+export KUBECONFIG=~/.local/state/coreshift/clusters/coreshift/admin.kubeconfig
 oc get nodes
 NAME      STATUS     ROLES    AGE   VERSION
 worker1   NotReady   <none>   6s    v1.35.9
@@ -513,7 +524,8 @@ starts from nothing.
   bare command after deletions never collides with a survivor. The
   container is called `coreshift-worker-<name>` and the node carries
   the name.
-- `--cluster`: the cluster the worker joins, `coreshift` by default.
+- `--cluster`: the cluster the worker joins, `coreshift` by default. A
+  name no cluster exists under is refused, listing the clusters that do.
 - `--verbose`: stream the image build's output to the terminal.
 
 ## `run cluster` or `create cluster`
@@ -523,7 +535,7 @@ nothing but the Go toolchain — and whenever the control plane belongs to
 one terminal or one CI step: it runs in the foreground and stops on
 Ctrl-C. Use `create cluster` when podman is available and the cluster
 should outlive the terminal, or when several clusters have to run side by
-side, each with its own name and port. Both answer the question "does it
+side, each with its own name. Both answer the question "does it
 behave like OpenShift at the API level" equally well; `create worker`
 adds the node side to either, a real kubelet and CRI-O joining from a
 container, though the node reports NotReady until a CNI exists, so no
@@ -535,7 +547,9 @@ workloads run.
 it. Stopping the container tears the control plane down in reverse startup
 order, like a host-mode shutdown. The state directory is deliberately
 kept — deleting a cluster destroys nothing — and the command prints where
-the state is, with `coreshift cleanup` named as the way to remove it.
+the state is, with `coreshift cleanup` named as the way to remove it. A
+cluster whose container is already gone but whose state was kept is
+reported as not running, with its state named.
 
 ```
 ./coreshift delete cluster
@@ -573,13 +587,12 @@ booting or wedged cluster shows as not ready. With no clusters it prints
 prefix, are not clusters in this list.
 
 `coreshift get kubeconfig` prints the path to the named cluster's admin
-kubeconfig — the same file host mode writes — and refuses when no cluster
-with that name exists. It resolves the right state directory for a cluster
-on a non-default port:
+kubeconfig — the same file host mode writes — and refuses when no state
+exists for the name, listing the clusters that do:
 
 ```
 ./coreshift get kubeconfig
-/home/you/.local/state/coreshift/api/admin.kubeconfig
+/home/you/.local/state/coreshift/clusters/coreshift/admin.kubeconfig
 ```
 
 `coreshift get workers` lists the workers: name, cluster, and readiness.
@@ -643,7 +656,7 @@ base gets its own image.
 
 ## The `cleanup` command
 
-`coreshift cleanup` removes the state directory of the default port, so the
+`coreshift cleanup` removes the default cluster's state directory, so the
 next run starts fresh: new certificates, empty etcd, nothing seeded. There
 is no confirmation prompt; the command is explicit and safe for scripts.
 Both modes keep their state in the same directories, so cleanup also
@@ -653,9 +666,10 @@ removes a container-mode cluster's state.
 ./coreshift cleanup
 ```
 
-- `--port N` removes that port's state directory instead.
-- `--all` removes every state directory: the default one and all per-port
-  ones.
+- `--name N` removes that cluster's state directory instead.
+- `--all` removes every cluster's state: the whole `clusters` tree, and
+  nothing else under the state root, so unrelated directories kept there
+  survive.
 - `--cache` additionally removes the shared image cache. That is safe to
   drop; it is keyed by image digest and fully rebuilt by re-pulling on the
   next run.
@@ -671,6 +685,6 @@ data out from under it.
 Extracted control plane binaries and the release image's manifest of
 component image references are cached under `~/.cache/coreshift/`
 (`$XDG_CACHE_HOME/coreshift`), keyed by image digest and shared by
-everything regardless of mode or port. A second run of the
+everything regardless of mode or cluster. A second run of the
 same pinned release pulls nothing from the registry and starts straight
 from the cache. Run `coreshift cleanup --cache` to clear it.
