@@ -94,7 +94,7 @@ jobs:
           done
           labeled=""
           if grep -q "Control plane ready" "$log"; then
-            state="$XDG_STATE_HOME/coreshift/api/16443"
+            state="$XDG_STATE_HOME/coreshift/clusters/coreshift"
             api="https://127.0.0.1:16443"
             curl --fail --silent --show-error \
               --cacert "$state/ca.crt" \
@@ -157,7 +157,7 @@ jobs:
           export XDG_STATE_HOME="$RUNNER_TEMP/container-state"
           export XDG_CACHE_HOME="$RUNNER_TEMP/container-cache"
           ./coreshift create cluster --pull-secret "$secret" --version 4.22.19
-          state="$XDG_STATE_HOME/coreshift/api"
+          state="$XDG_STATE_HOME/coreshift/clusters/coreshift"
           curl --fail --silent --show-error \
             --cacert "$state/ca.crt" \
             --cert "$state/admin.crt" \
