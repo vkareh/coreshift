@@ -1630,9 +1630,9 @@ func newDeleteCommand() *cobra.Command {
 }
 
 // newDeleteClusterCommand builds the command that deletes a cluster: its
-// container is stopped, torn down in reverse order like a host-mode
-// shutdown, and removed, while its state directory is preserved unless the
-// cleanup flag asks for its removal too.
+// workers go with it, then its container is stopped, torn down in reverse
+// order like a host-mode shutdown, and removed, while its state directory
+// is preserved unless the cleanup flag asks for its removal too.
 func newDeleteClusterCommand() *cobra.Command {
 	var name string
 	var cleanup bool
@@ -1640,8 +1640,8 @@ func newDeleteClusterCommand() *cobra.Command {
 		Use:          "cluster",
 		Short:        "Delete a cluster, stopping its container and preserving its state",
 		SilenceUsage: true,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return runDelete(name, cleanup)
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runDelete(cmd.Context(), name, cleanup)
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", defaultClusterName, "name of the cluster to delete")
@@ -1655,12 +1655,13 @@ func newDeleteClusterCommand() *cobra.Command {
 // seconds, and the timeout only bounds a wedged container.
 const containerStopSeconds = 120
 
-// runDelete deletes a cluster: its container is stopped and removed. The
-// state directory is preserved, because deleting a cluster destroys nothing;
-// the cleanup flag opts into removing it too, with the same removal the
-// cleanup command uses. A cluster whose container is already gone but
-// whose state was preserved reports that and where the state is.
-func runDelete(name string, cleanup bool) error {
+// runDelete deletes a cluster: its workers go with it, then its container
+// is stopped and removed. The state directory is preserved, because
+// deleting a cluster destroys nothing; the cleanup flag opts into removing
+// it too, with the same removal the cleanup command uses. A cluster whose
+// container is already gone but whose state was preserved reports that and
+// where the state is.
+func runDelete(ctx context.Context, name string, cleanup bool) error {
 	if _, err := exec.LookPath("podman"); err != nil {
 		return fmt.Errorf("podman is required to delete clusters: %w", err)
 	}
@@ -1669,12 +1670,25 @@ func runDelete(name string, cleanup bool) error {
 		return err
 	}
 	container := clusterContainerPrefix + name
-	if exec.Command("podman", "container", "exists", container).Run() != nil {
+	running := exec.Command("podman", "container", "exists", container).Run() == nil
+	if !running {
 		if _, statErr := os.Stat(stateDir); statErr != nil {
 			return unknownCluster(name)
 		}
 		fmt.Printf("Cluster %s is not running\n", name)
-	} else {
+	}
+	// The workers go before the cluster container, so each one's node is
+	// removed while the cluster's API still answers.
+	workers, err := clusterWorkers(name)
+	if err != nil {
+		return err
+	}
+	for _, worker := range workers {
+		if err := deleteWorker(ctx, worker, name); err != nil {
+			return err
+		}
+	}
+	if running {
 		fmt.Printf("Stopping container %s\n", container)
 		stop := exec.Command("podman", "stop", "--timeout", strconv.Itoa(containerStopSeconds), container)
 		stop.Stderr = os.Stderr
@@ -1699,6 +1713,22 @@ func runDelete(name string, cleanup bool) error {
 	return nil
 }
 
+// clusterWorkers lists the names of a cluster's workers: the worker
+// containers carrying its label.
+func clusterWorkers(cluster string) ([]string, error) {
+	containers, err := containersNamed(workerContainerPrefix)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, container := range containers {
+		if label, err := containerLabel(container, workerClusterLabel); err == nil && label == cluster {
+			names = append(names, strings.TrimPrefix(container, workerContainerPrefix))
+		}
+	}
+	return names, nil
+}
+
 // newDeleteWorkerCommand builds the command that deletes a worker: its
 // container is stopped and removed, and the node object and machine
 // stand-in its join created go with it, leaving the cluster's node list
@@ -1717,11 +1747,8 @@ func newDeleteWorkerCommand() *cobra.Command {
 	return cmd
 }
 
-// runDeleteWorker deletes a worker: its container is stopped and
-// removed, then the node object and machine stand-in the join minted are
-// deleted through the cluster's admin kubeconfig, and the join material
-// goes with them. The cluster must be running to remove the pair; when
-// it is not, the node stays and the command says so.
+// runDeleteWorker deletes a worker: the worker the name picks is resolved
+// to its cluster through its container's label, then deleted.
 func runDeleteWorker(ctx context.Context, name string) error {
 	if _, err := exec.LookPath("podman"); err != nil {
 		return fmt.Errorf("podman is required to delete workers: %w", err)
@@ -1737,6 +1764,18 @@ func runDeleteWorker(ctx context.Context, name string) error {
 	if cluster == "" {
 		return fmt.Errorf("container %s carries no cluster label; remove it with podman", container)
 	}
+	return deleteWorker(ctx, name, cluster)
+}
+
+// deleteWorker deletes one worker of the named cluster: its container is
+// stopped and removed, then the node object and machine stand-in the join
+// minted are deleted through the cluster's admin kubeconfig, and the join
+// material goes with them. The cluster must be running to remove the pair;
+// when it is not, the node stays and the command says so; when the
+// cluster's state is gone, the node went with it and there is nothing to
+// remove.
+func deleteWorker(ctx context.Context, name, cluster string) error {
+	container := workerContainerPrefix + name
 	fmt.Printf("Stopping container %s\n", container)
 	stop := exec.Command("podman", "stop", "--timeout", strconv.Itoa(containerStopSeconds), container)
 	stop.Stderr = os.Stderr
@@ -1750,7 +1789,15 @@ func runDeleteWorker(ctx context.Context, name string) error {
 
 	// The container goes first: a running kubelet recreates its node, so
 	// the pair is removed only once nothing re-registers it.
-	if port, stateDir, err := workerClusterTarget(cluster); err == nil && clusterReady(port) {
+	stateDir, err := clusterDir(cluster)
+	if err != nil {
+		return err
+	}
+	if _, statErr := os.Stat(stateDir); statErr != nil {
+		fmt.Printf("Cluster %s has no state left; its node went with the cluster's data\n", cluster)
+		return nil
+	}
+	if port, _, err := workerClusterTarget(cluster); err == nil && clusterReady(port) {
 		if err := join.Remove(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), name); err != nil {
 			return fmt.Errorf("remove the node and machine stand-in: %w", err)
 		}
