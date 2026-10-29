@@ -688,14 +688,64 @@ func ensureGpgmeDir() (string, error) {
 }
 
 // prepareState writes the certificate set into stateDir and points the
-// admin kubeconfig back at the admin context. A fresh start, after the
-// old directory was removed, runs it again on the empty directory.
+// kubeconfigs and the admin context at the port in use. A fresh start,
+// after the old directory was removed, runs it again on the empty
+// directory.
 func prepareState(stateDir string, port int) error {
 	fmt.Println("Preparing certificates")
 	if err := ensureCertificates(stateDir, port); err != nil {
 		return err
 	}
+	if err := followAPIPort(stateDir, port); err != nil {
+		return err
+	}
 	return restoreAdminContext(stateDir)
+}
+
+// kubeconfigFilenames are the kubeconfigs in a cluster's state directory.
+// Each embeds the API server's URL as the endpoint its client dials, so
+// each must follow the port in use.
+var kubeconfigFilenames = []string{
+	certgen.AdminKubeconfigFilename,
+	certgen.ControllerManagerKubeconfigFilename,
+	certgen.SchedulerKubeconfigFilename,
+	certgen.OpenShiftAPIServerKubeconfigFilename,
+	certgen.OAuthAPIServerKubeconfigFilename,
+	certgen.OAuthServerKubeconfigFilename,
+	certgen.OpenShiftControllerManagerKubeconfigFilename,
+	certgen.ClusterPolicyControllerKubeconfigFilename,
+	certgen.ClusterMachineApproverKubeconfigFilename,
+}
+
+// followAPIPort points the kubeconfigs at the port in use. The port is
+// where this deployment's API server binds, not part of the cluster's
+// identity, so a cluster re-created on a different port reuses its state
+// warm: certificates encode no port, and the kubeconfigs are the only
+// files in state that record it, so they are rewritten whenever they
+// disagree with it.
+func followAPIPort(stateDir string, port int) error {
+	server := apiServerURL(port)
+	for _, name := range kubeconfigFilenames {
+		path := filepath.Join(stateDir, name)
+		config, err := clientcmd.LoadFromFile(path)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", name, err)
+		}
+		changed := false
+		for _, cluster := range config.Clusters {
+			if cluster.Server != server {
+				cluster.Server = server
+				changed = true
+			}
+		}
+		if !changed {
+			continue
+		}
+		if err := clientcmd.WriteToFile(*config, path); err != nil {
+			return fmt.Errorf("write %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // printReadySummary prints what a client needs to use the running control
