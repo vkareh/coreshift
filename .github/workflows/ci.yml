@@ -96,6 +96,7 @@ jobs:
             sleep 30
           done
           labeled=""
+          soaked=""
           if grep -q "Control plane ready" "$log"; then
             state="$XDG_STATE_HOME/coreshift/clusters/coreshift"
             api="https://127.0.0.1:16443"
@@ -116,20 +117,40 @@ jobs:
                 | grep -q 'pod-security.kubernetes.io/enforce' && labeled=1 && break
               sleep 5
             done
+            # Five minutes: a component can die a while after the control
+            # plane is ready, past every check above.
+            soaked=1
+            for _ in {1..10}; do
+              sleep 30
+              kill -0 "$pid" 2>/dev/null || { soaked=""; break; }
+              curl --fail --silent \
+                --cacert "$state/ca.crt" \
+                --cert "$state/admin.crt" \
+                --key "$state/admin.key" \
+                "$api/api/v1/namespaces/drift-probe" > /dev/null || { soaked=""; break; }
+            done
           fi
           kill -TERM "$pid" 2>/dev/null || true
           status=0
           wait "$pid" || status=$?
           cat "$log"
-          if [ "$status" -ne 0 ] || ! grep -q "Control plane ready" "$log"; then
+          if ! grep -q "Control plane ready" "$log"; then
             echo "The latest release did not reach a ready control plane (exit $status); its stand-ins need updating before it can be supported."
+            exit 1
+          fi
+          if [ "$status" -ne 0 ]; then
+            echo "The latest release died on its own after reaching ready (exit $status); its stand-ins need updating before it can be supported."
             exit 1
           fi
           if [ "$labeled" != 1 ]; then
             echo "The latest release did not label a new namespace with its pod security enforce level; the seed layer's pod security label syncer permissions need updating."
             exit 1
           fi
-          echo "The latest release reached ready, labeled a new namespace, and shut down cleanly."
+          if [ "$soaked" != 1 ]; then
+            echo "The latest release did not stay up and answering for the five minutes after ready; its stand-ins need updating before it can be supported."
+            exit 1
+          fi
+          echo "The latest release reached ready, labeled a new namespace, stayed up for its five-minute soak, and shut down cleanly."
 
   container-smoke:
     if: github.event_name == 'push' || github.event_name == 'schedule'
