@@ -166,4 +166,4 @@ jobs:
           ready=$(./coreshift get clusters | awk '$1 == "coreshift" { print $4 }')
           test "$ready" = ready
           ./coreshift delete cluster
-          test -d "$state"
+          test ! -d "$state"
