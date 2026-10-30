@@ -1785,12 +1785,13 @@ func TestDeleteUnknownNounPrintsHelp(t *testing.T) {
 	}
 }
 
-// TestRunDeleteStopsAndRemovesPreservingState checks the delete contract:
-// the container is stopped with a timeout generous enough for the control
-// plane's teardown and then removed, while the state directory and its
-// marker are left intact. The state directory comes from the name; the
+// TestRunDeleteStopsAndRemovesState checks the delete contract: the
+// container is stopped with a timeout generous enough for the control
+// plane's teardown and then removed, and the state directory goes with
+// the cluster, leaving nothing behind — no state directory, no empty
+// clusters tree. The state directory comes from the name; the
 // container's port is never asked.
-func TestRunDeleteStopsAndRemovesPreservingState(t *testing.T) {
+func TestRunDeleteStopsAndRemovesState(t *testing.T) {
 	writeFakePodman(t)
 	setContainers(t, "coreshift-dev")
 	base := t.TempDir()
@@ -1816,18 +1817,21 @@ func TestRunDeleteStopsAndRemovesPreservingState(t *testing.T) {
 	if !slices.Equal(calls, want) {
 		t.Fatalf("podman calls = %q\nwant %q", calls, want)
 	}
-	if !strings.Contains(out, "State preserved at "+stateDir) {
-		t.Fatalf("output = %q, want the preserved state named", out)
+	if !strings.Contains(out, "State removed at "+stateDir) {
+		t.Fatalf("output = %q, want the removed state named", out)
 	}
-	if _, err := os.Stat(filepath.Join(stateDir, clusterMarkerFilename)); err != nil {
-		t.Fatal("delete removed the state directory")
+	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+		t.Fatal("delete left the state directory behind")
+	}
+	if _, err := os.Stat(filepath.Join(base, "coreshift")); !os.IsNotExist(err) {
+		t.Fatal("delete left an empty state root behind")
 	}
 }
 
-// TestRunDeleteNotRunningPreservesState checks the delete of a cluster whose
-// container is already gone but whose state was preserved: nothing is
-// stopped, and the preserved state is named.
-func TestRunDeleteNotRunningPreservesState(t *testing.T) {
+// TestRunDeleteNotRunningRemovesState checks the delete of a cluster whose
+// container is already gone: nothing is stopped, and the state is removed
+// with the cluster reported not running.
+func TestRunDeleteNotRunningRemovesState(t *testing.T) {
 	writeFakePodman(t)
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
@@ -1849,16 +1853,18 @@ func TestRunDeleteNotRunningPreservesState(t *testing.T) {
 	if calls := podmanCalls(t); !slices.Equal(calls, want) {
 		t.Fatalf("podman calls = %q, want only the existence check and the worker listing", calls)
 	}
-	if !strings.Contains(out, "not running") || !strings.Contains(out, "State preserved at "+stateDir) {
-		t.Fatalf("output = %q, want the cluster reported not running with its preserved state named", out)
+	if !strings.Contains(out, "not running") || !strings.Contains(out, "State removed at "+stateDir) {
+		t.Fatalf("output = %q, want the cluster reported not running with its removed state named", out)
+	}
+	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+		t.Fatal("delete left the state directory behind")
 	}
 }
 
-// TestRunDeleteCleanupRemovesState checks the cleanup flag's contract:
-// the same stop-and-remove happens, and the state directory is removed
-// with the same removal the cleanup command uses, with the removal said
-// plainly in the output.
-func TestRunDeleteCleanupRemovesState(t *testing.T) {
+// TestRunDeletePreserveStateKeepsState checks the preserve-state flag's
+// contract: the same stop-and-remove happens, while the state directory
+// and its marker stay, with the preservation said plainly in the output.
+func TestRunDeletePreserveStateKeepsState(t *testing.T) {
 	writeFakePodman(t)
 	setContainers(t, "coreshift-dev")
 	base := t.TempDir()
@@ -1884,26 +1890,26 @@ func TestRunDeleteCleanupRemovesState(t *testing.T) {
 	if !slices.Equal(calls, want) {
 		t.Fatalf("podman calls = %q\nwant %q", calls, want)
 	}
-	if !strings.Contains(out, "State removed at "+stateDir) {
-		t.Fatalf("output = %q, want the removed state named", out)
+	if !strings.Contains(out, "State preserved at "+stateDir) {
+		t.Fatalf("output = %q, want the preserved state named", out)
 	}
-	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
-		t.Fatal("state directory still exists after cleanup")
+	if _, err := os.Stat(filepath.Join(stateDir, clusterMarkerFilename)); err != nil {
+		t.Fatal("delete removed the state directory")
 	}
 }
 
 // TestRunDeleteMissingCluster checks that deleting a missing cluster is
 // refused plainly, with nothing stopped or removed, with and without the
-// cleanup flag.
+// preserve-state flag.
 func TestRunDeleteMissingCluster(t *testing.T) {
-	for _, cleanup := range []bool{false, true} {
+	for _, preserveState := range []bool{false, true} {
 		writeFakePodman(t)
-		err := runDelete(context.Background(), "nope", cleanup, false)
+		err := runDelete(context.Background(), "nope", preserveState, false)
 		if err == nil || !strings.Contains(err.Error(), "no cluster named nope") {
-			t.Fatalf("cleanup=%v: err = %v, want a plain refusal", cleanup, err)
+			t.Fatalf("preserveState=%v: err = %v, want a plain refusal", preserveState, err)
 		}
 		if calls := podmanCalls(t); len(calls) != 1 || calls[0] != "container exists coreshift-nope" {
-			t.Fatalf("cleanup=%v: podman calls = %q, want only the existence check", cleanup, calls)
+			t.Fatalf("preserveState=%v: podman calls = %q, want only the existence check", preserveState, calls)
 		}
 	}
 }
@@ -1949,11 +1955,14 @@ func TestRunDeleteCascadesWorkers(t *testing.T) {
 		"Deleted worker worker1",
 		"Deleted worker worker2",
 		"Deleted cluster dev",
-		"State preserved at " + stateDir,
+		"State removed at " + stateDir,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output = %q, want %q named", out, want)
 		}
+	}
+	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+		t.Fatal("delete left the cluster's state behind")
 	}
 	if strings.Contains(out, "foreign") {
 		t.Fatalf("another cluster's worker was deleted too:\n%s", out)
@@ -1996,7 +2005,9 @@ func TestRunDeleteWorkerWithoutClusterState(t *testing.T) {
 
 // TestRunDeletePreserveWorkersLeavesWorkers checks the flag's contract:
 // the cluster's container goes, its workers stay untouched, and the state
-// is preserved, so the workers reconnect when the cluster returns.
+// is preserved with them — the flag implies it, since the workers could
+// never rejoin a cluster re-created without its state — so they reconnect
+// when the cluster returns.
 func TestRunDeletePreserveWorkersLeavesWorkers(t *testing.T) {
 	writeFakePodman(t)
 	base := t.TempDir()
@@ -2035,26 +2046,18 @@ func TestRunDeletePreserveWorkersLeavesWorkers(t *testing.T) {
 			t.Fatalf("output = %q, want %q named", out, want)
 		}
 	}
-}
-
-// TestRunDeleteRefusesCleanupWithPreserveWorkers checks that asking for
-// both state removal and preserved workers is refused up front: with no
-// podman on PATH, the flag refusal is still the one that arrives.
-func TestRunDeleteRefusesCleanupWithPreserveWorkers(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	err := runDelete(context.Background(), "dev", true, true)
-	if err == nil || !strings.Contains(err.Error(), "meaningless") {
-		t.Fatalf("err = %v, want a refusal explaining why the pair is refused", err)
+	if _, err := os.Stat(filepath.Join(stateDir, clusterMarkerFilename)); err != nil {
+		t.Fatal("preserve-workers removed the state directory")
 	}
 }
 
 // TestDeleteClusterFlagDefaults checks that the delete command comes with
-// the documented defaults.
+// the documented defaults, and that the retired cleanup flag is gone.
 func TestDeleteClusterFlagDefaults(t *testing.T) {
 	cmd := newDeleteClusterCommand()
 	for name, want := range map[string]string{
 		"name":             "coreshift",
-		"cleanup":          "false",
+		"preserve-state":   "false",
 		"preserve-workers": "false",
 	} {
 		if flag := cmd.Flags().Lookup(name); flag == nil {
@@ -2062,6 +2065,9 @@ func TestDeleteClusterFlagDefaults(t *testing.T) {
 		} else if flag.DefValue != want {
 			t.Fatalf("--%s default = %q, want %q", name, flag.DefValue, want)
 		}
+	}
+	if flag := cmd.Flags().Lookup("cleanup"); flag != nil {
+		t.Fatal("flag --cleanup is gone: delete removes the state by default")
 	}
 }
 

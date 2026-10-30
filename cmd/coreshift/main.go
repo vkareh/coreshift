@@ -1631,23 +1631,24 @@ func newDeleteCommand() *cobra.Command {
 
 // newDeleteClusterCommand builds the command that deletes a cluster: its
 // workers go with it, then its container is stopped, torn down in reverse
-// order like a host-mode shutdown, and removed, while its state directory
-// is preserved unless the cleanup flag asks for its removal too. The
-// preserve-workers flag leaves the cluster's workers running instead.
+// order like a host-mode shutdown, and removed, and its state directory is
+// removed too, leaving nothing behind. The preserve-state flag keeps the
+// state directory, and the preserve-workers flag leaves the cluster's
+// workers running instead.
 func newDeleteClusterCommand() *cobra.Command {
 	var name string
-	var cleanup, preserveWorkers bool
+	var preserveState, preserveWorkers bool
 	cmd := &cobra.Command{
 		Use:          "cluster",
-		Short:        "Delete a cluster, stopping its container and preserving its state",
+		Short:        "Delete a cluster, its workers, and its state",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDelete(cmd.Context(), name, cleanup, preserveWorkers)
+			return runDelete(cmd.Context(), name, preserveState, preserveWorkers)
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", defaultClusterName, "name of the cluster to delete")
-	cmd.Flags().BoolVar(&cleanup, "cleanup", false, "also remove the cluster's state directory")
-	cmd.Flags().BoolVar(&preserveWorkers, "preserve-workers", false, "leave the cluster's workers running, to reconnect when the cluster is re-created from its preserved state")
+	cmd.Flags().BoolVar(&preserveState, "preserve-state", false, "keep the cluster's state directory, so a cluster re-created under the same name boots from it warm")
+	cmd.Flags().BoolVar(&preserveWorkers, "preserve-workers", false, "leave the cluster's workers running; implies --preserve-state, since a worker cannot rejoin a cluster re-created without its state")
 	return cmd
 }
 
@@ -1658,17 +1659,17 @@ func newDeleteClusterCommand() *cobra.Command {
 const containerStopSeconds = 120
 
 // runDelete deletes a cluster: its workers go with it, then its container
-// is stopped and removed. The state directory is preserved, because
-// deleting a cluster destroys nothing; the cleanup flag opts into removing
-// it too, with the same removal the cleanup command uses, and the
-// preserve-workers flag leaves the workers running instead of deleting
-// them, for the control-plane restart: a cluster re-created from preserved
-// state is the same cluster, and its workers reconnect. A cluster whose
-// container is already gone but whose state was preserved reports that and
-// where the state is.
-func runDelete(ctx context.Context, name string, cleanup, preserveWorkers bool) error {
-	if cleanup && preserveWorkers {
-		return fmt.Errorf("--cleanup and --preserve-workers do not go together: removing the state makes the preserved workers meaningless, because a cluster re-created without its state is a different one they cannot rejoin")
+// is stopped and removed, then its state directory is removed too — delete
+// is cleanup, leaving nothing behind. The preserve-state flag keeps the
+// state directory, and the preserve-workers flag leaves the workers
+// running instead of deleting them, for the control-plane restart; it
+// implies preserve-state, because a worker cannot rejoin a cluster
+// re-created without its state. A cluster whose container is already gone
+// but whose state remains reports that, and the state follows the same
+// rule.
+func runDelete(ctx context.Context, name string, preserveState, preserveWorkers bool) error {
+	if preserveWorkers {
+		preserveState = true
 	}
 	if _, err := exec.LookPath("podman"); err != nil {
 		return fmt.Errorf("podman is required to delete clusters: %w", err)
@@ -1713,17 +1714,19 @@ func runDelete(ctx context.Context, name string, cleanup, preserveWorkers bool) 
 	if preserveWorkers && len(workers) > 0 {
 		fmt.Printf("Workers left running: %s\n", strings.Join(workers, ", "))
 	}
-	if cleanup {
-		if _, err := os.Stat(stateDir); err == nil {
-			if _, err := removeStateDir(stateDir); err != nil {
-				return err
-			}
-		}
-		fmt.Printf("State removed at %s\n", stateDir)
+	if preserveState {
+		fmt.Printf("State preserved at %s; coreshift cleanup removes it\n", stateDir)
 		return nil
 	}
-	fmt.Printf("State preserved at %s; coreshift cleanup removes it\n", stateDir)
-	return nil
+	if _, err := os.Stat(stateDir); os.IsNotExist(err) {
+		fmt.Printf("No state at %s\n", stateDir)
+		return nil
+	}
+	if _, err := removeStateDir(stateDir); err != nil {
+		return err
+	}
+	fmt.Printf("State removed at %s\n", stateDir)
+	return pruneClustersTree()
 }
 
 // clusterWorkers lists the names of a cluster's workers: the worker
@@ -1807,7 +1810,7 @@ func deleteWorker(ctx context.Context, name, cluster string) error {
 		return err
 	}
 	if _, statErr := os.Stat(stateDir); statErr != nil {
-		fmt.Printf("Cluster %s has no state left; its node went with the cluster's data\n", cluster)
+		fmt.Printf("Cluster %s has no state left; its node went with it\n", cluster)
 		return nil
 	}
 	if port, _, err := workerClusterTarget(cluster); err == nil && clusterReady(port) {
@@ -1818,7 +1821,7 @@ func deleteWorker(ctx context.Context, name, cluster string) error {
 		fmt.Printf("Node %s removed from cluster %s\n", name, cluster)
 		return nil
 	}
-	fmt.Printf("Cluster %s is not running; its node stays until the cluster's data goes\n", cluster)
+	fmt.Printf("Cluster %s is not running; its node stays until the cluster's state does\n", cluster)
 	return nil
 }
 
@@ -2252,17 +2255,26 @@ func runCleanup(name string, all, clearCache bool) error {
 		removed = true
 	}
 	// A cleanup leaves no empty shells behind: the clusters tree and the
-	// state root go too once they are empty. Removing a non-empty
-	// directory fails and is ignored, so kept siblings survive.
+	// state root go too once they are empty.
+	if err := pruneClustersTree(); err != nil {
+		return err
+	}
+	if removed {
+		fmt.Printf("Freed %s\n", humanSize(freed))
+	}
+	return nil
+}
+
+// pruneClustersTree removes the clusters tree and the state root once they
+// are empty, so a state removal leaves no empty shells behind. Removing a
+// non-empty directory fails and is ignored, so kept siblings survive.
+func pruneClustersTree() error {
 	tree, err := clustersTree()
 	if err != nil {
 		return err
 	}
 	_ = os.Remove(tree)
 	_ = os.Remove(filepath.Dir(tree))
-	if removed {
-		fmt.Printf("Freed %s\n", humanSize(freed))
-	}
 	return nil
 }
 
