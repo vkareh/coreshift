@@ -249,7 +249,7 @@ func newClusterCommand() *cobra.Command {
 	cmd.Flags().IntVar(&port, "port", defaultAPIPort, "port the API server listens on")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "stream child process logs to the terminal")
 	cmd.Flags().StringVar(&release.image, "release-image", "", "exact release image reference to run, e.g. quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64")
-	cmd.Flags().StringVar(&release.version, "version", "", "OpenShift version to run, X.Y or X.Y.Z; defaults to the newest release, or the release recorded in the state directory")
+	cmd.Flags().StringVar(&release.version, "version", "", "OpenShift version to run, X.Y, X.Y.Z, or newest for the registry's absolute newest; defaults to the newest verified release, or the release recorded in the state directory")
 	cmd.Flags().StringVar(&release.registry, "registry", defaultReleaseRepository, "repository to resolve the release image from")
 	cmd.Flags().StringVar(&release.arch, "arch", defaultArch, "architecture of the release payload, as uname -m reports it")
 	if err := cmd.MarkFlagRequired("pull-secret"); err != nil {
@@ -899,7 +899,7 @@ func newCreateClusterCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "stream the image build's output to the terminal")
 	cmd.Flags().StringVar(&imagePath, "image", "", "container image holding coreshift itself that the cluster runs in, minted from this binary when not given")
 	cmd.Flags().StringVar(&release.image, "release-image", "", "exact OpenShift payload release image to build the control plane from, e.g. quay.io/openshift-release-dev/ocp-release:4.22.8-x86_64")
-	cmd.Flags().StringVar(&release.version, "version", "", "OpenShift version to run, X.Y or X.Y.Z; defaults to the newest release, or the release recorded in the state directory")
+	cmd.Flags().StringVar(&release.version, "version", "", "OpenShift version to run, X.Y, X.Y.Z, or newest for the registry's absolute newest; defaults to the newest verified release, or the release recorded in the state directory")
 	cmd.Flags().StringVar(&release.registry, "registry", defaultReleaseRepository, "repository to resolve the release image from")
 	cmd.Flags().StringVar(&release.arch, "arch", defaultArch, "architecture of the release payload, as uname -m reports it")
 	if err := cmd.MarkFlagRequired("pull-secret"); err != nil {
@@ -2125,17 +2125,21 @@ func containerPort(container string) (int, error) {
 
 // bootRelease returns the release image reference this run boots, with a
 // note to print under it. An explicitly requested release resolves as
-// before; with none requested and a state directory recording a release,
-// the recorded one boots again — a warm re-create, not a surprise
-// upgrade — and the registry is still checked for a newer patch of its
-// stream to mention in the note.
+// before, with a warning when it is beyond the newest verified line;
+// with none requested and a state directory recording a release, the
+// recorded one boots again — a warm re-create, not a surprise upgrade —
+// and the registry is still checked for a newer patch of its stream to
+// mention in the note.
 func bootRelease(ctx context.Context, client *image.Client, release releaseOptions, stateDir string) (string, string, error) {
 	recorded := stateRelease(stateDir)
 	if release.image == "" && release.version == "" && recorded != "" {
 		return recorded, newerReleaseNote(ctx, client, release, recorded), nil
 	}
 	ref, err := client.ResolveRelease(ctx, release.registry, release.version, release.arch, release.image)
-	return ref, "", err
+	if err != nil {
+		return "", "", err
+	}
+	return ref, image.BeyondLineWarning(ref), nil
 }
 
 // newerReleaseNote returns a one-line note naming the newest patch of the

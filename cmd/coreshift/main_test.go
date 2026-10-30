@@ -1193,6 +1193,42 @@ func TestBootReleaseRequestedReleaseWins(t *testing.T) {
 	}
 }
 
+// TestBootReleaseWarnsBeyondVerifiedLine checks that any explicitly
+// requested release from a line newer than the verified one — a
+// version, the newest value, or a pinned image — warns, and that an
+// in-line request stays quiet.
+func TestBootReleaseWarnsBeyondVerifiedLine(t *testing.T) {
+	for name, tc := range map[string]struct {
+		release releaseOptions
+		refHas  string
+		warns   bool
+	}{
+		"version":         {releaseOptions{version: "5.0.0", arch: "x86_64"}, "5.0.0", true},
+		"newest":          {releaseOptions{version: "newest", arch: "x86_64"}, "5.0.0", true},
+		"pinned image":    {releaseOptions{image: "reg.example/ocp-release:5.0.0-x86_64"}, "5.0.0", true},
+		"in-line version": {releaseOptions{version: "4.22.11", arch: "x86_64"}, "4.22.11", false},
+	} {
+		tc.release.registry = newTagRegistry(t, "4.22.11-x86_64", "5.0.0-x86_64")
+
+		ref, note, err := bootRelease(context.Background(), &image.Client{}, tc.release, t.TempDir())
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !strings.Contains(ref, tc.refHas) {
+			t.Fatalf("%s: ref = %q, want it to carry %s", name, ref, tc.refHas)
+		}
+		if !tc.warns {
+			if note != "" {
+				t.Fatalf("%s: note = %q, want none", name, note)
+			}
+			continue
+		}
+		if !strings.Contains(note, "beyond the newest verified line") {
+			t.Fatalf("%s: note = %q, want the beyond-line warning", name, note)
+		}
+	}
+}
+
 // swapStdin points standard input at f for the duration of the test, so
 // offer helpers can be exercised without a real terminal.
 func swapStdin(t *testing.T, f *os.File) {
