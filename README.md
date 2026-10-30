@@ -19,15 +19,15 @@ validation — RBAC/SCC checks, API compatibility testing, admission and
 defaulting behavior — without the cost and complexity of a full cluster.
 
 The command names follow one rule: run means here in this terminal;
-create means in a managed container; delete removes the container and
-preserves the data; cleanup destroys the data.
+create means in a managed container; delete removes the cluster, its
+workers, and its state; cleanup clears leftover state and cached images.
 
 | | `coreshift run cluster` | `coreshift create cluster` |
 |---|---|---|
 | Control plane | Real | Real |
 | RBAC/SCC/admission | Real | Real |
 | Runtime dependency | None (bare processes) | podman |
-| Lifecycle | Foreground; Ctrl-C stops it | Background container; `delete cluster` stops it |
+| Lifecycle | Foreground; Ctrl-C stops it | Background container; `delete cluster` removes it |
 | Several clusters at once | No (the components share fixed ports) | Yes; one per `--name`, each published on its own `--port` |
 | Best for | Machines without a container runtime; CI gating, PR checks | Clusters that outlive the terminal; side-by-side clusters |
 
@@ -36,8 +36,9 @@ preserves the data; cleanup destroys the data.
 - `coreshift run cluster`: run the control plane in this terminal.
 - `coreshift create cluster`: run it in a managed container and wait for
   it to be ready.
-- `coreshift delete cluster [--name]`: stop a cluster's container and
-  remove it and its workers, preserving the state.
+- `coreshift delete cluster [--name]`: remove a cluster, its workers,
+  and its state; `--preserve-state` keeps the state, and
+  `--preserve-workers` keeps the workers and the state.
 - `coreshift get clusters`: list the clusters with their port, release,
   and live readiness.
 - `coreshift get kubeconfig [--name]`: print the path to a cluster's
@@ -138,8 +139,9 @@ there the next time.
 - Pull secret: stored in cluster state, as the `pull-secret` Secret in
   the `openshift-config` namespace — the global pull secret a real
   cluster keeps, seeded by the startup from the file the run was given.
-  It lives in the state directory's etcd data and is destroyed with it
-  by `coreshift cleanup`. Worker creation reads it from there.
+  It lives in the state directory's etcd data and is destroyed with it,
+  by `delete cluster` or `coreshift cleanup`. Worker creation reads it
+  from there.
 - Image cache: `~/.cache/coreshift/`, shared by all runs regardless of
   cluster; see [Cache](#cache).
 
@@ -194,8 +196,9 @@ OAuth object and rolls the OAuth server live when it changes. Here the
 identity providers are rendered into the OAuth server at startup, so changes
 take effect on the next restart. Once the objects above are in place, restart
 the control plane — `coreshift run cluster` again in host mode, or
-`coreshift delete cluster` followed by `coreshift create cluster` in container
-mode — then log in with the command from the ready summary:
+`coreshift delete cluster --preserve-state` followed by `coreshift create
+cluster` in container mode — then log in with the command from the ready
+summary:
 
 ```
 oc login https://127.0.0.1:6443 --certificate-authority=/home/you/.local/state/coreshift/clusters/coreshift/ca.crt -u developer -p password
@@ -300,24 +303,29 @@ Container coreshift is running in the background
 ```
 
 Log in with `oc` as described in [Logging in](#logging-in); the restart it
-asks for is `coreshift delete cluster` followed by `coreshift create
-cluster`. Then check what is running, and stop it without losing the data:
+asks for is `coreshift delete cluster --preserve-state` followed by
+`coreshift create cluster`. Then check what is running, and remove it all
+when done:
 
 ```
 ./coreshift get clusters
 ./coreshift delete cluster
 ```
 
-`delete` prints where the state was preserved, and the next create with the
-same name picks it back up — on whatever port, warm.
+`delete` removes the cluster, its workers, and its state, saying what was
+removed and where the state was. To keep the state for a warm re-create,
+pass `--preserve-state`: the output then says the state was preserved,
+and the next create with the same name picks it back up — on whatever
+port, warm.
 
 ### Flags
 
 - `--pull-secret` (required): path to the pull secret JSON file.
 - `--port`: the port the API is published on, 6443 by default. The state
-  directory does not depend on it, so a cluster re-created on a different
-  port reuses its state warm, with the kubeconfig's server URL rewritten
-  on boot to match the port in use. Create refuses a port something
+  directory does not depend on it, so a cluster deleted with
+  `--preserve-state` and re-created on a different port reuses its state
+  warm, with the kubeconfig's server URL rewritten on boot to match the
+  port in use. Create refuses a port something
   already listens on, and one of the control plane's reserved ports
   listed under host mode.
 - `--name`: the cluster's name, `coreshift` by default; the container is
@@ -346,7 +354,7 @@ The container bind-mounts the named cluster's state directory and the
 shared image cache into itself, so everything lands exactly where host
 mode puts it, and the modes share it: a release cached for one is cached
 for the other, and a host-mode run of the same cluster name reuses its
-certificates and data.
+certificates and state.
 
 - State directory: `~/.local/state/coreshift/clusters/<name>/` by
   default (`$XDG_STATE_HOME/coreshift/clusters/<name>`) — the same
@@ -356,7 +364,8 @@ certificates and data.
 - Pull secret: stored in cluster state, as the `pull-secret` Secret in
   the `openshift-config` namespace — the same object host mode stores,
   seeded by the run inside the container. It lives in the state
-  directory's etcd data and is destroyed with it by `coreshift cleanup`.
+  directory's etcd data and is destroyed with it, by `delete cluster` or
+  `coreshift cleanup`.
 - Cached images: `~/.cache/coreshift/`, shared by everything; see
   [Cache](#cache).
 - The container's own boot output: kept by podman; `podman logs
@@ -543,17 +552,16 @@ workloads run.
 
 ## The `delete cluster` command
 
-`coreshift delete cluster` stops the named cluster's container and removes
-it. Stopping the container tears the control plane down in reverse startup
-order, like a host-mode shutdown. The cluster's workers go with it: each
-one is deleted the same way `delete worker` deletes it — container stopped
-and removed, node and machine record cleaned out of the cluster — so no
-worker is left dialing a dead cluster. The state directory is deliberately
-preserved — deleting a cluster destroys nothing — and the command prints
-where the state is, with `coreshift cleanup` named as the way to remove
-it. A cluster whose container is already gone but whose state was
-preserved is reported as not running, with its state named; its workers
-still go.
+`coreshift delete cluster` removes the named cluster and everything it
+owns: its workers, its container, and its state directory — the
+certificate authority keys, the admin credentials, the stored pull
+secret, and the etcd data. Stopping the container tears the control
+plane down in reverse startup order, like a host-mode shutdown, and the
+workers go first, each deleted the same way `delete worker` deletes it,
+while the cluster's API still answers. The command says what was removed
+and where the state was, and leaves nothing behind: no containers, no
+state directory, not even an empty clusters tree. Keeping any of it is
+the explicit act.
 
 ```
 ./coreshift delete cluster
@@ -561,26 +569,32 @@ still go.
 
 `--name` selects a cluster other than the default `coreshift`.
 
-`--cleanup` opts into destroying the data as well: once the container is
-down, the state directory is removed with the same removal the cleanup
-command uses, while the shared image cache is preserved either way. The
-command says in one line whether the state was preserved or removed, and
-where.
+`--preserve-state` keeps the state directory; the output says the state
+was preserved, with its path. This is the warm re-creation workflow: the
+next create with the same name — on whatever port — boots from the same
+certificates and etcd data, pulling nothing. The shared image cache is
+kept either way.
 
 `--preserve-workers` leaves the cluster's workers running when the
-cluster goes. This is the control-plane-restart workflow: delete the
-cluster with the flag, then create it again under the same name. The
-preserved state is the same cluster — same CA, same certificates, same
-node objects — so the workers' kubelets reconnect once the API returns
-and resume heartbeating against their still-existing nodes, tolerating
-the outage the way nodes do in any real cluster. The nodes return to the
-state they had, NotReady with the honest no-CNI reason, and no new
-certificates are issued: they are the same nodes, not fresh joins.
-Without the flag the workers are deleted, so a re-created cluster starts
-with a clean node list until new workers join. The flag cannot go with
-`--cleanup`: removing the state makes the preserved workers meaningless,
-because a cluster re-created without its state is a different one they
-cannot rejoin.
+cluster goes, and implies `--preserve-state`, because a worker cannot
+rejoin a cluster re-created without its state. This is the
+control-plane-restart workflow: delete the cluster with the flag, then
+create it again under the same name. The preserved state is the same
+cluster — same CA, same certificates, same node objects — so the
+workers' kubelets reconnect once the API returns and resume heartbeating
+against their still-existing nodes, tolerating the outage the way nodes
+do in any real cluster. The nodes return to the state they had, NotReady
+with the honest no-CNI reason, and no new certificates are issued: they
+are the same nodes, not fresh joins. Without the flag the workers are
+deleted, so a re-created cluster starts with a clean node list until new
+workers join.
+
+A cluster whose container is already gone but whose state remains is
+reported as not running, and the state follows the same rule; its
+workers still go. Failed creates never remove state — it stays behind
+for inspection — so delete is the only command that removes it by intent;
+`coreshift cleanup` is the one for state orphaned by crashes or older
+deletes.
 
 ## The `delete worker` command
 
@@ -588,9 +602,9 @@ cannot rejoin.
 it, then removes the node and the machine record its join created, so
 the cluster's node list is clean again. The cluster must be running to
 remove them; when it is not, the container still goes, and the node
-stays until the cluster's data does. When the cluster's state is already
+stays until the cluster's state does. When the cluster's state is already
 gone, the container still goes too, with a note that the node went with
-the cluster's data.
+the cluster's state.
 
 Deleting a cluster without `--preserve-workers` deletes its workers the
 same way, one by one before the cluster's own container goes; see
@@ -682,11 +696,14 @@ base gets its own image.
 
 ## The `cleanup` command
 
-`coreshift cleanup` removes the default cluster's state directory, so the
-next run starts fresh: new certificates, empty etcd, nothing seeded. There
-is no confirmation prompt; the command is explicit and safe for scripts.
-Both modes keep their state in the same directories, so cleanup also
-removes a container-mode cluster's state.
+`coreshift cleanup` clears leftover state and cached images. It removes
+the default cluster's state directory, so the next run starts fresh: new
+certificates, empty etcd, nothing seeded. Delete already removes a
+cluster's state with it, so cleanup is for what a crash or an older
+delete left behind, and for state a delete kept on purpose. There is no
+confirmation prompt; the command is explicit and safe for scripts. Both
+modes keep their state in the same directories, so cleanup also removes
+a container-mode cluster's state.
 
 ```
 ./coreshift cleanup
