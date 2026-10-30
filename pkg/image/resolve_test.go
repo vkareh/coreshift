@@ -65,7 +65,10 @@ func TestResolveReleasePinnedGolden(t *testing.T) {
 	}
 }
 
-func TestResolveReleasePicksNewestRelease(t *testing.T) {
+// TestResolveReleaseDefaultPicksNewestInLine checks the unversioned
+// default against the standard fixture: the newest release within the
+// verified line for the machine's architecture.
+func TestResolveReleaseDefaultPicksNewestInLine(t *testing.T) {
 	repo := newTagRegistry(t, releaseRegistryTags, 100)
 
 	ref, err := (&Client{}).ResolveRelease(context.Background(), repo, "", "aarch64", "")
@@ -85,6 +88,36 @@ func TestResolveReleaseWithinMinorVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	if want := repo + ":4.22.11-x86_64"; ref != want {
+		t.Fatalf("ref = %q, want %q", ref, want)
+	}
+}
+
+// TestResolveReleaseDefaultStaysWithinVerifiedLine checks that an
+// unversioned resolution floats to the newest release within the
+// verified line, not the registry's absolute newest.
+func TestResolveReleaseDefaultStaysWithinVerifiedLine(t *testing.T) {
+	repo := newTagRegistry(t, []string{"4.22.21-x86_64", "5.0.0-x86_64"}, 100)
+
+	ref, err := (&Client{}).ResolveRelease(context.Background(), repo, "", "x86_64", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := repo + ":4.22.21-x86_64"; ref != want {
+		t.Fatalf("ref = %q, want %q", ref, want)
+	}
+}
+
+// TestResolveReleaseNewestIgnoresVerifiedLine checks that the explicit
+// newest value resolves the registry's absolute newest release, so the
+// drift alarm can keep probing the frontier.
+func TestResolveReleaseNewestIgnoresVerifiedLine(t *testing.T) {
+	repo := newTagRegistry(t, []string{"4.22.21-x86_64", "5.0.0-x86_64"}, 100)
+
+	ref, err := (&Client{}).ResolveRelease(context.Background(), repo, "newest", "x86_64", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := repo + ":5.0.0-x86_64"; ref != want {
 		t.Fatalf("ref = %q, want %q", ref, want)
 	}
 }
