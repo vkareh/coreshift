@@ -106,8 +106,10 @@ there the next time.
 - `--verbose`: stream each child's logs live to the terminal, prefixed with
   the child's name. By default child logs are captured to one file per child
   under the `logs` folder of the state directory.
-- `--version`: the OpenShift version to run, `X.Y` or `X.Y.Z`. Without it the
-  newest stable release for the machine's architecture is picked.
+- `--version`: the OpenShift version to run, `X.Y`, `X.Y.Z`, or `newest` for
+  the registry's absolute newest release. Without it the newest release
+  within the newest verified line is picked; see
+  [Choosing the release](#choosing-the-release).
 - `--release-image`: an exact release image reference to run, with no
   registry queries at all.
 - `--registry`: the repository release versions are resolved from,
@@ -207,16 +209,33 @@ oc login https://127.0.0.1:6443 --certificate-authority=/home/you/.local/state/c
 ### Choosing the release
 
 Four flags pick the release; the defaults cover the common case. With none
-of them set, the newest stable release for the machine's architecture is
-resolved from the registry — unless the state directory already records a
-release, which then boots again as-is: a warm re-create, not a surprise
-upgrade. When the registry holds a newer patch of that release's stream,
-the run says so in one line and names `--version` as the flag that
-upgrades the state in place:
+of them set, the newest release within the newest verified line for the
+machine's architecture is resolved from the registry — unless the state
+directory already records a release, which then boots again as-is: a warm
+re-create, not a surprise upgrade. When the registry holds a newer patch
+of that release's stream, the run says so in one line and names
+`--version` as the flag that upgrades the state in place:
 
 ```
 ./coreshift run cluster --pull-secret ~/pull-secret
 ```
+
+Support is defined by what CoreShift has verified. The newest verified
+line is the newest OpenShift minor the stand-ins have been checked
+against — 4.22 today — and the unversioned default stays inside it, so a
+brand-new, unverified major cannot arrive silently. Asking for a release
+beyond the line works; the run just prints a plain warning first:
+
+```
+warning: 5.0.0 is beyond the newest verified line, 4.22 — it may not work
+```
+
+`--version newest` asks for the registry's absolute newest release,
+ignoring the line. It exists for the nightly drift alarm in CI, which
+probes the frontier so a new release is noticed; everything else should
+stay on the verified default. Raising the line is deliberate work, done
+together with the stand-in updates a new line needs, and it is one
+constant in the code.
 
 `--version X.Y` pins a minor: the newest patch release of that stream is
 resolved.
