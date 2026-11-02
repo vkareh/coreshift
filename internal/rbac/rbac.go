@@ -41,14 +41,6 @@ const (
 	privilegedSyncer        = "system:openshift:controller:privileged-namespaces-psa-label-syncer"
 	privilegedSyncerAccount = "privileged-namespaces-psa-label-syncer"
 
-	// The machine approver's identity, matching its ClusterRole the way
-	// OpenShift controller identities do; its component kubeconfig presents
-	// this name. The payload delivers the ClusterRole itself, but its own
-	// binding grants the payload's service account, not this certificate
-	// identity, so only the seeded binding gives the locally run approver
-	// its permissions.
-	machineApprover = "system:openshift:controller:machine-approver"
-
 	// The node bootstrap permission pair the machine config operator
 	// applies in real clusters: the service account whose token a node's
 	// bootstrap kubeconfig carries may request node client certificates.
@@ -109,9 +101,6 @@ func seed(ctx context.Context, client kubernetes.Interface) error {
 		return err
 	}
 	if err := ensurePrivilegedSyncer(ctx, client); err != nil {
-		return err
-	}
-	if err := ensureMachineApprover(ctx, client); err != nil {
 		return err
 	}
 	return ensureNodeBootstrapper(ctx, client)
@@ -275,32 +264,6 @@ func ensurePrivilegedSyncer(ctx context.Context, client kubernetes.Interface) er
 	_, err := client.RbacV1().ClusterRoleBindings().Create(ctx, binding, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("register %s cluster role binding: %w", privilegedSyncer, err)
-	}
-	return nil
-}
-
-// ensureMachineApprover grants the locally run machine approver the
-// permissions the payload's ClusterRole carries: the payload delivers the
-// role itself, but its own binding grants its service account, so the
-// binding here is what gives the approver's certificate identity the same
-// grant. Copied verbatim from the approver's own manifests, which the
-// cluster-version-operator applies in real clusters.
-func ensureMachineApprover(ctx context.Context, client kubernetes.Interface) error {
-	binding := &rbacv1.ClusterRoleBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: machineApprover},
-		Subjects: []rbacv1.Subject{{
-			Kind: rbacv1.UserKind,
-			Name: machineApprover,
-		}},
-		RoleRef: rbacv1.RoleRef{
-			APIGroup: rbacv1.GroupName,
-			Kind:     "ClusterRole",
-			Name:     machineApprover,
-		},
-	}
-	_, err := client.RbacV1().ClusterRoleBindings().Create(ctx, binding, metav1.CreateOptions{})
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("register %s cluster role binding: %w", machineApprover, err)
 	}
 	return nil
 }

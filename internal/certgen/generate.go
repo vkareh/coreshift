@@ -51,6 +51,13 @@ const (
 	SAPubFilename                                = "sa.pub"
 )
 
+// machineApproverIdentity is the username the machine approver's client
+// certificate carries: the service account the release payload's own
+// binding grants, so the approver needs no permissions seeded for it.
+// A certificate common name stands in for the account's token the way
+// the other component identities stand in for theirs.
+const machineApproverIdentity = "system:serviceaccount:openshift-cluster-machine-approver:machine-approver-sa"
+
 // GenerateAll generates every certificate and key needed to run a CoreShift
 // control plane, plus client kubeconfigs, writing all of them to outputDir.
 // The on-disk layout is:
@@ -154,10 +161,11 @@ func GenerateAll(outputDir string, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("generate cluster-policy-controller kubeconfig: %w", err)
 	}
-	// The machine approver runs with its own controller identity rather
-	// than the admin identity, the way its deployment does in real
-	// clusters; the permissions behind the identity are seeded.
-	clusterMachineApproverKubeconfig, err := generateComponentKubeconfig("system:openshift:controller:machine-approver", serverURL, clusterName, caCertPEM, caKeyPEM)
+	// The machine approver runs with the payload's own service-account
+	// identity rather than the admin identity, the way its deployment
+	// does in real clusters; the version operator delivers the role and
+	// binding that grant it, so nothing is seeded for it here.
+	clusterMachineApproverKubeconfig, err := generateComponentKubeconfig(machineApproverIdentity, serverURL, clusterName, caCertPEM, caKeyPEM)
 	if err != nil {
 		return fmt.Errorf("generate cluster-machine-approver kubeconfig: %w", err)
 	}

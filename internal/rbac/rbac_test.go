@@ -119,32 +119,6 @@ func assertBoundToServiceAccount(t *testing.T, client kubernetes.Interface, name
 	}
 }
 
-func TestSeedRegistersMachineApprover(t *testing.T) {
-	client := fake.NewSimpleClientset()
-
-	if err := seed(context.Background(), client); err != nil {
-		t.Fatal(err)
-	}
-
-	// Only the binding is seeded: the payload delivers the ClusterRole,
-	// but its own binding grants its service account, so this binding is
-	// what gives the approver's certificate identity the grant.
-	binding, err := client.RbacV1().ClusterRoleBindings().Get(context.Background(), machineApprover, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("cluster role binding: %v", err)
-	}
-	wantSubjects := []rbacv1.Subject{{
-		Kind: rbacv1.UserKind,
-		Name: machineApprover,
-	}}
-	if !reflect.DeepEqual(binding.Subjects, wantSubjects) {
-		t.Fatalf("binding has unexpected subjects: %+v", binding.Subjects)
-	}
-	if binding.RoleRef.Kind != "ClusterRole" || binding.RoleRef.Name != machineApprover {
-		t.Fatalf("binding points at unexpected role: %+v", binding.RoleRef)
-	}
-}
-
 func TestSeedRegistersNodeBootstrapper(t *testing.T) {
 	client := fake.NewSimpleClientset()
 
@@ -189,8 +163,8 @@ func TestSeedIsRepeatable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bindings.Items) != 5 {
-		t.Fatalf("expected the same five cluster role bindings after reseeding, got %d", len(bindings.Items))
+	if len(bindings.Items) != 4 {
+		t.Fatalf("expected the same four cluster role bindings after reseeding, got %d", len(bindings.Items))
 	}
 }
 

@@ -128,10 +128,11 @@ payload does not carry stay seeded too: the ones the label syncers and
 the namespace security allocation controller impersonate, applied in
 real clusters by an operator that runs as a payload Deployment and sits
 Pending here, and the node bootstrap binding, applied in real clusters
-by the machine config operator. The machine approver's binding stays
-for a different reason: the payload's own binding grants its service
-account, while the locally run approver presents its certificate
-identity, which only the seeded binding grants. The OAuth client stays
+by the machine config operator. The machine approver's permissions come
+wholly from the payload instead: its kubeconfig's certificate carries
+the payload's own service-account identity, so the role and binding the
+operator applies are the approver's, and it waits for them before
+starting like the other children. The OAuth client stays
 because no payload manifest carries it; the authentication operator
 bootstraps it in real clusters. The pull secret stays because the
 operator consumes it rather than producing it.

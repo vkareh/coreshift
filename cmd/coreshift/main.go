@@ -718,9 +718,12 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 		// the machine standing in for the cloud machine that would back
 		// the node. The management and workload clusters are the same
 		// here, so both kubeconfig flags point at the one component
-		// kubeconfig. Its ClusterOperator status reporting stays off
-		// because this control plane runs no ClusterOperator machinery;
-		// everything else runs as the payload deploys it.
+		// kubeconfig, whose certificate carries the payload's own
+		// service-account identity so the permissions the payload's
+		// binding grants are the approver's. Its ClusterOperator status
+		// reporting stays off because this control plane runs no
+		// ClusterOperator machinery; everything else runs as the payload
+		// deploys it.
 		{
 			Name: "cluster-machine-approver",
 			Path: openShiftBinaries["cluster-machine-approver"],
@@ -730,6 +733,14 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 				"--disable-status-controller",
 				// Single instance, no lease to elect.
 				"--leader-elect=false",
+			},
+			// The version operator delivers the role and binding behind
+			// the approver's identity; the approver waits for them like
+			// the other children wait for what the payload carries.
+			BeforeStart: func(ctx context.Context) error {
+				return gateOn(ctx, "the machine approver RBAC",
+					gate.ClusterRole("system:openshift:controller:machine-approver"),
+					gate.ClusterRoleBinding("system:openshift:controller:machine-approver"))
 			},
 		},
 	}

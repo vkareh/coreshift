@@ -93,18 +93,19 @@ func TestGenerateAll(t *testing.T) {
 			t.Fatalf("%s client certificate is not in the system:masters group", name)
 		}
 	}
-	// The machine approver runs with its own controller identity, so its
-	// kubeconfig's certificate carries that name and no group.
+	// The machine approver runs with the payload's service-account
+	// identity, so its kubeconfig's certificate carries that name and no
+	// group.
 	config, err = clientcmd.Load(readFile(t, outputDir, ClusterMachineApproverKubeconfigFilename))
 	if err != nil {
 		t.Fatalf("load %s: %v", ClusterMachineApproverKubeconfigFilename, err)
 	}
-	user, ok := config.AuthInfos["system:openshift:controller:machine-approver@coreshift"]
+	user, ok := config.AuthInfos[machineApproverIdentity+"@coreshift"]
 	if !ok {
 		t.Fatalf("%s has no machine approver user", ClusterMachineApproverKubeconfigFilename)
 	}
 	cert := parseCertificate(t, user.ClientCertificateData)
-	if cert.Subject.CommonName != "system:openshift:controller:machine-approver" {
+	if cert.Subject.CommonName != machineApproverIdentity {
 		t.Fatalf("%s client certificate common name = %q", ClusterMachineApproverKubeconfigFilename, cert.Subject.CommonName)
 	}
 	if len(cert.Subject.Organization) != 0 {
@@ -129,7 +130,7 @@ func TestGenerateAllNamesEntriesForCluster(t *testing.T) {
 		AdminKubeconfigFilename:                  "admin",
 		ControllerManagerKubeconfigFilename:      "system:kube-controller-manager",
 		OpenShiftAPIServerKubeconfigFilename:     "system:admin",
-		ClusterMachineApproverKubeconfigFilename: "system:openshift:controller:machine-approver",
+		ClusterMachineApproverKubeconfigFilename: machineApproverIdentity,
 	} {
 		config, err := clientcmd.Load(readFile(t, outputDir, name))
 		if err != nil {
