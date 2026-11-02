@@ -26,12 +26,7 @@ func TestSeedRegistersDefinitions(t *testing.T) {
 		scope                        apiextensionsv1.ResourceScope
 	}{
 		{"clusterresourcequotas.quota.openshift.io", "quota.openshift.io", "clusterresourcequotas", "v1", apiextensionsv1.ClusterScoped},
-		{"securitycontextconstraints.security.openshift.io", "security.openshift.io", "securitycontextconstraints", "v1", apiextensionsv1.ClusterScoped},
-		{"rangeallocations.security.internal.openshift.io", "security.internal.openshift.io", "rangeallocations", "v1", apiextensionsv1.ClusterScoped},
 		{"rolebindingrestrictions.authorization.openshift.io", "authorization.openshift.io", "rolebindingrestrictions", "v1", apiextensionsv1.NamespaceScoped},
-		{"oauths.config.openshift.io", "config.openshift.io", "oauths", "v1", apiextensionsv1.ClusterScoped},
-		{"infrastructures.config.openshift.io", "config.openshift.io", "infrastructures", "v1", apiextensionsv1.ClusterScoped},
-		{"machines.machine.openshift.io", "machine.openshift.io", "machines", "v1beta1", apiextensionsv1.NamespaceScoped},
 	} {
 		definition, err := client.ApiextensionsV1().CustomResourceDefinitions().Get(context.Background(), want.name, metav1.GetOptions{})
 		if err != nil {

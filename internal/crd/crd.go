@@ -1,7 +1,10 @@
-// Package crd seeds the custom resource definitions that OpenShift
-// controllers expect to already exist when they start. In real deployments
-// the config operator applies them; this package does the equivalent for a
-// locally run control plane.
+// Package crd seeds the custom resource definitions the API server needs
+// before it can answer: the quota definition its own admission chain reads
+// over every namespaced write, and the role binding restrictions definition
+// its own role-binding admission checks before it can bootstrap its
+// bindings. The version operator delivers every other definition this
+// control plane uses, verified on a fresh boot, so nothing else is seeded
+// here.
 package crd
 
 import (
@@ -20,56 +23,26 @@ import (
 )
 
 // The definition manifests, copied verbatim from the openshift/api
-// repository. In a full cluster the config operator applies them, and
-// nothing else does here.
+// repository. Both must pre-date the API server answering:
 //
 // The cluster resource quota definition backs the admission chain that
 // gates every namespaced write on an informer over the API; without it,
-// creating any namespaced object fails.
+// creating any namespaced object fails. The version operator cannot
+// deliver it, because it only applies after the API server answers.
+//
+// The role binding restrictions definition backs the admission check that
+// gates every role binding creation; without it, the API server's own
+// bootstrap cannot create its bindings and never becomes healthy. The
+// operator does carry this definition, but its delivery lands seconds
+// after the API server answers, past the controller manager's bounded
+// wait for the API server's health, so a boot relying on it is a coin
+// flip the seed removes.
 //
 //go:embed 0000_00_apiserver_01_clusterresourcequotas.crd.yaml
 var clusterResourceQuotaManifest string
 
-// The security context constraints definition backs the objects the
-// cluster policy controller reconciles; without it, listing the
-// constraints fails.
-//
-//go:embed 0000_03_config-operator_01_securitycontextconstraints.crd.yaml
-var securityContextConstraintsManifest string
-
-// The range allocation definition backs the UID range allocation the
-// cluster policy controller writes.
-//
-//go:embed 0000_03_config-operator_02_rangeallocations.crd.yaml
-var rangeAllocationManifest string
-
-// The role binding restrictions definition backs the admission check that
-// gates every role binding creation; without it, the RBAC bootstrap cannot
-// create its bindings and the API server never becomes healthy.
-//
 //go:embed 0000_03_config-operator_01_rolebindingrestrictions.crd.yaml
 var roleBindingRestrictionsManifest string
-
-// The OAuth definition backs the OAuth objects the OAuth server watches to
-// load identity providers at runtime; without it, applying one fails with
-// "no matches for kind OAuth".
-//
-//go:embed 0000_10_config-operator_01_oauths.crd.yaml
-var oauthManifest string
-
-// The Infrastructure definition backs the cluster's Infrastructure object,
-// which the managed-node admission reads before permitting node creation;
-// without it, no node can register.
-//
-//go:embed 0000_10_config-operator_01_infrastructures-Default.crd.yaml
-var infrastructureManifest string
-
-// The Machine definition backs the machine objects the machine approver
-// matches node certificate requests against; without it, the approver never
-// sees a machine and approves nothing.
-//
-//go:embed 0000_30_machine-api-operator_02_machine.Default.crd.yaml
-var machineManifest string
 
 // definitions pairs each embedded manifest with the name of the definition
 // it holds.
@@ -78,12 +51,7 @@ var definitions = []struct {
 	manifest string
 }{
 	{name: "clusterresourcequotas.quota.openshift.io", manifest: clusterResourceQuotaManifest},
-	{name: "securitycontextconstraints.security.openshift.io", manifest: securityContextConstraintsManifest},
-	{name: "rangeallocations.security.internal.openshift.io", manifest: rangeAllocationManifest},
 	{name: "rolebindingrestrictions.authorization.openshift.io", manifest: roleBindingRestrictionsManifest},
-	{name: "oauths.config.openshift.io", manifest: oauthManifest},
-	{name: "infrastructures.config.openshift.io", manifest: infrastructureManifest},
-	{name: "machines.machine.openshift.io", manifest: machineManifest},
 }
 
 // objectRetryInterval spaces out retries while kube-apiserver warms up or
@@ -91,9 +59,9 @@ var definitions = []struct {
 var objectRetryInterval = 3 * time.Second
 
 // Seed applies the definitions and waits for the API server to serve them,
-// so controllers that call these APIs do not hit a missing one. The writes
-// are retried and idempotent, so it is safe to call while the API server is
-// still coming up.
+// so the API server's own admission has them in place when it answers. The
+// writes are retried and idempotent, so it is safe to call while the API
+// server is still coming up.
 func Seed(ctx context.Context, kubeconfigPath string) error {
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 	if err != nil {
