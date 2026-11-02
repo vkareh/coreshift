@@ -92,21 +92,49 @@ starting: the OpenShift API server waits for the quota and security
 definitions, the OAuth API server for the OAuth definition, and the
 controller managers for the permission pair that backs pod security
 labeling. The wait shows as one progress line while it lasts and passes
-the moment the objects exist, whoever applied them: today the seed
-layer applies them in one pass right after the API server answers, so a
-normal boot never shows the line. If they never arrive, the boot fails
+the moment the objects exist, whoever applied them: the version operator
+is the deliverer for all of them, so a normal boot shows each line for
+the few seconds its delivery takes. If they never arrive, the boot fails
 after ten minutes, naming what was missing and pointing at the
 operator's log. The budget is sized against a cold boot's observed
 delivery — the security definition ten seconds after the API server
 answers, the OAuth definition thirty-six, the permission pair under a
 minute — leaving an order of magnitude of room.
 
-One definition cannot move to the operator: the quota definition backs
-the admission chain kube-apiserver itself runs over every namespaced
-write, and without it a write to a newly created namespace never
-completes, so it must be in place before the API server answers —
-before the operator could deliver anything. The seed layer keeps
-applying it for exactly that reason.
+Every seed entry the payload delivers has been audited and retired: on
+a fresh boot with the operator running and the entry's seed removed,
+each object was checked through the admin kubeconfig after the delivery
+window, for its shape and not just its name. The operator delivers the
+security, range allocation, OAuth, infrastructure, and machine
+definitions; the fifteen default security context constraints (the
+thirteen the seed used to apply, plus two the seed never carried, for
+the insights runtime extractor and the machine API termination handler);
+the grant that lets every signed-in user use the restricted constraint;
+the machine approver's cluster role; and the cluster's infrastructure
+object, from the payload's own create-only manifest. None of these is
+seeded anymore.
+
+What the operator cannot deliver stays seeded, each with its reason
+recorded where the seed lives. Two definitions must pre-date the API
+server answering, because its own admission reads them: the quota
+definition, whose absence breaks every namespaced write, and the role
+binding restrictions definition, whose absence breaks the API server's
+own bootstrap. The operator does carry the second one, but its delivery
+lands seconds after the API server answers, past the controller
+manager's bounded wait for the API server's health, so a boot relying
+on it is a coin flip the seed removes — one audit boot died missing it
+by a second, another survived. The controller permission pairs the
+payload does not carry stay seeded too: the ones the label syncers and
+the namespace security allocation controller impersonate, applied in
+real clusters by an operator that runs as a payload Deployment and sits
+Pending here, and the node bootstrap binding, applied in real clusters
+by the machine config operator. The machine approver's binding stays
+for a different reason: the payload's own binding grants its service
+account, while the locally run approver presents its certificate
+identity, which only the seeded binding grants. The OAuth client stays
+because no payload manifest carries it; the authentication operator
+bootstraps it in real clusters. The pull secret stays because the
+operator consumes it rather than producing it.
 
 ### Prerequisites
 

@@ -1,6 +1,8 @@
 // Package oauthclient seeds the OAuth clients the login flow needs. In
 // real clusters the authentication operator bootstraps them; this package
-// does the equivalent for a locally run control plane.
+// does the equivalent for a locally run control plane. The release
+// payload does not carry them, verified on a fresh boot with the version
+// operator running: no client ever arrived, so the seed stays.
 package oauthclient
 
 import (
