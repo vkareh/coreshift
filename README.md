@@ -77,10 +77,13 @@ itself: its namespace, the config API definitions it reads at startup,
 and an empty version object, the same set the installer's bootstrap
 applies. Through the admin kubeconfig you can watch it work: the
 payload's namespaces and definitions appear, and `oc get clusterversion
-version` reports the release in its status. The operator Deployments it
-creates select master nodes, and this control plane runs none, so they
-sit Pending: the payload is applied, but nothing runs from it. The
-control plane stands in for the bootstrap, not for nodes.
+version` reports the release in its status — honest about the partial
+state, its conditions naming the payload's operators as not available
+because they are not running. The operator Deployments it creates
+select master nodes, and this control plane runs none, so they sit
+Pending: the payload is applied, but nothing runs from it, and nothing
+it deploys selects workers, so a joined worker would receive none of it
+either. The control plane stands in for the bootstrap, not for nodes.
 
 ### Prerequisites
 
