@@ -424,8 +424,9 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 	}
 
 	// The controller managers' pod security labeling reads the grant that
-	// lets every signed-in user use the restricted constraint, the one
-	// pair of their permissions the release payload itself carries.
+	// lets every signed-in user use the restricted constraint; the version
+	// operator delivers that pair from the payload, so the gate holds
+	// their starts until it lands.
 	controllerRBAC := []gate.Object{
 		gate.ClusterRole("system:openshift:scc:restricted-v3"),
 		gate.ClusterRoleBinding("system:openshift:scc:restricted-v3"),

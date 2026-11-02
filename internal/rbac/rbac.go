@@ -1,7 +1,10 @@
-// Package rbac seeds the cluster-wide permissions that OpenShift
-// controllers expect to already exist when they start. In real
-// deployments Hypershift's hosted-cluster-config-operator applies them;
-// this package does the equivalent for a locally run control plane.
+// Package rbac seeds the cluster-wide permissions that the locally run
+// controllers expect to already exist when they start and that the
+// release payload does not carry: in real self-managed clusters they are
+// applied by operators that run as payload Deployments, which sit pending
+// here because this control plane runs no nodes. The permissions the
+// payload does carry are delivered by the version operator, verified on a
+// fresh boot, so they are not seeded.
 package rbac
 
 import (
@@ -25,7 +28,8 @@ var objectRetryInterval = 3 * time.Second
 // controller impersonates a service account that must hold these
 // permissions; without them its calls are rejected until it gives up.
 // The pod security label syncers below run in the same binary and are
-// seeded the same way.
+// seeded the same way. The payload does not carry any of these pairs;
+// the kube-controller-manager-operator applies them in real clusters.
 const (
 	allocationController     = "system:openshift:controller:namespace-security-allocation-controller"
 	allocationServiceAccount = "namespace-security-allocation-controller"
@@ -37,18 +41,20 @@ const (
 	privilegedSyncer        = "system:openshift:controller:privileged-namespaces-psa-label-syncer"
 	privilegedSyncerAccount = "privileged-namespaces-psa-label-syncer"
 
-	restrictedConstraint = "system:openshift:scc:restricted-v3"
-
 	// The machine approver's identity, matching its ClusterRole the way
 	// OpenShift controller identities do; its component kubeconfig presents
-	// this name.
+	// this name. The payload delivers the ClusterRole itself, but its own
+	// binding grants the payload's service account, not this certificate
+	// identity, so only the seeded binding gives the locally run approver
+	// its permissions.
 	machineApprover = "system:openshift:controller:machine-approver"
 
 	// The node bootstrap permission pair the machine config operator
 	// applies in real clusters: the service account whose token a node's
 	// bootstrap kubeconfig carries may request node client certificates.
 	// The join material minting creates the account itself, so the
-	// account and its namespace are shared facts.
+	// account and its namespace are shared facts. The payload does not
+	// carry the binding.
 	nodeBootstrapperBinding = "system-bootstrap-node-bootstrapper"
 )
 
@@ -103,9 +109,6 @@ func seed(ctx context.Context, client kubernetes.Interface) error {
 		return err
 	}
 	if err := ensurePrivilegedSyncer(ctx, client); err != nil {
-		return err
-	}
-	if err := ensureRestrictedConstraint(ctx, client); err != nil {
 		return err
 	}
 	if err := ensureMachineApprover(ctx, client); err != nil {
@@ -276,124 +279,13 @@ func ensurePrivilegedSyncer(ctx context.Context, client kubernetes.Interface) er
 	return nil
 }
 
-// ensureRestrictedConstraint grants every signed-in user use of the
-// default restricted security constraint, the same grant the release
-// payload's kube-apiserver operator manifests carry. The label syncer
-// builds each namespace's label level from these grants; without one it
-// cannot classify a namespace at all and retries in error.
-func ensureRestrictedConstraint(ctx context.Context, client kubernetes.Interface) error {
-	role := &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{Name: restrictedConstraint},
-		Rules: []rbacv1.PolicyRule{
-			{
-				APIGroups:     []string{"security.openshift.io"},
-				Resources:     []string{"securitycontextconstraints"},
-				ResourceNames: []string{"restricted-v3"},
-				Verbs:         []string{"use"},
-			},
-		},
-	}
-	if _, err := client.RbacV1().ClusterRoles().Create(ctx, role, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("register %s cluster role: %w", restrictedConstraint, err)
-	}
-	binding := &rbacv1.ClusterRoleBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: restrictedConstraint},
-		Subjects: []rbacv1.Subject{{
-			APIGroup: rbacv1.GroupName,
-			Kind:     rbacv1.GroupKind,
-			Name:     "system:authenticated",
-		}},
-		RoleRef: rbacv1.RoleRef{
-			APIGroup: rbacv1.GroupName,
-			Kind:     "ClusterRole",
-			Name:     restrictedConstraint,
-		},
-	}
-	_, err := client.RbacV1().ClusterRoleBindings().Create(ctx, binding, metav1.CreateOptions{})
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("register %s cluster role binding: %w", restrictedConstraint, err)
-	}
-	return nil
-}
-
-// ensureMachineApprover grants what the machine approver needs to approve
-// node certificate requests: updating approvals, approving the node signers,
-// and reading the machines, nodes, and config maps it matches requests
-// against. Copied verbatim from the approver's own manifests, which the
-// cluster-version-operator applies in real clusters; the binding there
-// carries its service account, which the component kubeconfig's certificate
-// identity stands in for here.
+// ensureMachineApprover grants the locally run machine approver the
+// permissions the payload's ClusterRole carries: the payload delivers the
+// role itself, but its own binding grants its service account, so the
+// binding here is what gives the approver's certificate identity the same
+// grant. Copied verbatim from the approver's own manifests, which the
+// cluster-version-operator applies in real clusters.
 func ensureMachineApprover(ctx context.Context, client kubernetes.Interface) error {
-	role := &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{Name: machineApprover},
-		Rules: []rbacv1.PolicyRule{
-			{
-				APIGroups: []string{"certificates.k8s.io"},
-				Resources: []string{"certificatesigningrequests"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-			{
-				APIGroups: []string{"certificates.k8s.io"},
-				Resources: []string{"certificatesigningrequests/approval"},
-				Verbs:     []string{"update"},
-			},
-			{
-				APIGroups:     []string{"certificates.k8s.io"},
-				Resources:     []string{"signers"},
-				ResourceNames: []string{"kubernetes.io/kube-apiserver-client-kubelet", "kubernetes.io/kubelet-serving"},
-				Verbs:         []string{"approve"},
-			},
-			{
-				APIGroups: []string{"machine.openshift.io"},
-				Resources: []string{"machines"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-			{
-				APIGroups: []string{""},
-				Resources: []string{"nodes"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-			{
-				APIGroups: []string{""},
-				Resources: []string{"configmaps"},
-				Verbs:     []string{"get", "watch", "list"},
-			},
-			{
-				APIGroups: []string{"authentication.k8s.io"},
-				Resources: []string{"tokenreviews"},
-				Verbs:     []string{"create"},
-			},
-			{
-				APIGroups: []string{"authorization.k8s.io"},
-				Resources: []string{"subjectaccessreviews"},
-				Verbs:     []string{"create"},
-			},
-			{
-				APIGroups: []string{"config.openshift.io"},
-				Resources: []string{"clusteroperators"},
-				Verbs:     []string{"get", "create", "list", "watch"},
-			},
-			{
-				APIGroups:     []string{"config.openshift.io"},
-				Resources:     []string{"clusteroperators/status"},
-				ResourceNames: []string{"machine-approver"},
-				Verbs:         []string{"update"},
-			},
-			{
-				APIGroups: []string{"config.openshift.io"},
-				Resources: []string{"networks"},
-				Verbs:     []string{"get"},
-			},
-			{
-				APIGroups: []string{"network.openshift.io"},
-				Resources: []string{"hostsubnets"},
-				Verbs:     []string{"get"},
-			},
-		},
-	}
-	if _, err := client.RbacV1().ClusterRoles().Create(ctx, role, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("register %s cluster role: %w", machineApprover, err)
-	}
 	binding := &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: machineApprover},
 		Subjects: []rbacv1.Subject{{
