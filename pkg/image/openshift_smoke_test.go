@@ -11,9 +11,9 @@ import (
 )
 
 // TestExtractOpenShiftComponentsSmoke resolves each OpenShift API layer
-// component's image from the cached release manifest, confirms the five
-// components are five distinct images, pulls each from the real
-// registry, extracts the binaries, and executes them on the host.
+// component's image from the cached release manifest, confirms the
+// components are distinct images, pulls each from the real registry,
+// extracts the binaries, and executes them on the host.
 func TestExtractOpenShiftComponentsSmoke(t *testing.T) {
 	pullSecret, err := os.ReadFile(smokePullSecretPath())
 	if errors.Is(err, os.ErrNotExist) {

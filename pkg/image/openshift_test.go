@@ -121,3 +121,15 @@ func TestSelectMachineApproverBinary(t *testing.T) {
 		t.Fatalf("cluster-machine-approver path = %q, want /usr/bin/machine-approver", selected[0].path)
 	}
 }
+
+func TestSelectClusterVersionOperatorBinary(t *testing.T) {
+	selected, err := selectOpenShiftComponents("cluster-version-operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The release image runs this binary as its own entrypoint, so the
+	// component image carries it under its full name.
+	if selected[0].path != "/usr/bin/cluster-version-operator" {
+		t.Fatalf("cluster-version-operator path = %q, want /usr/bin/cluster-version-operator", selected[0].path)
+	}
+}
