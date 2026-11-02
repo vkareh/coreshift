@@ -42,7 +42,6 @@ import (
 	"github.com/vkareh/coreshift/internal/crd"
 	"github.com/vkareh/coreshift/internal/gate"
 	"github.com/vkareh/coreshift/internal/gpgme"
-	"github.com/vkareh/coreshift/internal/infrastructure"
 	"github.com/vkareh/coreshift/internal/join"
 	"github.com/vkareh/coreshift/internal/mint"
 	"github.com/vkareh/coreshift/internal/oauth"
@@ -506,24 +505,17 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 				if err := aggregation.Seed(ctx, kubeconfig, aggregatedServers, filepath.Join(stateDir, certgen.CACertFilename)); err != nil {
 					return err
 				}
-				if err := rbac.Seed(ctx, kubeconfig); err != nil {
-					return err
-				}
-				if err := crd.Seed(ctx, kubeconfig); err != nil {
-					return err
-				}
-				// The managed-node admission's informer retries until the
-				// Infrastructure definition lands and then reads the object,
-				// so node creation is permitted once both are in, however
-				// late against the API server's boot.
-				if err := infrastructure.Seed(ctx, kubeconfig); err != nil {
-					return err
-				}
-				// The pull secret is stored as the cluster's global pull
-				// secret, the object a real cluster keeps, so commands that
-				// need it after the fact read it from the cluster instead
-				// of asking for the file again.
-				return pullsecret.Seed(ctx, kubeconfig, pullSecret)
+			if err := rbac.Seed(ctx, kubeconfig); err != nil {
+				return err
+			}
+			if err := crd.Seed(ctx, kubeconfig); err != nil {
+				return err
+			}
+			// The pull secret is stored as the cluster's global pull
+			// secret, the object a real cluster keeps, so commands that
+			// need it after the fact read it from the cluster instead
+			// of asking for the file again.
+			return pullsecret.Seed(ctx, kubeconfig, pullSecret)
 			},
 		},
 		{
