@@ -744,6 +744,7 @@ func TestPodmanRunArgs(t *testing.T) {
 		"run", "--detach",
 		"--name", "coreshift-dev",
 		"--publish", "127.0.0.1:7443:7443",
+		"--publish", "127.0.0.1:7444:8445",
 		"--env", "XDG_STATE_HOME=/var/lib/coreshift/state",
 		"--env", "XDG_CACHE_HOME=/var/lib/coreshift/cache",
 		"--volume", "/state/root/clusters/dev:/var/lib/coreshift/state/coreshift/clusters/dev:z",
@@ -823,6 +824,73 @@ func TestRefuseIfPortBusy(t *testing.T) {
 	err = refuseIfPortBusy(port)
 	if err == nil || !strings.Contains(err.Error(), strconv.Itoa(port)) {
 		t.Fatalf("err = %v, want a refusal naming port %d", err, port)
+	}
+}
+
+// TestRefuseOAuthPort checks that an API port whose following port, the
+// OAuth login endpoint's, is reserved or taken is refused, naming that
+// port, and that a free one passes.
+func TestRefuseOAuthPort(t *testing.T) {
+	for _, api := range []int{etcdPeerPort - 1, oauthAPIServerPort - 1} {
+		err := refuseOAuthPort(api)
+		if err == nil || !strings.Contains(err.Error(), strconv.Itoa(api+1)) {
+			t.Fatalf("API port %d: err = %v, want a refusal naming port %d", api, err, api+1)
+		}
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listener.Close() })
+	port := listener.Addr().(*net.TCPAddr).Port
+
+	err = refuseOAuthPort(port - 1)
+	if err == nil || !strings.Contains(err.Error(), strconv.Itoa(port)) {
+		t.Fatalf("err = %v, want a refusal naming port %d", err, port)
+	}
+}
+
+// TestOAuthMetadataEndpointsFollowMode checks that the OAuth login
+// endpoints the discovery document advertises sit on the OAuth server's
+// fixed port on the host and on the port after the API port inside a
+// container, where the container publishes the server.
+func TestOAuthMetadataEndpointsFollowMode(t *testing.T) {
+	stateDir := t.TempDir()
+	const port = 7443
+	t.Setenv(containerEnv, "")
+	if _, err := writeOAuthMetadata(stateDir, port); err != nil {
+		t.Fatal(err)
+	}
+	metadata := string(readFile(t, stateDir, "oauth-metadata.json"))
+	if !strings.Contains(metadata, fmt.Sprintf("https://127.0.0.1:%d/oauth/authorize", oauthServerPort)) {
+		t.Fatalf("host metadata does not point at the OAuth server's port:\n%s", metadata)
+	}
+
+	t.Setenv(containerEnv, "1")
+	if _, err := writeOAuthMetadata(stateDir, port); err != nil {
+		t.Fatal(err)
+	}
+	metadata = string(readFile(t, stateDir, "oauth-metadata.json"))
+	if !strings.Contains(metadata, fmt.Sprintf("https://127.0.0.1:%d/oauth/authorize", port+1)) {
+		t.Fatalf("container metadata does not point at the published OAuth port:\n%s", metadata)
+	}
+}
+
+// TestOAuthServerConfigBindsAllInterfacesInContainer checks that the
+// OAuth server's serving address follows where it runs, like the API
+// server's: every interface inside a container, so the published login
+// port reaches it, and loopback only on the host.
+func TestOAuthServerConfigBindsAllInterfacesInContainer(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv(containerEnv, "1")
+
+	path, err := writeOAuthServerConfig(stateDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := string(readFile(t, filepath.Dir(path), filepath.Base(path)))
+	if !strings.Contains(config, fmt.Sprintf("bindAddress: 0.0.0.0:%d", oauthServerPort)) {
+		t.Fatalf("config does not bind all interfaces:\n%s", config)
 	}
 }
 
@@ -1535,10 +1603,12 @@ func setContainers(t *testing.T, names ...string) {
 }
 
 // setContainerPort makes the fake podman answer inspect for container
-// with port.
+// with an identity port mapping, the way a created cluster publishes its
+// API.
 func setContainerPort(t *testing.T, container string, port int) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(os.Getenv("PODMAN_PORTS"), container), []byte(strconv.Itoa(port)), 0o644); err != nil {
+	mapping := fmt.Sprintf("%d %d/tcp\n", port, port)
+	if err := os.WriteFile(filepath.Join(os.Getenv("PODMAN_PORTS"), container), []byte(mapping), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

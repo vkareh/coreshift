@@ -149,6 +149,18 @@ func apiBindAddress() string {
 	return "127.0.0.1"
 }
 
+// oauthEndpointPort is the port clients reach the OAuth server's login
+// endpoints on, as the discovery document advertises them: the server's
+// own fixed port on the host, and inside a container the port after the
+// API port, which the container publishes the server on — clients run
+// on the host there, and only the API port's neighborhood is published.
+func oauthEndpointPort(port int) int {
+	if os.Getenv(containerEnv) != "" {
+		return port + 1
+	}
+	return oauthServerPort
+}
+
 // apiServerURL returns the endpoint clients use to reach the API server
 // listening on the given port.
 func apiServerURL(port int) string {
@@ -1011,7 +1023,8 @@ const (
 )
 
 // runCreate creates a cluster container and waits for it to be ready. It
-// refuses a reserved or otherwise taken port, a taken container name, an
+// refuses a reserved or otherwise taken port — the API's or the OAuth
+// login endpoint's, which follows it — a taken container name, an
 // unusable cluster name, or a state directory that cannot run the
 // requested release before touching anything, mints the container image
 // from the running binary unless --image names one, starts the container
@@ -1047,6 +1060,9 @@ func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, 
 		return err
 	}
 	if err := refuseIfPortBusy(port); err != nil {
+		return err
+	}
+	if err := refuseOAuthPort(port); err != nil {
 		return err
 	}
 	if fresh {
@@ -1090,8 +1106,10 @@ func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, 
 // container: detached and named, the API port published as an identity
 // mapping on loopback only (bare port publishing would bind every
 // interface, and exposing the API to the network must stay an explicit
-// act), the cluster's state directory and the shared image cache
-// bind-mounted, the pull secret mounted read-only, and the name, the
+// act), the OAuth login endpoint published the same way on the port after
+// it, so `oc login` from the host can follow the discovery document to
+// the OAuth server, the cluster's state directory and the shared image
+// cache bind-mounted, the pull secret mounted read-only, and the name, the
 // release flags, and the port passed through to the run inside. The
 // image's entrypoint is `coreshift run cluster`, so the arguments after
 // the image reference land on it.
@@ -1100,6 +1118,7 @@ func podmanRunArgs(container, name string, port int, stateDir, cacheRoot, pullSe
 		"run", "--detach",
 		"--name", container,
 		"--publish", fmt.Sprintf("127.0.0.1:%d:%d", port, port),
+		"--publish", fmt.Sprintf("127.0.0.1:%d:%d", port+1, oauthServerPort),
 		"--env", "XDG_STATE_HOME=" + containerStateHome,
 		"--env", "XDG_CACHE_HOME=" + containerCacheHome,
 		// Shared relabeling, because host-mode runs and further
@@ -1171,6 +1190,21 @@ func refuseIfPortBusy(port int) error {
 		return fmt.Errorf("port %d is already in use; use --port to publish the API on another one", port)
 	}
 	return listener.Close()
+}
+
+// refuseOAuthPort refuses an API port whose following port, where a
+// created cluster publishes the OAuth login endpoint, cannot be used: a
+// reserved control-plane port, or one something already listens on.
+func refuseOAuthPort(port int) error {
+	oauthPort := port + 1
+	err := refuseReservedPort(oauthPort)
+	if err == nil {
+		err = refuseIfPortBusy(oauthPort)
+	}
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("the OAuth login endpoint publishes on port %d, the port after the API port: %w", oauthPort, err)
 }
 
 // streamUntilReady follows the cluster container's boot output while
@@ -2198,20 +2232,29 @@ func containerLabel(container, label string) (string, error) {
 }
 
 // containerPort returns the port a cluster container publishes its API
-// on. The create command publishes it as an identity mapping, so the host
-// port is the port the cluster runs on.
+// on. The create command publishes the API as an identity mapping, so
+// among the container's mappings — the OAuth login endpoint's is the only
+// other one — the API's is the one whose host side matches its container
+// side, and the host port is the port the cluster runs on.
 func containerPort(container string) (int, error) {
 	out, err := exec.Command("podman", "inspect", "--format",
-		"{{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{.HostPort}}{{end}}{{end}}",
+		"{{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{.HostPort}} {{$port}}{{println}}{{end}}{{end}}",
 		container).Output()
 	if err != nil {
 		return 0, fmt.Errorf("inspect container %s: %w", container, err)
 	}
-	port, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil {
-		return 0, fmt.Errorf("read %s's published port: %w", container, err)
+	for _, mapping := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Fields(mapping)
+		if len(fields) != 2 || fields[0] != strings.TrimSuffix(fields[1], "/tcp") {
+			continue
+		}
+		port, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+		return port, nil
 	}
-	return port, nil
+	return 0, fmt.Errorf("read %s's published port: the API's identity mapping is missing from:\n%s", container, strings.TrimSpace(string(out)))
 }
 
 // bootRelease returns the release image reference this run boots, with a
@@ -2940,7 +2983,7 @@ func writeOAuthServerConfig(stateDir string, providers []oauth.Provider) (string
 	config := fmt.Sprintf(`apiVersion: osin.config.openshift.io/v1
 kind: OsinServerConfig
 servingInfo:
-  bindAddress: 127.0.0.1:%d
+  bindAddress: %s:%d
   certFile: %s
   keyFile: %s
   clientCA: %s
@@ -2959,7 +3002,7 @@ oauthConfig:
   tokenConfig:
     accessTokenMaxAgeSeconds: 86400
     authorizeTokenMaxAgeSeconds: 300
-`, oauthServerPort,
+`, apiBindAddress(), oauthServerPort,
 		filepath.Join(stateDir, certgen.ServiceServingCertFilename),
 		filepath.Join(stateDir, certgen.ServiceServingKeyFilename),
 		filepath.Join(stateDir, certgen.CACertFilename),
@@ -2975,11 +3018,13 @@ oauthConfig:
 
 // writeOAuthMetadata writes the OAuth authorization server metadata that
 // kube-apiserver serves at /.well-known/oauth-authorization-server. The
-// issuer is the main API endpoint; the authorization and token endpoints are
-// the OAuth server's. The remaining fields match what the installer writes
-// in real clusters, so clients see the same document shape as in production.
+// issuer is the main API endpoint; the authorization and token endpoints
+// are the OAuth server's, on the port clients reach it. The remaining
+// fields match what the installer writes in real clusters, so clients see
+// the same document shape as in production.
 func writeOAuthMetadata(stateDir string, port int) (string, error) {
 	path := filepath.Join(stateDir, "oauth-metadata.json")
+	oauthPort := oauthEndpointPort(port)
 	metadata := fmt.Sprintf(`{
   "issuer": %q,
   "authorization_endpoint": "https://127.0.0.1:%d/oauth/authorize",
@@ -2995,7 +3040,7 @@ func writeOAuthMetadata(stateDir string, port int) (string, error) {
   "grant_types_supported": ["authorization_code", "implicit"],
   "code_challenge_methods_supported": ["plain", "S256"]
 }
-`, apiServerURL(port), oauthServerPort, oauthServerPort)
+`, apiServerURL(port), oauthPort, oauthPort)
 	if err := os.WriteFile(path, []byte(metadata), 0o600); err != nil {
 		return "", fmt.Errorf("write oauth metadata: %w", err)
 	}
