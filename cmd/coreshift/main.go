@@ -733,6 +733,13 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 				"--disable-status-controller",
 				// Single instance, no lease to elect.
 				"--leader-elect=false",
+				// The kube-apiserver serves machine.openshift.io/v1 itself
+				// (its control plane machine sets), which shadows the
+				// machines definition's v1beta1 in discovery; the approver
+				// resolves the preferred version and would find no Machine
+				// kind there. The payload's own deployment pins the
+				// version for exactly this reason.
+				"--api-group-version=machine.openshift.io/v1beta1",
 			},
 			// The version operator delivers the role and binding behind
 			// the approver's identity; the approver waits for them like
