@@ -2221,6 +2221,12 @@ func containerPort(container string) (int, error) {
 // recorded one boots again — a warm re-create, not a surprise upgrade —
 // and the registry is still checked for a newer patch of its stream to
 // mention in the note.
+//
+// The returned reference is the run's one release value. The state
+// marker records it, the children's binaries and the operator's payload
+// are extracted from it, and the operator is told it, so the release
+// the marker names, the processes run, and the manifests applied can
+// never differ; a patch upgrade moves all three together.
 func bootRelease(ctx context.Context, client *image.Client, release releaseOptions, stateDir string) (string, string, error) {
 	recorded := stateRelease(stateDir)
 	if release.image == "" && release.version == "" && recorded != "" {
