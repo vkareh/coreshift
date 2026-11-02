@@ -164,6 +164,33 @@ func TestSeedIsRepeatable(t *testing.T) {
 	}
 }
 
+// TestEnsureObjectWritesOnlyTheAdoptionSpec checks the object the seed
+// creates carries nothing but the cluster identity: the operator owns
+// the object from its first boot, writing its status, history, and
+// desired state itself, so the run's whole contribution is the spec
+// that hands the cluster over.
+func TestEnsureObjectWritesOnlyTheAdoptionSpec(t *testing.T) {
+	client := newClient()
+
+	if err := ensureObject(context.Background(), client); err != nil {
+		t.Fatal(err)
+	}
+	object, err := client.Resource(objects).Get(context.Background(), objectName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, found, err := unstructured.NestedMap(object.Object, "spec")
+	if err != nil || !found || len(spec) != 1 {
+		t.Fatalf("object spec = %v, %v; want only the cluster identity", spec, err)
+	}
+	if _, hasID := spec["clusterID"]; !hasID {
+		t.Fatalf("object spec = %v, want the cluster identity", spec)
+	}
+	if _, found, _ := unstructured.NestedMap(object.Object, "status"); found {
+		t.Fatal("object carries a status; the operator owns the status")
+	}
+}
+
 // TestEnsureObjectLeavesExistingStatus checks the object the operator
 // already reported on survives a re-boot untouched, because the
 // operator owns it from its first boot.
