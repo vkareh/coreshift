@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/sha256"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -71,6 +72,98 @@ func Image(ctx context.Context, version string, verbose bool) (string, error) {
 // so it takes the pull secret as podman's authfile.
 func WorkerImage(ctx context.Context, version, base, authfile string, verbose bool) (string, error) {
 	return build(ctx, workerRepository, version, fmt.Sprintf(workerContainerfile, base), authfile, verbose)
+}
+
+// Remove removes the minted images from podman's store: every image in
+// the project's own two repositories, and nothing else — the base images
+// they were built from are shared with everything else and stay. The
+// images are derived from the binary and rebuilt in seconds, so the
+// cache cleanup removes them with the cache directory. It reports the
+// bytes freed, measured as the drop in the store's image size, because
+// layer sharing means the sum of the removed images' sizes would
+// overstate it. Without podman there is nothing to remove.
+func Remove(ctx context.Context) (int64, error) {
+	if _, err := exec.LookPath("podman"); err != nil {
+		return 0, nil
+	}
+	var refs []string
+	for _, repo := range []string{controlPlaneRepository, workerRepository} {
+		listed, err := repositoryImages(ctx, repo)
+		if err != nil {
+			return 0, err
+		}
+		refs = append(refs, listed...)
+	}
+	if len(refs) == 0 {
+		fmt.Println("No minted images")
+		return 0, nil
+	}
+	before, err := imageStoreSize(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, ref := range refs {
+		fmt.Println("Removing image", ref)
+		if err := removeImage(ctx, ref); err != nil {
+			return 0, err
+		}
+	}
+	after, err := imageStoreSize(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return max(before-after, 0), nil
+}
+
+// repositoryImages lists the image references in one of the project's
+// repositories in podman's store.
+func repositoryImages(ctx context.Context, repo string) ([]string, error) {
+	out, err := exec.CommandContext(ctx, "podman", "images", "--format", "{{.Repository}}:{{.Tag}}", "localhost/"+repo).Output()
+	if err != nil {
+		return nil, fmt.Errorf("list %s images: %w", repo, err)
+	}
+	var refs []string
+	for _, ref := range strings.Split(string(out), "\n") {
+		if ref = strings.TrimSpace(ref); ref != "" {
+			refs = append(refs, ref)
+		}
+	}
+	return refs, nil
+}
+
+// removeImage removes one image, capturing podman's output so a failure
+// can quote it.
+func removeImage(ctx context.Context, ref string) error {
+	var out bytes.Buffer
+	rm := exec.CommandContext(ctx, "podman", "rmi", ref)
+	rm.Stdout = &out
+	rm.Stderr = &out
+	if err := rm.Run(); err != nil {
+		return fmt.Errorf("remove image %s: %w\n%s", ref, err, strings.TrimSpace(out.String()))
+	}
+	return nil
+}
+
+// imageStoreSize returns the size of podman's image store, so a removal
+// can report what it actually freed.
+func imageStoreSize(ctx context.Context) (int64, error) {
+	out, err := exec.CommandContext(ctx, "podman", "system", "df", "--format", "json").Output()
+	if err != nil {
+		return 0, fmt.Errorf("measure podman's image store: %w", err)
+	}
+	var usage []struct {
+		Type    string `json:"Type"`
+		RawSize int64  `json:"RawSize"`
+	}
+	if err := json.Unmarshal(out, &usage); err != nil {
+		return 0, fmt.Errorf("read podman's image store size: %w", err)
+	}
+	for _, entry := range usage {
+		if entry.Type == "Images" {
+			return entry.RawSize, nil
+		}
+	}
+	return 0, fmt.Errorf("read podman's image store size: the report carries no image entry")
 }
 
 // build returns the reference of the image built from the running binary

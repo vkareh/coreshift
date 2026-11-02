@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -75,9 +76,14 @@ func TestWorkerContainerfile(t *testing.T) {
 
 // writeFakePodman writes a podman stand-in into a directory of its own
 // and prepends that directory to PATH. It records every call, one line
-// per call, in the file named by PODMAN_LOG, answers the image-exists
-// check with existsStatus, and answers a build with two lines of output
-// and the exit status named by PODMAN_BUILD_STATUS, zero when unset.
+// per call, in the file named by PODMAN_LOG. The image-exists check
+// answers with existsStatus, and a build answers with two lines of
+// output and the exit status named by PODMAN_BUILD_STATUS, zero when
+// unset. Images answers with the per-repository file from PODMAN_IMAGES;
+// system df answers with the file named by PODMAN_DF; rmi rewrites that
+// file to PODMAN_DF_AFTER, so a removal measures a shrinking store, and
+// answers with the exit status named by PODMAN_RMI_STATUS, zero when
+// unset.
 func writeFakePodman(t *testing.T, existsStatus int) {
 	t.Helper()
 	dir := t.TempDir()
@@ -91,6 +97,19 @@ if [ "$1" = "build" ]; then
 	echo "step 2/2: COPY coreshift /usr/local/bin/coreshift" >&2
 	exit "${PODMAN_BUILD_STATUS:-0}"
 fi
+if [ "$1" = "images" ]; then
+	cat "$PODMAN_IMAGES/$4" 2>/dev/null
+	exit 0
+fi
+if [ "$1 $2" = "system df" ]; then
+	cat "$PODMAN_DF"
+	exit 0
+fi
+if [ "$1" = "rmi" ]; then
+	printf '%%s' "$PODMAN_DF_AFTER" > "$PODMAN_DF"
+	echo "Untagged: $2"
+	exit "${PODMAN_RMI_STATUS:-0}"
+fi
 exit 0
 `, existsStatus)
 	path := filepath.Join(dir, "podman")
@@ -99,6 +118,9 @@ exit 0
 	}
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 	t.Setenv("PODMAN_LOG", filepath.Join(t.TempDir(), "calls"))
+	t.Setenv("PODMAN_IMAGES", t.TempDir())
+	t.Setenv("PODMAN_DF", filepath.Join(t.TempDir(), "df.json"))
+	t.Setenv("PODMAN_DF_AFTER", `[{"Type":"Images","RawSize":100}]`)
 }
 
 // podmanCalls returns the calls the fake podman recorded.
@@ -275,6 +297,133 @@ func TestWorkerImageBuildsWithAuthfile(t *testing.T) {
 	}
 	if !strings.HasPrefix(calls[1], "build --authfile /secret/pull-secret -t "+ref+" ") {
 		t.Fatalf("second podman call = %q, want an authfile build of %s", calls[1], ref)
+	}
+}
+
+// setRepositoryImages makes the fake podman answer the images listing
+// for one repository with the given references.
+func setRepositoryImages(t *testing.T, repo string, refs ...string) {
+	t.Helper()
+	path := filepath.Join(os.Getenv("PODMAN_IMAGES"), repo)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(refs, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// setStoreSize makes the fake podman answer system df with an image
+// store of the given size.
+func setStoreSize(t *testing.T, size int64) {
+	t.Helper()
+	if err := os.WriteFile(os.Getenv("PODMAN_DF"), []byte(fmt.Sprintf(`[{"Type":"Images","RawSize":%d}]`, size)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRemoveRemovesBothRepositories checks the removal contract: every
+// image in both of the project's repositories is removed, and the freed
+// bytes are the drop in the store's image size, not a per-image sum.
+func TestRemoveRemovesBothRepositories(t *testing.T) {
+	writeFakePodman(t, 0)
+	setRepositoryImages(t, "localhost/coreshift", "localhost/coreshift:v1-a", "localhost/coreshift:v1-b")
+	setRepositoryImages(t, "localhost/coreshift-worker", "localhost/coreshift-worker:v1-c")
+	setStoreSize(t, 1100)
+
+	var err error
+	var freed int64
+	stdout, _ := captureStd(t, func() { freed, err = Remove(context.Background()) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if freed != 1000 { // 1100 before, 100 after, from the fake's rmi rewrite
+		t.Fatalf("freed = %d, want the store's drop", freed)
+	}
+	calls := podmanCalls(t)
+	want := []string{
+		"images --format {{.Repository}}:{{.Tag}} localhost/coreshift",
+		"images --format {{.Repository}}:{{.Tag}} localhost/coreshift-worker",
+		"system df --format json",
+		"rmi localhost/coreshift:v1-a",
+		"rmi localhost/coreshift:v1-b",
+		"rmi localhost/coreshift-worker:v1-c",
+		"system df --format json",
+	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("podman calls = %q\nwant %q", calls, want)
+	}
+	for _, ref := range []string{"localhost/coreshift:v1-a", "localhost/coreshift:v1-b", "localhost/coreshift-worker:v1-c"} {
+		if !strings.Contains(stdout, "Removing image "+ref+"\n") {
+			t.Fatalf("stdout = %q, want each removed image named", stdout)
+		}
+	}
+}
+
+// TestRemoveWithoutImages checks the empty store: both repositories are
+// still listed, nothing is removed, and the plain report says so.
+func TestRemoveWithoutImages(t *testing.T) {
+	writeFakePodman(t, 0)
+
+	var err error
+	var freed int64
+	stdout, _ := captureStd(t, func() { freed, err = Remove(context.Background()) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if freed != 0 {
+		t.Fatalf("freed = %d, want nothing", freed)
+	}
+	if calls := podmanCalls(t); len(calls) != 2 {
+		t.Fatalf("podman calls = %q, want only the two repository listings", calls)
+	}
+	if !strings.Contains(stdout, "No minted images") {
+		t.Fatalf("stdout = %q, want the empty store reported", stdout)
+	}
+}
+
+// TestRemoveWithoutPodman checks that a machine without podman has
+// nothing to remove: no error, no output, no calls to attempt.
+func TestRemoveWithoutPodman(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	var err error
+	var freed int64
+	stdout, _ := captureStd(t, func() { freed, err = Remove(context.Background()) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if freed != 0 || stdout != "" {
+		t.Fatalf("freed = %d, stdout = %q, want a silent no-op", freed, stdout)
+	}
+}
+
+// TestRemoveReportsRmiFailure checks that a failed removal fails the
+// command, quoting podman's output, and stops there.
+func TestRemoveReportsRmiFailure(t *testing.T) {
+	writeFakePodman(t, 0)
+	setRepositoryImages(t, "localhost/coreshift", "localhost/coreshift:v1-a")
+	setStoreSize(t, 1100)
+	t.Setenv("PODMAN_RMI_STATUS", "1")
+	t.Setenv("PODMAN_DF_AFTER", `[{"Type":"Images","RawSize":1100}]`)
+
+	_, err := Remove(context.Background())
+	if err == nil {
+		t.Fatal("expected the failed removal to fail the command")
+	}
+	for _, want := range []string{"remove image localhost/coreshift:v1-a", "Untagged: localhost/coreshift:v1-a"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error missing %q:\n%v", want, err)
+		}
+	}
+	var measurements int
+	for _, call := range podmanCalls(t) {
+		if call == "system df --format json" {
+			measurements++
+		}
+	}
+	if measurements != 1 {
+		t.Fatalf("store measured %d times, want once, before the failure only", measurements)
 	}
 }
 
