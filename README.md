@@ -5,9 +5,9 @@ without a full cluster install — no VM, no kubelet, no proprietary tooling
 required to actually run it. The control plane (etcd, kube-apiserver,
 kube-controller-manager, kube-scheduler, plus the full OpenShift API layer:
 openshift-apiserver, oauth-apiserver, oauth-server,
-openshift-controller-manager, cluster-policy-controller, and the
-cluster-machine-approver) is built from real, version-matched upstream
-OpenShift components, not reimplementations.
+openshift-controller-manager, cluster-policy-controller, the
+cluster-machine-approver, and the cluster-version-operator) is built from
+real, version-matched upstream OpenShift components, not reimplementations.
 
 CoreShift runs the same real control plane two ways. `coreshift run
 cluster` runs it here in this terminal, as ordinary processes on the host,
@@ -61,10 +61,26 @@ upstream OpenShift release image and started directly — no containers, no
 cluster install. etcd,
 kube-apiserver, kube-controller-manager, and kube-scheduler run alongside the
 full OpenShift API layer: openshift-apiserver, oauth-apiserver, oauth-server,
-openshift-controller-manager, cluster-policy-controller, and
-cluster-machine-approver. Everything
+openshift-controller-manager, cluster-policy-controller,
+cluster-machine-approver, and cluster-version-operator. Everything
 listens on the host, and `oc` talks to the API server like it would to any
 cluster.
+
+### The version operator
+
+The cluster-version operator is the piece a real cluster owes its
+deployed shape to: it applies the release payload's manifests to the
+cluster. It runs here the way the installer's bootstrap runs it against
+a fresh cluster with no nodes — pointed at the release the run resolved,
+with update following off — after the boot seeds what it cannot create
+itself: its namespace, the config API definitions it reads at startup,
+and an empty version object, the same set the installer's bootstrap
+applies. Through the admin kubeconfig you can watch it work: the
+payload's namespaces and definitions appear, and `oc get clusterversion
+version` reports the release in its status. The operator Deployments it
+creates select master nodes, and this control plane runs none, so they
+sit Pending: the payload is applied, but nothing runs from it. The
+control plane stands in for the bootstrap, not for nodes.
 
 ### Prerequisites
 
@@ -686,7 +702,7 @@ The image is built in two stages, both from Red Hat's UBI family and
 pinned by digest. The final stage is ubi10/ubi-micro, the micro variant
 of the latest UBI major line: the control plane binaries are dynamically
 linked against glibc, and RHEL 9-built binaries run on ubi10's newer
-glibc, verified live by running all nine children in the image rather
+glibc, verified live by running all eleven children in the image rather
 than assumed. The micro variant ships no CA certificates, so a run
 inside it cannot pull its release payload: the registry connection
 fails TLS. The build closes that gap inside the family by copying the
@@ -744,8 +760,9 @@ data out from under it.
 
 ## Cache
 
-Extracted control plane binaries and the release image's manifest of
-component image references are cached under `~/.cache/coreshift/`
+Extracted control plane binaries, the release image's manifest of
+component image references, and the release payload's manifest sets are
+cached under `~/.cache/coreshift/`
 (`$XDG_CACHE_HOME/coreshift`), keyed by image digest and shared by
 everything regardless of mode or cluster. A second run of the
 same pinned release pulls nothing from the registry and starts straight

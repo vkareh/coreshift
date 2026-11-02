@@ -38,6 +38,7 @@ import (
 
 	"github.com/vkareh/coreshift/internal/aggregation"
 	"github.com/vkareh/coreshift/internal/certgen"
+	"github.com/vkareh/coreshift/internal/clusterversion"
 	"github.com/vkareh/coreshift/internal/crd"
 	"github.com/vkareh/coreshift/internal/gpgme"
 	"github.com/vkareh/coreshift/internal/infrastructure"
@@ -332,6 +333,10 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 	if err != nil {
 		return fmt.Errorf("prepare release image: %w", err)
 	}
+	payloadDir, err := client.CachedPayload(ctx, releaseRef)
+	if err != nil {
+		return fmt.Errorf("prepare release payload: %w", err)
+	}
 	etcdPath, err := client.ExtractEtcd(ctx, releaseRoot)
 	if err != nil {
 		return err
@@ -341,7 +346,7 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 		return fmt.Errorf("extract kube components: %w", err)
 	}
 	openShiftBinaries, err := client.ExtractOpenShiftComponents(ctx, releaseRoot,
-		"openshift-apiserver", "oauth-apiserver", "oauth-server", "openshift-controller-manager", "cluster-policy-controller", "cluster-machine-approver")
+		"openshift-apiserver", "oauth-apiserver", "oauth-server", "openshift-controller-manager", "cluster-policy-controller", "cluster-machine-approver", "cluster-version-operator")
 	if err != nil {
 		return fmt.Errorf("extract openshift components: %w", err)
 	}
@@ -398,6 +403,15 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 	clusterPolicyControllerConfig, err := writeClusterPolicyControllerConfig(stateDir)
 	if err != nil {
 		return err
+	}
+
+	// The version operator wants the node it would schedule payload
+	// retrieval on; this control plane runs no nodes, so the host the
+	// processes run on stands in, like the bootstrap host does for the
+	// installer's bootstrap pod.
+	nodeName, err := os.Hostname()
+	if err != nil {
+		return fmt.Errorf("determine host name: %w", err)
 	}
 
 	// Flag sets verified against the 4.22.8 payload: kube-apiserver reaches
@@ -657,6 +671,40 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 				"--disable-status-controller",
 				// Single instance, no lease to elect.
 				"--leader-elect=false",
+			},
+		},
+		// The version operator applies the release payload's manifests to
+		// the cluster for the control plane's lifetime — the same job the
+		// installer's bootstrap gives it on a fresh cluster with no nodes.
+		// The flags are that bootstrap pod's: pointed at the release this
+		// run resolved, run against the admin kubeconfig the way the
+		// bootstrap runs against its loopback one, with update following
+		// and the metrics listener off. The payload it applies is the
+		// release image's own manifest directories, which the payload
+		// cache holds; the operator's supported environment override
+		// points it there, standing in for its image's filesystem.
+		{
+			Name: "cluster-version-operator",
+			Path: openShiftBinaries["cluster-version-operator"],
+			Args: []string{
+				"start",
+				"--release-image=" + releaseRef,
+				"--kubeconfig=" + filepath.Join(stateDir, certgen.AdminKubeconfigFilename),
+				"--node-name=" + nodeName,
+				"--enable-auto-update=false",
+				"--listen=",
+				"--v=2",
+			},
+			Env: append(os.Environ(), "PAYLOAD_OVERRIDE="+payloadDir),
+			// The operator reads cluster configuration from its first
+			// moments and waits for the version object before applying
+			// anything, so its prerequisites are seeded here, after every
+			// earlier seed has run, right before it starts.
+			BeforeStart: func(ctx context.Context) error {
+				ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				defer cancel()
+				fmt.Println("Seeding cluster version operator prerequisites")
+				return clusterversion.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), payloadDir)
 			},
 		},
 	}
