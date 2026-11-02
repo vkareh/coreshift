@@ -17,7 +17,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -456,6 +455,7 @@ func writeStateTree(t *testing.T, dir, name string) {
 func TestCleanupRemovesDefaultStateDir(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
+	fakeProc(t)
 	stateDir, err := clusterDir(defaultClusterName)
 	if err != nil {
 		t.Fatal(err)
@@ -483,6 +483,7 @@ func TestCleanupRemovesNamedClusterOnly(t *testing.T) {
 	}
 	writeStateTree(t, removed, "dev")
 	writeStateTree(t, kept, "other")
+	fakeProc(t)
 
 	if err := runCleanup(context.Background(), "dev", false, false); err != nil {
 		t.Fatal(err)
@@ -510,6 +511,7 @@ func TestCleanupAllSweepsClustersTree(t *testing.T) {
 	if err := os.MkdirAll(sibling, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	fakeProc(t)
 
 	if err := runCleanup(context.Background(), defaultClusterName, true, false); err != nil {
 		t.Fatal(err)
@@ -524,6 +526,7 @@ func TestCleanupAllSweepsClustersTree(t *testing.T) {
 
 func TestCleanupMissingStateDirIsNotAnError(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fakeProc(t)
 	if err := runCleanup(context.Background(), defaultClusterName, false, false); err != nil {
 		t.Fatalf("missing state directory must not fail: %v", err)
 	}
@@ -538,6 +541,7 @@ func TestCleanupCache(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", cacheBase)
 	cacheDir := filepath.Join(cacheBase, "coreshift")
 	writeStateTree(t, cacheDir, defaultClusterName)
+	fakeProc(t)
 
 	if err := runCleanup(context.Background(), defaultClusterName, false, true); err != nil {
 		t.Fatal(err)
@@ -564,6 +568,7 @@ func TestCleanupCacheRemovesMintedImages(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeStateTree(t, stateDir, defaultClusterName)
+	fakeProc(t)
 
 	var cleanupErr error
 	out := captureStdout(t, func() { cleanupErr = runCleanup(context.Background(), defaultClusterName, false, true) })
@@ -608,6 +613,7 @@ func TestCleanupWithoutCacheLeavesImagesAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeStateTree(t, stateDir, defaultClusterName)
+	fakeProc(t)
 
 	if err := runCleanup(context.Background(), defaultClusterName, false, false); err != nil {
 		t.Fatal(err)
@@ -630,20 +636,37 @@ func TestCleanupRefusesAllWithName(t *testing.T) {
 	}
 }
 
-// startStandbyProcess starts a process that stays alive until the test
-// ends, carrying the given extra command line argument. The two-command
-// script keeps the shell itself alive with its original command line, so
-// /proc shows the argument for the whole lifetime.
-func startStandbyProcess(t *testing.T, extraArg string) {
+// fakeProc points the running-control-plane scan at an empty directory of
+// the test's own, so anything live on the machine, a developer's cluster
+// included, is invisible to the test. It returns the directory, where
+// writeProcEntry plants the stand-ins the test wants the scan to see.
+func fakeProc(t *testing.T) string {
 	t.Helper()
-	cmd := exec.Command("sh", "-c", "sleep 30; true", extraArg)
-	if err := cmd.Start(); err != nil {
+	dir := t.TempDir()
+	previous := procRoot
+	procRoot = dir
+	t.Cleanup(func() { procRoot = previous })
+	return dir
+}
+
+// writeProcEntry plants a process command line in a fake proc directory,
+// in the shape the scan reads: a numbered directory whose cmdline file
+// carries the arguments separated by NUL bytes. Numbers stay past the test
+// process's own, which the scan skips.
+func writeProcEntry(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
+	entry := filepath.Join(dir, strconv.Itoa(os.Getpid()+len(entries)+1))
+	if err := os.MkdirAll(entry, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(strings.Join(args, "\x00") + "\x00")
+	if err := os.WriteFile(filepath.Join(entry, "cmdline"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestCleanupRefusesWhileChildProcessRuns(t *testing.T) {
@@ -657,11 +680,15 @@ func TestCleanupRefusesWhileChildProcessRuns(t *testing.T) {
 
 	// A stand-in for a control plane child: its command line carries the
 	// state directory the way etcd's --data-dir does.
-	startStandbyProcess(t, "--data-dir="+filepath.Join(stateDir, "etcd-data"))
+	proc := fakeProc(t)
+	writeProcEntry(t, proc, "etcd", "--data-dir="+filepath.Join(stateDir, "etcd-data"))
 
 	err = runCleanup(context.Background(), "dev", false, false)
 	if err == nil || !strings.Contains(err.Error(), "Stop it first") {
 		t.Fatalf("err = %v, want a refusal naming the running control plane", err)
+	}
+	if !strings.Contains(err.Error(), filepath.Join(stateDir, "etcd-data")) {
+		t.Fatalf("err = %v, want the refusal to name the test's own stand-in", err)
 	}
 	if _, statErr := os.Stat(stateDir); statErr != nil {
 		t.Fatalf("refusal removed the state directory anyway: %v", statErr)

@@ -2475,6 +2475,12 @@ func cleanupTargets(name string, all bool) ([]cleanupTarget, error) {
 	return append(targets, cleanupTarget{path: tree, kind: "clusters tree"}), nil
 }
 
+// procRoot is where the running-control-plane scan reads process command
+// lines from. It is a variable so tests can give the scan a world of their
+// own, holding only the stand-ins they plant; the shipped command always
+// reads the real one.
+var procRoot = "/proc"
+
 // runningControlPlane returns the command line of a running CoreShift
 // control plane process, or an empty string when none is.
 func runningControlPlane() (string, error) {
@@ -2486,7 +2492,7 @@ func runningControlPlane() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	entries, err := os.ReadDir("/proc")
+	entries, err := os.ReadDir(procRoot)
 	if err != nil {
 		return "", fmt.Errorf("list processes: %w", err)
 	}
@@ -2531,7 +2537,7 @@ func isControlPlaneArgs(args []string, stateDir, cacheDir string) bool {
 // processArgs returns the command line of a process as its arguments.
 // Kernel threads and processes that cannot be read give none.
 func processArgs(pid int) []string {
-	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "cmdline"))
 	if err != nil || len(data) == 0 {
 		return nil
 	}
