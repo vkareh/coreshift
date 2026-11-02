@@ -75,15 +75,38 @@ a fresh cluster with no nodes — pointed at the release the run resolved,
 with update following off — after the boot seeds what it cannot create
 itself: its namespace, the config API definitions it reads at startup,
 and an empty version object, the same set the installer's bootstrap
-applies. Through the admin kubeconfig you can watch it work: the
-payload's namespaces and definitions appear, and `oc get clusterversion
-version` reports the release in its status — honest about the partial
-state, its conditions naming the payload's operators as not available
-because they are not running. The operator Deployments it creates
-select master nodes, and this control plane runs none, so they sit
-Pending: the payload is applied, but nothing runs from it, and nothing
-it deploys selects workers, so a joined worker would receive none of it
-either. The control plane stands in for the bootstrap, not for nodes.
+applies. It starts as soon as the kube core answers, ahead of the
+OpenShift children that wait on what it applies. Through the admin
+kubeconfig you can watch it work: the payload's namespaces and
+definitions appear, and `oc get clusterversion version` reports the
+release in its status — honest about the partial state, its conditions
+naming the payload's operators as not available because they are not
+running. The operator Deployments it creates select master nodes, and
+this control plane runs none, so they sit Pending: the payload is
+applied, but nothing runs from it, and nothing it deploys selects
+workers, so a joined worker would receive none of it either. The
+control plane stands in for the bootstrap, not for nodes.
+
+The children that need objects the payload carries wait for them before
+starting: the OpenShift API server waits for the quota and security
+definitions, the OAuth API server for the OAuth definition, and the
+controller managers for the permission pair that backs pod security
+labeling. The wait shows as one progress line while it lasts and passes
+the moment the objects exist, whoever applied them: today the seed
+layer applies them in one pass right after the API server answers, so a
+normal boot never shows the line. If they never arrive, the boot fails
+after ten minutes, naming what was missing and pointing at the
+operator's log. The budget is sized against a cold boot's observed
+delivery — the security definition ten seconds after the API server
+answers, the OAuth definition thirty-six, the permission pair under a
+minute — leaving an order of magnitude of room.
+
+One definition cannot move to the operator: the quota definition backs
+the admission chain kube-apiserver itself runs over every namespaced
+write, and without it a write to a newly created namespace never
+completes, so it must be in place before the API server answers —
+before the operator could deliver anything. The seed layer keeps
+applying it for exactly that reason.
 
 ### Prerequisites
 
