@@ -23,6 +23,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1551,9 +1553,11 @@ func pemDecode(t *testing.T, data []byte) *pem.Block {
 // prepends it to PATH. It records every call, one line per call, in the
 // file named by PODMAN_LOG; the containers named in PODMAN_CONTAINERS,
 // one per line, are the ones that exist and the ones ps lists; inspect
-// answers with the per-container port file from PODMAN_PORTS, and with
-// the per-container label file from PODMAN_LABELS when asked for labels;
-// logs answers with the per-container file from PODMAN_LOGS.
+// answers with the per-container port file from PODMAN_PORTS, with the
+// per-container label file from PODMAN_LABELS when asked for labels, and
+// with the per-container running file from PODMAN_STATE, defaulting to
+// stopped, when asked for the running state; logs answers with the
+// per-container file from PODMAN_LOGS.
 func writeFakePodman(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
@@ -1571,6 +1575,7 @@ if [ "$1" = "inspect" ]; then
 	eval "container=\${$#}"
 	case "$3" in
 	*Labels*) cat "$PODMAN_LABELS/$container" 2>/dev/null ;;
+	*Running*) cat "$PODMAN_STATE/$container" 2>/dev/null || echo false ;;
 	*) cat "$PODMAN_PORTS/$container" ;;
 	esac
 	exit 0
@@ -1590,6 +1595,7 @@ exit 0
 	t.Setenv("PODMAN_CONTAINERS", filepath.Join(t.TempDir(), "containers"))
 	t.Setenv("PODMAN_PORTS", t.TempDir())
 	t.Setenv("PODMAN_LABELS", t.TempDir())
+	t.Setenv("PODMAN_STATE", t.TempDir())
 	t.Setenv("PODMAN_LOGS", t.TempDir())
 }
 
@@ -1609,6 +1615,19 @@ func setContainerPort(t *testing.T, container string, port int) {
 	t.Helper()
 	mapping := fmt.Sprintf("%d %d/tcp\n", port, port)
 	if err := os.WriteFile(filepath.Join(os.Getenv("PODMAN_PORTS"), container), []byte(mapping), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// setContainerRunning makes the fake podman answer state inspection for
+// container: running, or stopped when false.
+func setContainerRunning(t *testing.T, container string, running bool) {
+	t.Helper()
+	state := "false\n"
+	if running {
+		state = "true\n"
+	}
+	if err := os.WriteFile(filepath.Join(os.Getenv("PODMAN_STATE"), container), []byte(state), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1719,9 +1738,10 @@ func TestRunGetClustersEmpty(t *testing.T) {
 
 // TestRunGetClustersListsClusters checks the row each cluster gets: its
 // name, the port its container publishes, the release its state
-// directory records, and readiness from a live probe, so a cluster with
-// nothing answering on its port shows as not ready and one without a
-// state directory yet shows an unknown release.
+// directory records, and readiness from its container running and a
+// live probe agreeing, so a running cluster with nothing answering on
+// its port shows as not ready and one without a state directory yet
+// shows an unknown release.
 func TestRunGetClustersListsClusters(t *testing.T) {
 	writeFakePodman(t)
 	base := t.TempDir()
@@ -1743,6 +1763,9 @@ func TestRunGetClustersListsClusters(t *testing.T) {
 	setContainerPort(t, "coreshift-booting", 17443)
 	setContainerPort(t, "coreshift-early", 18443)
 	setContainerPort(t, "coreshift-ready", readyPort)
+	for _, name := range []string{"booting", "early", "ready"} {
+		setContainerRunning(t, "coreshift-"+name, true)
+	}
 	for _, name := range []string{"booting", "ready"} {
 		stateDir, err := clusterDir(name)
 		if err != nil {
@@ -1779,6 +1802,54 @@ func TestRunGetClustersListsClusters(t *testing.T) {
 	}
 	if got := rowFor("ready"); len(got) != 4 || got[1] != strconv.Itoa(readyPort) || got[3] != "ready" {
 		t.Fatalf("ready row = %q, want its port and ready", got)
+	}
+}
+
+// TestRunGetClustersStoppedContainerNotReady checks the row a stopped
+// container gets: not ready, without probing, even when its published
+// port is held by a live cluster whose API would answer the probe for
+// it, which is how a dead cluster used to show as ready.
+func TestRunGetClustersStoppedContainerNotReady(t *testing.T) {
+	writeFakePodman(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	var probes atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		probes.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyPort, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both containers publish the live server's port; only one runs.
+	setContainers(t, "coreshift-dead", "coreshift-live")
+	setContainerPort(t, "coreshift-dead", readyPort)
+	setContainerPort(t, "coreshift-live", readyPort)
+	setContainerRunning(t, "coreshift-live", true)
+
+	var outErr error
+	out := captureStdout(t, func() { outErr = runGetClusters() })
+	if outErr != nil {
+		t.Fatal(outErr)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("output has %d lines, want a header and two clusters:\n%s", len(lines), out)
+	}
+	if fields := strings.Fields(lines[1]); len(fields) < 4 || fields[0] != "dead" || strings.Join(fields[3:], " ") != "not ready" {
+		t.Fatalf("dead row = %q, want not ready", lines[1])
+	}
+	if fields := strings.Fields(lines[2]); len(fields) < 3 || fields[0] != "live" || strings.Join(fields[3:], " ") != "ready" {
+		t.Fatalf("live row = %q, want ready", lines[2])
+	}
+	if got := probes.Load(); got != 1 {
+		t.Fatalf("API probed %d times, want once, for the live container only", got)
 	}
 }
 
@@ -2535,14 +2606,16 @@ func TestRunGetWorkersEmpty(t *testing.T) {
 
 // TestRunGetWorkersListsWorkers checks the row each worker gets: its
 // name, the cluster its container is labeled with, and readiness from
-// its node's live condition, so a worker without a reachable cluster
-// shows as not ready and one without a label shows no cluster.
+// its container running and its node's live condition agreeing, so a
+// running worker without a reachable cluster shows as not ready and
+// one without a label shows no cluster.
 func TestRunGetWorkersListsWorkers(t *testing.T) {
 	writeFakePodman(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	setContainers(t, "coreshift-dev", "coreshift-worker-w1", "coreshift-worker-w2")
 	setContainerPort(t, "coreshift-dev", 7443)
 	setContainerLabel(t, "coreshift-worker-w1", "dev")
+	setContainerRunning(t, "coreshift-worker-w1", true)
 
 	var err error
 	out := captureStdout(t, func() { err = runGetWorkers() })
@@ -2558,6 +2631,84 @@ func TestRunGetWorkersListsWorkers(t *testing.T) {
 	}
 	if fields := strings.Fields(lines[2]); len(fields) < 4 || fields[0] != "w2" || fields[1] != "-" || strings.Join(fields[2:], " ") != "not ready" {
 		t.Fatalf("w2 row = %q, want its name, no cluster, and not ready", lines[2])
+	}
+}
+
+// TestRunGetWorkersStoppedContainerNotReady checks the row a stopped
+// worker gets: not ready, without probing, even when its node's
+// condition still reads ready in the cluster's API, which is the shape
+// a just-stopped worker leaves behind until the cluster notices.
+func TestRunGetWorkersStoppedContainerNotReady(t *testing.T) {
+	writeFakePodman(t)
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+
+	// The cluster's API reports every node ready, stopped ones included.
+	var mu sync.Mutex
+	probes := map[string]int{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/nodes/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/api/v1/nodes/")
+		mu.Lock()
+		probes[name]++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(corev1.Node{
+			TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Node"},
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
+				Type:   corev1.NodeReady,
+				Status: corev1.ConditionTrue,
+			}}},
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	stateDir, err := clusterDir("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := clientcmdapi.NewConfig()
+	config.Clusters["dev"] = &clientcmdapi.Cluster{Server: server.URL}
+	config.AuthInfos["admin"] = &clientcmdapi.AuthInfo{}
+	config.Contexts["admin@dev"] = &clientcmdapi.Context{Cluster: "dev", AuthInfo: "admin"}
+	config.CurrentContext = "admin@dev"
+	if err := clientcmd.WriteToFile(*config, filepath.Join(stateDir, certgen.AdminKubeconfigFilename)); err != nil {
+		t.Fatal(err)
+	}
+
+	setContainers(t, "coreshift-dev", "coreshift-worker-w1", "coreshift-worker-w3")
+	setContainerPort(t, "coreshift-dev", 7443)
+	setContainerLabel(t, "coreshift-worker-w1", "dev")
+	setContainerLabel(t, "coreshift-worker-w3", "dev")
+	setContainerRunning(t, "coreshift-worker-w1", true)
+
+	var outErr error
+	out := captureStdout(t, func() { outErr = runGetWorkers() })
+	if outErr != nil {
+		t.Fatal(outErr)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("output has %d lines, want a header and two workers:\n%s", len(lines), out)
+	}
+	if fields := strings.Fields(lines[1]); len(fields) < 3 || fields[0] != "w1" || strings.Join(fields[2:], " ") != "ready" {
+		t.Fatalf("w1 row = %q, want ready", lines[1])
+	}
+	if fields := strings.Fields(lines[2]); len(fields) < 4 || fields[0] != "w3" || strings.Join(fields[2:], " ") != "not ready" {
+		t.Fatalf("w3 row = %q, want not ready", lines[2])
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if probes["w3"] != 0 {
+		t.Fatalf("the stopped worker's node was probed %d times, want none", probes["w3"])
+	}
+	if probes["w1"] != 1 {
+		t.Fatalf("the running worker's node was probed %d times, want once", probes["w1"])
 	}
 }
 

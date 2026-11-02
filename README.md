@@ -738,9 +738,11 @@ restart workflow `--preserve-workers` leaves them running for.
 ## The `get` command
 
 `coreshift get clusters` lists the clusters: name, published port,
-recorded release, and readiness. Readiness is a live probe of each
-cluster's API server rather than the container's running state, so a
-booting or wedged cluster shows as not ready. With no clusters it prints
+recorded release, and readiness. Readiness requires the cluster's
+container running and its API server answering a live probe: a stopped
+container is not ready without probing, because the port it published
+can since have been taken by another cluster, and a running but booting
+or wedged one fails the probe. With no clusters it prints
 `No clusters`. Worker containers, which share the `coreshift-` name
 prefix, are not clusters in this list.
 
@@ -754,9 +756,11 @@ exists for the name, listing the clusters that do:
 ```
 
 `coreshift get workers` lists the workers: name, cluster, and readiness.
-Readiness is the node's own condition, read live from the cluster's API,
-so a worker whose node reports not ready — every worker here, until a CNI
-exists — shows as not ready. With no workers it prints `No workers`.
+Readiness requires the worker's container running and its node's own
+condition, read live from the cluster's API, ready: a stopped container
+is not ready without probing, and a worker whose node reports not
+ready — every worker here, until a CNI exists — is not ready either.
+With no workers it prints `No workers`.
 
 ## The `version` command
 

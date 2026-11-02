@@ -1275,8 +1275,9 @@ func stopStreaming(logs *exec.Cmd) {
 	_ = logs.Wait()
 }
 
-// containerRunning reports whether the cluster container is running. A
-// failed inspect, such as under a busy podman, is retried by the caller.
+// containerRunning reports whether the container is running. A failed
+// inspect, such as under a busy podman, is transient; the boot wait
+// retries it, and the listings read it as not running.
 func containerRunning(container string) (bool, error) {
 	out, err := exec.Command("podman", "inspect", "--format", "{{.State.Running}}", container).Output()
 	if err != nil {
@@ -1986,9 +1987,11 @@ func newGetClustersCommand() *cobra.Command {
 	}
 }
 
-// runGetClusters lists the clusters. Readiness is a live probe of each
-// cluster's API server, not the container's running state, so a booting
-// or wedged cluster shows as not ready.
+// runGetClusters lists the clusters. Readiness requires the container
+// running and its API server answering a live probe: a stopped
+// container is not ready without probing, because the port it
+// published can since have been taken by another live cluster, and a
+// running but booting or wedged one fails the probe.
 func runGetClusters() error {
 	if _, err := exec.LookPath("podman"); err != nil {
 		return fmt.Errorf("podman is required to list clusters: %w", err)
@@ -2018,7 +2021,7 @@ func runGetClusters() error {
 			release = "-"
 		}
 		ready := "not ready"
-		if clusterReady(port) {
+		if running, err := containerRunning(container); err == nil && running && clusterReady(port) {
 			ready = "ready"
 		}
 		fmt.Fprintf(w, "%s\t%d\t%s\t%s\n", name, port, release, ready)
@@ -2069,10 +2072,11 @@ func newGetWorkersCommand() *cobra.Command {
 	}
 }
 
-// runGetWorkers lists the workers. Readiness is the worker's own node
-// condition, read live from the cluster's API, so a worker whose node
-// reports not ready — which is every worker until a CNI exists — shows
-// as not ready.
+// runGetWorkers lists the workers. Readiness requires the worker's
+// container running and its node's condition, read live from the
+// cluster's API, ready: a stopped container is not ready without
+// probing, and a running worker whose node reports not ready — every
+// worker until a CNI exists — is not ready either.
 func runGetWorkers() error {
 	if _, err := exec.LookPath("podman"); err != nil {
 		return fmt.Errorf("podman is required to list workers: %w", err)
@@ -2093,8 +2097,10 @@ func runGetWorkers() error {
 		ready := "not ready"
 		if label, err := containerLabel(container, workerClusterLabel); err == nil && label != "" {
 			cluster = label
-			if _, stateDir, err := workerClusterTarget(label); err == nil && workerNodeReady(stateDir, name) {
-				ready = "ready"
+			if running, err := containerRunning(container); err == nil && running {
+				if _, stateDir, err := workerClusterTarget(label); err == nil && workerNodeReady(stateDir, name) {
+					ready = "ready"
+				}
 			}
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\n", name, cluster, ready)
@@ -2310,9 +2316,11 @@ const readyProbeTimeout = 3 * time.Second
 
 // clusterReady reports whether a cluster's API server answers its health
 // endpoint. The probe is live with a short timeout, so a booting or
-// wedged control plane shows as not ready whatever its container's
-// running state says. TLS is not verified: reaching a healthy API server
-// is the question, not whose certificate it serves.
+// wedged control plane shows as not ready. A port alone does not
+// identify its cluster — a stopped container's can be held by another
+// live one — so callers confirm the container is running before trusting
+// a yes. TLS is not verified: reaching a healthy API server is the
+// question, not whose certificate it serves.
 func clusterReady(port int) bool {
 	client := &http.Client{
 		Timeout:   readyProbeTimeout,
