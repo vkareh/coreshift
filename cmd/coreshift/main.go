@@ -40,6 +40,7 @@ import (
 	"github.com/vkareh/coreshift/internal/certgen"
 	"github.com/vkareh/coreshift/internal/clusterversion"
 	"github.com/vkareh/coreshift/internal/crd"
+	"github.com/vkareh/coreshift/internal/gate"
 	"github.com/vkareh/coreshift/internal/gpgme"
 	"github.com/vkareh/coreshift/internal/infrastructure"
 	"github.com/vkareh/coreshift/internal/join"
@@ -414,6 +415,23 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 		return fmt.Errorf("determine host name: %w", err)
 	}
 
+	// gateOn holds a child's start until the objects it needs exist,
+	// whoever applied them: the seed layer's post-readiness work today,
+	// the version operator's manifest application once it owns them. A
+	// timeout points at the operator, the deliverer.
+	gateOn := func(ctx context.Context, waitingFor string, objects ...gate.Object) error {
+		return gate.Wait(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), waitingFor,
+			filepath.Join(stateDir, "logs", "cluster-version-operator.log"), objects...)
+	}
+
+	// The controller managers' pod security labeling reads the grant that
+	// lets every signed-in user use the restricted constraint, the one
+	// pair of their permissions the release payload itself carries.
+	controllerRBAC := []gate.Object{
+		gate.ClusterRole("system:openshift:scc:restricted-v3"),
+		gate.ClusterRoleBinding("system:openshift:scc:restricted-v3"),
+	}
+
 	// Flag sets verified against the 4.22.8 payload: kube-apiserver reaches
 	// readiness with exactly the flags below; the controllers stay up with
 	// service-account credentials and leader election off.
@@ -533,6 +551,42 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 				"--config=" + schedulerConfig,
 			},
 		},
+		// The version operator applies the release payload's manifests to
+		// the cluster for the control plane's lifetime — the same job the
+		// installer's bootstrap gives it on a fresh cluster with no nodes.
+		// The flags are that bootstrap pod's: pointed at the release this
+		// run resolved, run against the admin kubeconfig the way the
+		// bootstrap runs against its loopback one, with update following
+		// and the metrics listener off. The payload it applies is the
+		// release image's own manifest directories, which the payload
+		// cache holds; the operator's supported environment override
+		// points it there, standing in for its image's filesystem. It
+		// starts ahead of the OpenShift children whose starts gate on the
+		// objects it applies.
+		{
+			Name: "cluster-version-operator",
+			Path: openShiftBinaries["cluster-version-operator"],
+			Args: []string{
+				"start",
+				"--release-image=" + releaseRef,
+				"--kubeconfig=" + filepath.Join(stateDir, certgen.AdminKubeconfigFilename),
+				"--node-name=" + nodeName,
+				"--enable-auto-update=false",
+				"--listen=",
+				"--v=2",
+			},
+			Env: append(os.Environ(), "PAYLOAD_OVERRIDE="+payloadDir),
+			// The operator reads cluster configuration from its first
+			// moments and waits for the version object before applying
+			// anything, so its prerequisites are seeded here, after every
+			// earlier seed has run, right before it starts.
+			BeforeStart: func(ctx context.Context) error {
+				ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				defer cancel()
+				fmt.Println("Seeding cluster version operator prerequisites")
+				return clusterversion.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), payloadDir)
+			},
+		},
 		{
 			Name: "openshift-apiserver",
 			Path: openShiftBinaries["openshift-apiserver"],
@@ -550,6 +604,14 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 				"--requestheader-group-headers=X-Remote-Group",
 				"--requestheader-extra-headers-prefix=X-Remote-Extra-",
 				"--client-ca-file=" + filepath.Join(stateDir, certgen.CACertFilename),
+			},
+			// The admission chain this server runs gates namespaced writes
+			// on informers over the quota and security APIs, so their
+			// definitions must exist before it starts.
+			BeforeStart: func(ctx context.Context) error {
+				return gateOn(ctx, "the quota and security definitions",
+					gate.Definition("clusterresourcequotas.quota.openshift.io"),
+					gate.Definition("securitycontextconstraints.security.openshift.io"))
 			},
 			// The default security context constraints are stored through
 			// the security API this server serves; they are created once it
@@ -584,6 +646,11 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 				"--requestheader-group-headers=X-Remote-Group",
 				"--requestheader-extra-headers-prefix=X-Remote-Extra-",
 				"--client-ca-file=" + filepath.Join(stateDir, certgen.CACertFilename),
+			},
+			// The OAuth definition must exist before this server starts.
+			BeforeStart: func(ctx context.Context) error {
+				return gateOn(ctx, "the OAuth definition",
+					gate.Definition("oauths.config.openshift.io"))
 			},
 			// The login client is stored through the OAuth API this server
 			// serves; it is created once the server answers, so logins have
@@ -639,6 +706,12 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 				"--kubeconfig=" + filepath.Join(stateDir, certgen.OpenShiftControllerManagerKubeconfigFilename),
 				"--namespace=default",
 			},
+			// The controller managers label namespaces with their pod
+			// security level from the constraint use grants the cluster
+			// carries, so the grant must exist before they start.
+			BeforeStart: func(ctx context.Context) error {
+				return gateOn(ctx, "the controller RBAC", controllerRBAC...)
+			},
 			// The binary links against the gpgme libraries embedded in
 			// this binary and written into the image cache.
 			Env: append(os.Environ(), "LD_LIBRARY_PATH="+gpgmeDir, "POD_NAMESPACE=default"),
@@ -651,6 +724,9 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 				"--config=" + clusterPolicyControllerConfig,
 				"--kubeconfig=" + filepath.Join(stateDir, certgen.ClusterPolicyControllerKubeconfigFilename),
 				"--namespace=default",
+			},
+			BeforeStart: func(ctx context.Context) error {
+				return gateOn(ctx, "the controller RBAC", controllerRBAC...)
 			},
 			Env: append(os.Environ(), "POD_NAMESPACE=default"),
 		},
@@ -671,40 +747,6 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 				"--disable-status-controller",
 				// Single instance, no lease to elect.
 				"--leader-elect=false",
-			},
-		},
-		// The version operator applies the release payload's manifests to
-		// the cluster for the control plane's lifetime — the same job the
-		// installer's bootstrap gives it on a fresh cluster with no nodes.
-		// The flags are that bootstrap pod's: pointed at the release this
-		// run resolved, run against the admin kubeconfig the way the
-		// bootstrap runs against its loopback one, with update following
-		// and the metrics listener off. The payload it applies is the
-		// release image's own manifest directories, which the payload
-		// cache holds; the operator's supported environment override
-		// points it there, standing in for its image's filesystem.
-		{
-			Name: "cluster-version-operator",
-			Path: openShiftBinaries["cluster-version-operator"],
-			Args: []string{
-				"start",
-				"--release-image=" + releaseRef,
-				"--kubeconfig=" + filepath.Join(stateDir, certgen.AdminKubeconfigFilename),
-				"--node-name=" + nodeName,
-				"--enable-auto-update=false",
-				"--listen=",
-				"--v=2",
-			},
-			Env: append(os.Environ(), "PAYLOAD_OVERRIDE="+payloadDir),
-			// The operator reads cluster configuration from its first
-			// moments and waits for the version object before applying
-			// anything, so its prerequisites are seeded here, after every
-			// earlier seed has run, right before it starts.
-			BeforeStart: func(ctx context.Context) error {
-				ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-				defer cancel()
-				fmt.Println("Seeding cluster version operator prerequisites")
-				return clusterversion.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), payloadDir)
 			},
 		},
 	}
