@@ -115,8 +115,10 @@ definitions, the OAuth API server for the OAuth definition, and the
 controller managers for the permission pair that backs pod security
 labeling. The wait shows as one progress line while it lasts and passes
 the moment the objects exist, whoever applied them: the version operator
-is the deliverer for all of them, so a normal boot shows each line for
-the few seconds its delivery takes. If they never arrive, the boot fails
+is the deliverer for all of them, so a normal boot shows each line only
+for the few seconds its delivery takes, and a gate the operator has
+already fed — delivery can land while earlier children are still
+starting — shows no line at all. If they never arrive, the boot fails
 after ten minutes, naming what was missing and pointing at the
 operator's log. The budget is sized against a cold boot's observed
 delivery — the security definition ten seconds after the API server
@@ -383,7 +385,8 @@ question `run cluster` asks, without one with the `--fresh` remedy — so a
 doomed run fails before an image is minted. The container
 keeps running in the background when the command returns; closing the
 terminal does not stop it. The API is published on `127.0.0.1:<port>`
-only, so exposing it to the network stays an explicit act.
+only, and the OAuth login endpoint on the port after it, so exposing
+either to the network stays an explicit act.
 
 ### Prerequisites
 
@@ -437,9 +440,12 @@ port, warm.
   directory does not depend on it, so a cluster deleted with
   `--preserve-state` and re-created on a different port reuses its state
   warm, with the kubeconfig's server URL rewritten on boot to match the
-  port in use. Create refuses a port something
-  already listens on, and one of the control plane's reserved ports
-  listed under host mode.
+  port in use. The OAuth login endpoint publishes on the port after the
+  API port, so `oc login` from the host can follow the API server's
+  discovery document to the OAuth server; create refuses an API port
+  whose follower is taken or reserved. Create also refuses a port
+  something already listens on, and one of the control plane's reserved
+  ports listed under host mode.
 - `--name`: the cluster's name, `coreshift` by default; the container is
   called `coreshift-<name>` and the state lives in
   `clusters/<name>` under the state root, the same directory host mode
