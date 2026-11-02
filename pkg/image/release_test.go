@@ -125,3 +125,70 @@ func TestCachedReleaseUsesRecordedDigest(t *testing.T) {
 		t.Fatalf("resolve from cached manifest: %v", err)
 	}
 }
+
+// writeTestPayload writes the release image's manifest directories: the
+// operator's own manifests and the release payload's, each with one
+// file standing in for the set.
+func writeTestPayload(t *testing.T, root string) {
+	t.Helper()
+	operatorManifest := filepath.Join(root, "manifests", "deployment.yaml")
+	if err := os.MkdirAll(filepath.Dir(operatorManifest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(operatorManifest, []byte("kind: Deployment\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeTestReleaseManifest(t, root)
+	metadata := filepath.Join(root, releaseManifestDir, "release-metadata")
+	if err := os.WriteFile(metadata, []byte(`{"kind":"cincinnati-metadata-v0","version":"4.22.21"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExtractPayload(t *testing.T) {
+	filesystem := t.TempDir()
+	writeTestPayload(t, filesystem)
+	dir := t.TempDir()
+
+	if err := extractPayload(filesystem, dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		filepath.Join("manifests", "deployment.yaml"),
+		filepath.Join(releaseManifestDir, "image-references"),
+		filepath.Join(releaseManifestDir, "release-metadata"),
+	} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("%s was not extracted: %v", name, err)
+		}
+	}
+}
+
+// TestCachedPayloadUsesRecordedDigest covers the second run of a pinned
+// release: with the tag's digest recorded and the payload cached, no
+// registry credentials are needed at all, so the client is built with
+// none and any registry call would fail the test.
+func TestCachedPayloadUsesRecordedDigest(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	release := "quay.io/example/release:v1"
+	if err := writeTagRecord(release, testDigestRef); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := cachePath(payloadKind, testDigestRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestPayload(t, dir)
+
+	root, err := (&Client{}).CachedPayload(context.Background(), release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root != dir {
+		t.Fatalf("root = %q, want %q", root, dir)
+	}
+	if _, err := ResolveComponentImage(root, "etcd"); err != nil {
+		t.Fatalf("resolve from cached payload: %v", err)
+	}
+}

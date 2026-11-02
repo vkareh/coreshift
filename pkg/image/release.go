@@ -12,13 +12,19 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
-// Same file `oc adm release info --image-for` reads.
-const releaseManifestPath = "release-manifests/image-references"
+// The release payload's manifest directory inside the release image,
+// and the same file `oc adm release info --image-for` reads.
+const (
+	releaseManifestDir  = "release-manifests"
+	releaseManifestPath = releaseManifestDir + "/image-references"
+)
 
-// Cache subdirectories for release manifests and for records mapping
-// tag references to the digests they resolved to.
+// Cache subdirectories for release manifests, for the release payload's
+// manifest sets, and for records mapping tag references to the digests
+// they resolved to.
 const (
 	releaseKind   = "release"
+	payloadKind   = "payload"
 	tagRecordKind = "tags"
 )
 
@@ -70,26 +76,45 @@ func ResolveComponentImage(releaseRoot, componentName string) (string, error) {
 // resolved to is recorded too, so repeat runs with the same release
 // make no registry calls at all.
 func (c *Client) CachedRelease(ctx context.Context, releaseImage string) (string, error) {
-	imageRef := releaseImage
-	if !strings.Contains(imageRef, "@") {
-		if recorded, ok := readTagRecord(releaseImage); ok {
-			if dir, err := cachePath(releaseKind, recorded); err == nil {
-				if _, err := os.Stat(dir); err == nil {
-					Logger.Printf("using cached image %s", recorded)
-					return dir, nil
-				}
-			}
-		}
-		resolved, err := c.resolveDigestRef(ctx, releaseImage)
-		if err != nil {
-			return "", fmt.Errorf("resolve release image: %w", err)
-		}
-		if err := writeTagRecord(releaseImage, resolved); err != nil {
-			return "", fmt.Errorf("record release image digest: %w", err)
-		}
-		imageRef = resolved
+	imageRef, err := c.pinnedRelease(ctx, releaseImage)
+	if err != nil {
+		return "", err
 	}
 	return c.extractCached(ctx, releaseKind, imageRef, extractReleaseManifest)
+}
+
+// CachedPayload returns a directory holding the release image's
+// manifest sets, the cluster-version operator's own manifests and the
+// release payload's, pulling the release image only when they are not
+// already cached. The entry sits beside the manifest cache under the
+// same digest, so repeat runs make no registry calls at all.
+func (c *Client) CachedPayload(ctx context.Context, releaseImage string) (string, error) {
+	imageRef, err := c.pinnedRelease(ctx, releaseImage)
+	if err != nil {
+		return "", err
+	}
+	return c.extractCached(ctx, payloadKind, imageRef, extractPayload)
+}
+
+// pinnedRelease returns the digest-pinned form of a release reference:
+// a tag is resolved through the registry once and the digest recorded,
+// so cache entries are keyed by image content and later runs skip the
+// registry call.
+func (c *Client) pinnedRelease(ctx context.Context, releaseImage string) (string, error) {
+	if strings.Contains(releaseImage, "@") {
+		return releaseImage, nil
+	}
+	if recorded, ok := readTagRecord(releaseImage); ok {
+		return recorded, nil
+	}
+	resolved, err := c.resolveDigestRef(ctx, releaseImage)
+	if err != nil {
+		return "", fmt.Errorf("resolve release image: %w", err)
+	}
+	if err := writeTagRecord(releaseImage, resolved); err != nil {
+		return "", fmt.Errorf("record release image digest: %w", err)
+	}
+	return resolved, nil
 }
 
 // resolveDigestRef returns the digest-pinned form of a tag reference.
@@ -152,6 +177,21 @@ func extractReleaseManifest(filesystem, dir string) error {
 	}
 	if err := os.WriteFile(target, data, 0o644); err != nil {
 		return fmt.Errorf("write release manifest: %w", err)
+	}
+	return nil
+}
+
+// extractPayload copies the release image's manifest directories from an
+// unpacked filesystem into dir: the operator's own manifests, which name
+// its deployment and definitions, and the release payload's, which the
+// operator applies to the cluster. The operator reads both from wherever
+// it runs, not its image's filesystem, so the payload cache entry is
+// what a run points it at.
+func extractPayload(filesystem, dir string) error {
+	for _, name := range []string{"manifests", releaseManifestDir} {
+		if err := os.CopyFS(filepath.Join(dir, name), os.DirFS(filepath.Join(filesystem, name))); err != nil {
+			return fmt.Errorf("copy %s: %w", name, err)
+		}
 	}
 	return nil
 }
