@@ -74,14 +74,36 @@ cluster. It runs here the way the installer's bootstrap runs it against
 a fresh cluster with no nodes — pointed at the release the run resolved,
 with update following off — after the boot seeds what it cannot create
 itself: its namespace, the config API definitions it reads at startup,
-and an empty version object, the same set the installer's bootstrap
-applies. It starts as soon as the kube core answers, ahead of the
+and the initial version object, the same set the installer's bootstrap
+applies. That object belongs to the operator, not to CoreShift: the run
+writes it once, with nothing but the cluster identity the API requires,
+so the operator adopts the cluster instead of creating it fresh, and
+from its first boot it owns the object — the status, the history, and
+the desired state, all written against the release actually running.
+Nothing in CoreShift writes to the object after that.
+
+The release the run resolved is kept in lockstep across everything that
+carries one: the operator is told it, the control plane's processes run
+binaries from it, and the state directory's marker records it. One
+resolution feeds all three, so the manifests applied, the binaries
+running, and the marker recorded can never name different releases. An
+in-place patch upgrade — re-creating a cluster with its state preserved
+and a newer version of its stream — moves all three together: the
+operator re-syncs the cluster to the new payload, the version history
+gains the new release, and the processes and marker follow.
+
+The operator starts as soon as the kube core answers, ahead of the
 OpenShift children that wait on what it applies. Through the admin
 kubeconfig you can watch it work: the payload's namespaces and
 definitions appear, and `oc get clusterversion version` reports the
-release in its status — honest about the partial state, its conditions
-naming the payload's operators as not available because they are not
-running. The operator Deployments it creates select master nodes, and
+release in its status. The rest of that status is honest about the
+partial state, and the cluster reports degraded: its Failing condition
+names every payload operator as not available, because those operators
+run as pods in a real cluster and are not running here at all — their
+Deployments sit Pending, their ClusterOperator objects stay empty, and
+the few payload objects that live in namespaces those operators would
+have created cannot land. The status is the truth, not a fault to
+hide. The operator Deployments it creates select master nodes, and
 this control plane runs none, so they sit Pending: the payload is
 applied, but nothing runs from it, and nothing it deploys selects
 workers, so a joined worker would receive none of it either. The
