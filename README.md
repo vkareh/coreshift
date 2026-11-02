@@ -50,7 +50,8 @@ workers, and its state; cleanup clears leftover state and cached images.
 - `coreshift get workers`: list the workers with their cluster and live
   readiness.
 - `coreshift cleanup [--name | --all]`: remove cluster state and, with
-  `--cache`, the shared image cache.
+  `--cache`, everything derived and rebuildable: the image cache and the
+  minted container images.
 - `coreshift version`: print the version the binary was built with.
 
 ## The `run cluster` command
@@ -835,15 +836,23 @@ a container-mode cluster's state.
 - `--all` removes every cluster's state: the whole `clusters` tree, and
   nothing else under the state root, so unrelated directories kept there
   survive.
-- `--cache` additionally removes the shared image cache. That is safe to
-  drop; it is keyed by image digest and fully rebuilt by re-pulling on the
-  next run.
+- `--cache` additionally removes everything derived and rebuildable: the
+  shared image cache, and the minted container images from podman's store
+  — the `coreshift` and `coreshift-worker` tags. Both are safe to drop;
+  the cache is keyed by image digest and rebuilt by re-pulling, and the
+  images are minted from the binary again in seconds. The base images
+  they were built from, such as the UBI and rhel-coreos bases, are shared
+  with everything else and stay. A cluster whose state was kept simply
+  mints its image again on re-create.
 
-Each directory is listed with its size on disk before it is deleted, and
-the total freed is reported after. A missing directory is reported and is
-not an error. If a control plane is running, the command refuses and asks
-to stop it first, because cleaning under a live instance would pull its
-data out from under it.
+Each directory is listed with its size on disk before it is deleted,
+each removed image is named, and the total freed is reported after.
+Because images share layers with their bases, the freed space is
+measured as the drop in podman's store, not as the sum of the removed
+images' sizes. A missing directory is reported and is not an error. If a
+control plane is running, the command refuses and asks to stop it first,
+because cleaning under a live instance would pull its data out from
+under it.
 
 ## Cache
 
@@ -853,4 +862,10 @@ cached under `~/.cache/coreshift/`
 (`$XDG_CACHE_HOME/coreshift`), keyed by image digest and shared by
 everything regardless of mode or cluster. A second run of the
 same pinned release pulls nothing from the registry and starts straight
-from the cache. Run `coreshift cleanup --cache` to clear it.
+from the cache.
+
+The minted container images are the same kind of thing: deterministic
+from the binary and rebuilt in seconds. `coreshift cleanup --cache`
+therefore removes them from podman's store along with the cache
+directory, making one flag mean everything derived and rebuildable; the
+base images they were built from stay.

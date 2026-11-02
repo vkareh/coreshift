@@ -462,7 +462,7 @@ func TestCleanupRemovesDefaultStateDir(t *testing.T) {
 	}
 	writeStateTree(t, stateDir, defaultClusterName)
 
-	if err := runCleanup(defaultClusterName, false, false); err != nil {
+	if err := runCleanup(context.Background(), defaultClusterName, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
@@ -484,7 +484,7 @@ func TestCleanupRemovesNamedClusterOnly(t *testing.T) {
 	writeStateTree(t, removed, "dev")
 	writeStateTree(t, kept, "other")
 
-	if err := runCleanup("dev", false, false); err != nil {
+	if err := runCleanup(context.Background(), "dev", false, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(removed); !os.IsNotExist(err) {
@@ -511,7 +511,7 @@ func TestCleanupAllSweepsClustersTree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := runCleanup(defaultClusterName, true, false); err != nil {
+	if err := runCleanup(context.Background(), defaultClusterName, true, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(tree); !os.IsNotExist(err) {
@@ -524,23 +524,101 @@ func TestCleanupAllSweepsClustersTree(t *testing.T) {
 
 func TestCleanupMissingStateDirIsNotAnError(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if err := runCleanup(defaultClusterName, false, false); err != nil {
+	if err := runCleanup(context.Background(), defaultClusterName, false, false); err != nil {
 		t.Fatalf("missing state directory must not fail: %v", err)
 	}
 }
 
 func TestCleanupCache(t *testing.T) {
+	// The fake podman keeps the cleanup's image half from touching any
+	// real images the machine running the tests holds.
+	writeFakePodman(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cacheBase := t.TempDir()
 	t.Setenv("XDG_CACHE_HOME", cacheBase)
 	cacheDir := filepath.Join(cacheBase, "coreshift")
 	writeStateTree(t, cacheDir, defaultClusterName)
 
-	if err := runCleanup(defaultClusterName, false, true); err != nil {
+	if err := runCleanup(context.Background(), defaultClusterName, false, true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
 		t.Fatal("image cache still exists")
+	}
+}
+
+// TestCleanupCacheRemovesMintedImages checks the cache flag's widened
+// meaning: the minted images in both of the project's repositories are
+// removed alongside the cache directory, and the state removal still
+// happens with them.
+func TestCleanupCacheRemovesMintedImages(t *testing.T) {
+	writeFakePodman(t)
+	setRepositoryImages(t, "localhost/coreshift", "localhost/coreshift:v1-a")
+	setRepositoryImages(t, "localhost/coreshift-worker", "localhost/coreshift-worker:v1-c")
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	cacheBase := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheBase)
+	stateDir, err := clusterDir(defaultClusterName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeStateTree(t, stateDir, defaultClusterName)
+
+	var cleanupErr error
+	out := captureStdout(t, func() { cleanupErr = runCleanup(context.Background(), defaultClusterName, false, true) })
+	if cleanupErr != nil {
+		t.Fatal(cleanupErr)
+	}
+	calls := podmanCalls(t)
+	want := []string{
+		"images --format {{.Repository}}:{{.Tag}} localhost/coreshift",
+		"images --format {{.Repository}}:{{.Tag}} localhost/coreshift-worker",
+		"system df --format json",
+		"rmi localhost/coreshift:v1-a",
+		"rmi localhost/coreshift-worker:v1-c",
+		"system df --format json",
+	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("podman calls = %q\nwant %q", calls, want)
+	}
+	for _, want := range []string{
+		"Removing image localhost/coreshift:v1-a",
+		"Removing image localhost/coreshift-worker:v1-c",
+		"No image cache at ",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output = %q, want %q named", out, want)
+		}
+	}
+	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+		t.Fatal("state directory still exists")
+	}
+}
+
+// TestCleanupWithoutCacheLeavesImagesAlone checks the other side of the
+// widened meaning: without the cache flag no image is listed or removed.
+func TestCleanupWithoutCacheLeavesImagesAlone(t *testing.T) {
+	writeFakePodman(t)
+	setRepositoryImages(t, "localhost/coreshift", "localhost/coreshift:v1-a")
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	stateDir, err := clusterDir(defaultClusterName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeStateTree(t, stateDir, defaultClusterName)
+
+	if err := runCleanup(context.Background(), defaultClusterName, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range podmanCalls(t) {
+		if strings.HasPrefix(call, "images") || strings.HasPrefix(call, "rmi") {
+			t.Fatalf("podman calls = %q, want no image commands without the cache flag", podmanCalls(t))
+		}
+	}
+	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+		t.Fatal("state directory still exists")
 	}
 }
 
@@ -581,7 +659,7 @@ func TestCleanupRefusesWhileChildProcessRuns(t *testing.T) {
 	// state directory the way etcd's --data-dir does.
 	startStandbyProcess(t, "--data-dir="+filepath.Join(stateDir, "etcd-data"))
 
-	err = runCleanup("dev", false, false)
+	err = runCleanup(context.Background(), "dev", false, false)
 	if err == nil || !strings.Contains(err.Error(), "Stop it first") {
 		t.Fatalf("err = %v, want a refusal naming the running control plane", err)
 	}
@@ -1557,7 +1635,9 @@ func pemDecode(t *testing.T, data []byte) *pem.Block {
 // per-container label file from PODMAN_LABELS when asked for labels, and
 // with the per-container running file from PODMAN_STATE, defaulting to
 // stopped, when asked for the running state; logs answers with the
-// per-container file from PODMAN_LOGS.
+// per-container file from PODMAN_LOGS. The image side: images answers
+// with the per-repository file from PODMAN_IMAGES, system df reports an
+// empty store, and rmi answers with success.
 func writeFakePodman(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
@@ -1584,6 +1664,18 @@ if [ "$1" = "logs" ]; then
 	cat "$PODMAN_LOGS/$2" 2>/dev/null
 	exit 0
 fi
+if [ "$1" = "images" ]; then
+	cat "$PODMAN_IMAGES/$4" 2>/dev/null
+	exit 0
+fi
+if [ "$1 $2" = "system df" ]; then
+	echo '[{"Type":"Images","RawSize":0}]'
+	exit 0
+fi
+if [ "$1" = "rmi" ]; then
+	echo "Untagged: $2"
+	exit 0
+fi
 exit 0
 `
 	path := filepath.Join(dir, "podman")
@@ -1597,6 +1689,20 @@ exit 0
 	t.Setenv("PODMAN_LABELS", t.TempDir())
 	t.Setenv("PODMAN_STATE", t.TempDir())
 	t.Setenv("PODMAN_LOGS", t.TempDir())
+	t.Setenv("PODMAN_IMAGES", t.TempDir())
+}
+
+// setRepositoryImages makes the fake podman answer the images listing
+// for one repository with the given references.
+func setRepositoryImages(t *testing.T, repo string, refs ...string) {
+	t.Helper()
+	path := filepath.Join(os.Getenv("PODMAN_IMAGES"), repo)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(refs, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // setContainers makes the fake podman report exactly these containers as
@@ -1650,10 +1756,14 @@ func setContainerLog(t *testing.T, container, log string) {
 	}
 }
 
-// podmanCalls returns the calls the fake podman recorded.
+// podmanCalls returns the calls the fake podman recorded; a fake podman
+// never invoked recorded none.
 func podmanCalls(t *testing.T) []string {
 	t.Helper()
 	data, err := os.ReadFile(os.Getenv("PODMAN_LOG"))
+	if os.IsNotExist(err) {
+		return nil
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2336,8 +2336,9 @@ func clusterReady(port int) bool {
 }
 
 // newCleanupCommand builds the command that removes CoreShift's on-disk
-// artifacts: cluster state directories, and with --cache the shared image
-// cache.
+// artifacts: cluster state directories, and with --cache everything
+// derived and rebuildable — the shared image cache and the minted
+// container images.
 func newCleanupCommand() *cobra.Command {
 	var name string
 	var all bool
@@ -2349,12 +2350,12 @@ func newCleanupCommand() *cobra.Command {
 			if all && cmd.Flags().Changed("name") {
 				return fmt.Errorf("--all already removes every cluster's state; drop --name")
 			}
-			return runCleanup(name, all, clearCache)
+			return runCleanup(cmd.Context(), name, all, clearCache)
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", defaultClusterName, "name of the cluster whose state directory is removed")
 	cmd.Flags().BoolVar(&all, "all", false, "remove every cluster's state: the whole clusters tree")
-	cmd.Flags().BoolVar(&clearCache, "cache", false, "also remove the shared image cache, which the next run rebuilds by re-pulling")
+	cmd.Flags().BoolVar(&clearCache, "cache", false, "also remove everything derived and rebuildable: the shared image cache and the minted container images, which the next run rebuilds")
 	return cmd
 }
 
@@ -2365,14 +2366,17 @@ type cleanupTarget struct {
 	kind string
 }
 
-// runCleanup removes the chosen cluster state and, with clearCache, the
-// shared image cache. It owns the clusters tree and nothing else under
-// the state root, so unrelated directories kept there survive. It refuses
-// while a control plane is running, because cleaning under a live
-// instance would pull its data out from under it. A missing directory is
-// reported, not an error, so the command is safe to re-run and to call
-// from scripts.
-func runCleanup(name string, all, clearCache bool) error {
+// runCleanup removes the chosen cluster state and, with clearCache,
+// everything derived and rebuildable: the minted container images and the
+// shared image cache. The images go first, so an image a container still
+// holds fails the command before any state is removed. It owns the
+// clusters tree and nothing else under the state root, so unrelated
+// directories kept there survive. It refuses while a control plane is
+// running, because cleaning under a live instance would pull its data out
+// from under it; a preserved-state cluster simply re-mints its image on
+// re-create. A missing directory is reported, not an error, so the
+// command is safe to re-run and to call from scripts.
+func runCleanup(ctx context.Context, name string, all, clearCache bool) error {
 	running, err := runningControlPlane()
 	if err != nil {
 		return err
@@ -2380,6 +2384,16 @@ func runCleanup(name string, all, clearCache bool) error {
 	if running != "" {
 		return fmt.Errorf("a CoreShift control plane is running:\n  %s\n"+
 			"Stop it first; cleaning up under a running control plane would pull its data out from under it", running)
+	}
+	var freed int64
+	removed := false
+	if clearCache {
+		imageFreed, err := mint.Remove(ctx)
+		if err != nil {
+			return err
+		}
+		freed += imageFreed
+		removed = removed || imageFreed > 0
 	}
 	targets, err := cleanupTargets(name, all)
 	if err != nil {
@@ -2392,8 +2406,6 @@ func runCleanup(name string, all, clearCache bool) error {
 		}
 		targets = append(targets, cleanupTarget{path: cacheDir, kind: "image cache"})
 	}
-	var freed int64
-	removed := false
 	for _, target := range targets {
 		if _, err := os.Stat(target.path); os.IsNotExist(err) {
 			fmt.Printf("No %s at %s\n", target.kind, target.path)
