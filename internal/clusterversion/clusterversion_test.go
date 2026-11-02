@@ -25,6 +25,7 @@ func newClient() *dynamicfake.FakeDynamicClient {
 		map[schema.GroupVersionResource]string{
 			{Version: "v1", Resource: "namespaces"}:                                               "NamespaceList",
 			{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}: "CustomResourceDefinitionList",
+			{Group: "config.openshift.io", Version: "v1", Resource: "featuregates"}:               "FeatureGateList",
 			{Group: "config.openshift.io", Version: "v1", Resource: "clusterversions"}:            "ClusterVersionList",
 		},
 	)
@@ -60,6 +61,12 @@ metadata:
 kind: CustomResourceDefinition
 metadata:
   name: featuregates.config.openshift.io
+`,
+		"release-manifests/0000_05_config-operator_02_featuregate.cr.yaml": `apiVersion: config.openshift.io/v1
+kind: FeatureGate
+metadata:
+  name: cluster
+spec: {}
 `,
 	}
 	for name, manifest := range files {
@@ -120,6 +127,9 @@ func TestSeedAppliesPrerequisites(t *testing.T) {
 	if _, err := client.Resource(seedResources["Namespace"]).Get(context.Background(), seedNamespace, metav1.GetOptions{}); err != nil {
 		t.Fatalf("the %s namespace was not created: %v", seedNamespace, err)
 	}
+	if _, err := client.Resource(seedResources["FeatureGate"]).Get(context.Background(), "cluster", metav1.GetOptions{}); err != nil {
+		t.Fatalf("the cluster FeatureGate was not created: %v", err)
+	}
 	for _, name := range definitions {
 		if _, err := client.Resource(seedResources["CustomResourceDefinition"]).Get(context.Background(), name, metav1.GetOptions{}); err != nil {
 			t.Fatalf("%s was not created: %v", name, err)
@@ -129,8 +139,12 @@ func TestSeedAppliesPrerequisites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the %s ClusterVersion was not created: %v", objectName, err)
 	}
-	if object.Object["spec"] != nil {
-		t.Fatalf("object spec = %v, want none: the operator fills the status itself", object.Object["spec"])
+	clusterID, found, err := unstructured.NestedString(object.Object, "spec", "clusterID")
+	if err != nil || !found {
+		t.Fatalf("object clusterID = %q, %v; want the identity the API requires", clusterID, err)
+	}
+	if len(clusterID) != 36 {
+		t.Fatalf("object clusterID = %q, want a UUID", clusterID)
 	}
 }
 

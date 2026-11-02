@@ -10,12 +10,12 @@ package clusterversion
 
 import (
 	"context"
-	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/google/uuid"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -39,13 +39,16 @@ const (
 // ClusterVersion object before applying anything, so exactly this set
 // must pre-date it. The ClusterVersion definition is the Default
 // variant, the one the self-managed-high-availability profile the
-// operator runs under includes.
+// operator runs under includes. The FeatureGate object keeps the
+// operator's stop-on-feature-change controller from seeing a change
+// where the cluster simply has none configured yet.
 var seedFiles = []string{
 	"manifests/0000_00_cluster-version-operator_00_namespace.yaml",
 	"manifests/0000_00_cluster-version-operator_01_clusterversions-Default.crd.yaml",
 	"manifests/0000_00_cluster-version-operator_01_clusteroperators.crd.yaml",
 	"release-manifests/0000_03_config-operator_01_proxies.crd.yaml",
 	"release-manifests/0000_10_config-operator_01_featuregates.crd.yaml",
+	"release-manifests/0000_05_config-operator_02_featuregate.cr.yaml",
 }
 
 // seedResources maps each seeded kind to the resource the API serves it
@@ -54,15 +57,14 @@ var seedFiles = []string{
 var seedResources = map[string]schema.GroupVersionResource{
 	"Namespace":                {Version: "v1", Resource: "namespaces"},
 	"CustomResourceDefinition": {Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"},
+	"FeatureGate":              {Group: "config.openshift.io", Version: "v1", Resource: "featuregates"},
 }
 
 // The ClusterVersion object the operator waits for before it loads its
 // payload. The installer writes the same object for the release it
-// installs; the spec stays empty because the operator takes the release
-// image from its start flags and fills in the status itself.
-//
-//go:embed clusterversion.yaml
-var manifest string
+// installs; the spec carries only the cluster identity the API requires,
+// because the operator takes the release image from its start flags and
+// fills in the status itself.
 
 // objects is the resource the manifest creates.
 var objects = schema.GroupVersionResource{
@@ -212,14 +214,18 @@ func isEstablished(definition *unstructured.Unstructured) bool {
 	return false
 }
 
-// ensureObject creates the ClusterVersion the operator waits for. The
-// operator writes the object's status from its first boot, so an
-// existing object is left exactly as it is.
+// ensureObject creates the ClusterVersion the operator waits for. Its
+// cluster identity is a random UUID generated once per state directory:
+// the object lives in the cluster's etcd data, so a warm re-boot finds
+// it and keeps the identity. The operator writes the object's status
+// from its first boot, so an existing object is left exactly as it is.
 func ensureObject(ctx context.Context, client dynamic.Interface) error {
-	object := &unstructured.Unstructured{}
-	if err := yaml.Unmarshal([]byte(manifest), object); err != nil {
-		return fmt.Errorf("parse ClusterVersion manifest: %w", err)
-	}
+	object := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "config.openshift.io/v1",
+		"kind":       "ClusterVersion",
+		"metadata":   map[string]any{"name": objectName},
+		"spec":       map[string]any{"clusterID": uuid.NewString()},
+	}}
 	if err := create(ctx, client, objects, object); err != nil {
 		return fmt.Errorf("create the %s ClusterVersion: %w", objectName, err)
 	}
