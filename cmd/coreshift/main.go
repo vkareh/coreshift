@@ -49,7 +49,6 @@ import (
 	"github.com/vkareh/coreshift/internal/oauthclient"
 	"github.com/vkareh/coreshift/internal/pullsecret"
 	"github.com/vkareh/coreshift/internal/rbac"
-	"github.com/vkareh/coreshift/internal/scc"
 	"github.com/vkareh/coreshift/internal/supervisor"
 	"github.com/vkareh/coreshift/internal/worker"
 	"github.com/vkareh/coreshift/pkg/image"
@@ -607,23 +606,14 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 			},
 			// The admission chain this server runs gates namespaced writes
 			// on informers over the quota and security APIs, so their
-			// definitions must exist before it starts.
+			// definitions must exist before it starts. The default security
+			// context constraints themselves are applied by the version
+			// operator from the release payload; the controllers that read
+			// them retry until they arrive.
 			BeforeStart: func(ctx context.Context) error {
 				return gateOn(ctx, "the quota and security definitions",
 					gate.Definition("clusterresourcequotas.quota.openshift.io"),
 					gate.Definition("securitycontextconstraints.security.openshift.io"))
-			},
-			// The default security context constraints are stored through
-			// the security API this server serves; they are created once it
-			// answers, so the controllers that start later, above all the
-			// cluster policy controller, see them from the beginning. Bound
-			// the wait so a broken server fails the run instead of blocking
-			// startup forever.
-			AfterStart: func(ctx context.Context) error {
-				ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-				defer cancel()
-				fmt.Println("Seeding security context constraints")
-				return scc.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
 			},
 		},
 		{
