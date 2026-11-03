@@ -1833,12 +1833,19 @@ exit 0
 // root's store (-n) is answered by running the call against the
 // container set SUDO_CONTAINERS names, so the root side is a world of
 // its own, unless SUDO_REFUSE names a file: then it is refused, the way
-// a real sudo refuses without a cached password. An elevation (-A) is
-// answered with success without running anything — the real re-run
-// cannot happen inside a test — unless SUDO_NO_ASKPASS names a file:
-// then it fails the way sudo does with no askpass helper configured.
+// a real sudo refuses without a cached password — and so is the
+// passwordless elevation attempt, which would otherwise succeed. An
+// elevation with no password flags (the terminal prompt) is answered
+// with success without running anything — the real re-run cannot
+// happen inside a test — unless SUDO_PROMPT_REFUSE names a file: then
+// it fails the way sudo does after wrong passwords. An askpass
+// elevation (-A) is answered with success too, unless SUDO_NO_ASKPASS
+// names a file: then it fails the way sudo does with no askpass helper
+// configured.
 func writeFakeSudo(t *testing.T) {
 	t.Helper()
+	// The askpass link must not depend on the invoking environment.
+	t.Setenv("SUDO_ASKPASS", "")
 	dir := t.TempDir()
 	script := `#!/bin/sh
 echo "sudo $@" >> "$SUDO_LOG"
@@ -1848,7 +1855,17 @@ if [ "$1" = "-n" ]; then
 		exit 1
 	fi
 	shift
+	if [ "$1" = "env" ]; then
+		exit 0
+	fi
 	exec env PODMAN_CONTAINERS="$SUDO_CONTAINERS" "$@"
+fi
+if [ "$1" = "env" ]; then
+	if [ -e "$SUDO_PROMPT_REFUSE" ]; then
+		echo "sudo: 3 incorrect password attempts" >&2
+		exit 1
+	fi
+	exit 0
 fi
 if [ "$1" = "-A" ]; then
 	if [ -e "$SUDO_NO_ASKPASS" ]; then
@@ -2729,11 +2746,13 @@ func TestWorkerRunArgsContainerMode(t *testing.T) {
 }
 
 // TestElevateReRunsUnderSudo checks the elevation contract: the whole
-// command is re-run as root through exactly one sudo -A call, with the
+// command is re-run as root through exactly one sudo call, with the
 // invoking user's state and cache homes passed through, because sudo
-// resets the environment, and the finished run reported as done.
+// resets the environment, and the finished run reported as done. With
+// passwordless access the call asks for no password at all.
 func TestElevateReRunsUnderSudo(t *testing.T) {
 	writeFakeSudo(t)
+	noTerminal(t)
 
 	err := elevate()
 	var done *elevated
@@ -2744,27 +2763,115 @@ func TestElevateReRunsUnderSudo(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("sudo calls = %q, want exactly one elevation", calls)
 	}
-	for _, want := range []string{"-A", "env", "XDG_STATE_HOME=", "XDG_CACHE_HOME="} {
+	for _, want := range []string{"-n", "env", "XDG_STATE_HOME=", "XDG_CACHE_HOME="} {
 		if !strings.Contains(calls[0], want) {
 			t.Fatalf("elevation call %q missing %q", calls[0], want)
 		}
 	}
 }
 
-// TestElevateNamesMissingAskpass checks the failure elevation must
-// refuse clearly: with no askpass helper configured, sudo -A fails
-// rather than hangs, and the error names what to configure.
-func TestElevateNamesMissingAskpass(t *testing.T) {
+// TestElevationAttempts checks the chain's selection: the passwordless
+// attempt always comes first, the plain terminal prompt only with a
+// terminal, askpass only with a helper that exists, and nothing else
+// when none of that is available.
+func TestElevationAttempts(t *testing.T) {
+	for _, tc := range []struct {
+		terminal bool
+		askpass  string
+		want     []string
+	}{
+		{false, "", []string{"-n"}},
+		{true, "", []string{"-n", ""}},
+		{false, "/bin/true", []string{"-n", "-A"}},
+		{true, "/bin/true", []string{"-n", "", "-A"}},
+		{false, "/no/such/helper", []string{"-n"}},
+	} {
+		t.Setenv("SUDO_ASKPASS", tc.askpass)
+		var got []string
+		for _, flags := range elevationAttempts(tc.terminal) {
+			got = append(got, strings.Join(flags, " "))
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("terminal=%v askpass=%q: attempts = %q, want %q", tc.terminal, tc.askpass, got, tc.want)
+		}
+	}
+}
+
+// TestStdinIsTerminalOnPipe checks the terminal detection the elevation
+// chain and the fresh-start question share: a pipe on standard input is
+// not a terminal, so no password prompt is ever asked on one.
+func TestStdinIsTerminalOnPipe(t *testing.T) {
+	noTerminal(t)
+	if stdinIsTerminal() {
+		t.Fatal("a pipe on standard input must not count as a terminal")
+	}
+}
+
+// TestElevatePromptsThroughAskpass checks the chain falling through:
+// with passwordless access refused and no terminal, the askpass helper
+// is what elevates, after the passwordless attempt probed and failed.
+func TestElevatePromptsThroughAskpass(t *testing.T) {
 	writeFakeSudo(t)
-	refusal := filepath.Join(t.TempDir(), "no-askpass")
+	noTerminal(t)
+	refusal := filepath.Join(t.TempDir(), "no-passwordless")
 	if err := os.WriteFile(refusal, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("SUDO_NO_ASKPASS", refusal)
+	t.Setenv("SUDO_REFUSE", refusal)
+	t.Setenv("SUDO_ASKPASS", "/bin/true")
+
+	err := elevate()
+	var done *elevated
+	if !errors.As(err, &done) || done.code != 0 {
+		t.Fatalf("err = %v, want the finished elevated run", err)
+	}
+	calls := sudoCalls(t)
+	if len(calls) != 2 || !strings.HasPrefix(calls[0], "sudo -n ") || !strings.HasPrefix(calls[1], "sudo -A ") {
+		t.Fatalf("sudo calls = %q, want the passwordless probe then askpass", calls)
+	}
+}
+
+// TestSudoElevationRecognizesRefusals checks that every way sudo
+// refuses to produce a password — nothing cached for the passwordless
+// probe, wrong answers at the terminal prompt, a missing helper — is
+// recognized as the chain probing, not an error.
+func TestSudoElevationRecognizesRefusals(t *testing.T) {
+	writeFakeSudo(t)
+	for _, tc := range []struct {
+		flags  []string
+		refuse string
+	}{
+		{[]string{"-n"}, "SUDO_REFUSE"},
+		{nil, "SUDO_PROMPT_REFUSE"},
+		{[]string{"-A"}, "SUDO_NO_ASKPASS"},
+	} {
+		refusal := filepath.Join(t.TempDir(), "refusal")
+		if err := os.WriteFile(refusal, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(tc.refuse, refusal)
+		if err := sudoElevation(tc.flags, []string{"env"}); err != nil {
+			t.Errorf("%v: err = %v, want a clean fall-through", tc.flags, err)
+		}
+	}
+}
+
+// TestElevateNamesMissingAskpass checks the failure elevation must
+// refuse clearly: with no passwordless access, no terminal, and no
+// askpass helper, sudo has no way to ask, and the error names what to
+// configure.
+func TestElevateNamesMissingAskpass(t *testing.T) {
+	writeFakeSudo(t)
+	noTerminal(t)
+	refusal := filepath.Join(t.TempDir(), "no-passwordless")
+	if err := os.WriteFile(refusal, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SUDO_REFUSE", refusal)
 
 	err := elevate()
 	if err == nil {
-		t.Fatal("expected a refusal naming the askpass helper")
+		t.Fatal("expected a refusal naming the remedies")
 	}
 	if !strings.Contains(err.Error(), "SUDO_ASKPASS") {
 		t.Fatalf("refusal = %v, want the askpass helper named", err)
@@ -2773,12 +2880,15 @@ func TestElevateNamesMissingAskpass(t *testing.T) {
 	if errors.As(err, &done) {
 		t.Fatal("a failed elevation must not report a finished run")
 	}
+	if calls := sudoCalls(t); len(calls) != 1 || !strings.HasPrefix(calls[0], "sudo -n ") {
+		t.Fatalf("sudo calls = %q, want the passwordless probe alone", calls)
+	}
 }
 
 // TestWorkerCommandsElevateBeforePodman checks that an unelevated
 // worker command elevates before touching anything: with elevation
-// impossible the command refuses naming the askpass helper, and no
-// podman call was made.
+// impossible the command refuses naming the remedies, and no podman
+// call was made.
 func TestWorkerCommandsElevateBeforePodman(t *testing.T) {
 	for _, args := range [][]string{
 		{"create", "worker"},
@@ -2786,17 +2896,18 @@ func TestWorkerCommandsElevateBeforePodman(t *testing.T) {
 	} {
 		writeFakePodman(t)
 		writeFakeSudo(t)
-		refusal := filepath.Join(t.TempDir(), "no-askpass")
+		noTerminal(t)
+		refusal := filepath.Join(t.TempDir(), "no-passwordless")
 		if err := os.WriteFile(refusal, nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		t.Setenv("SUDO_NO_ASKPASS", refusal)
+		t.Setenv("SUDO_REFUSE", refusal)
 
 		root := newRootCommand()
 		root.SetArgs(args)
 		err := root.Execute()
 		if err == nil || !strings.Contains(err.Error(), "SUDO_ASKPASS") {
-			t.Fatalf("%v: err = %v, want the askpass refusal", args, err)
+			t.Fatalf("%v: err = %v, want the elevation refusal", args, err)
 		}
 		if calls := podmanCalls(t); len(calls) != 0 {
 			t.Fatalf("%v: podman calls = %q, want none before elevation", args, calls)

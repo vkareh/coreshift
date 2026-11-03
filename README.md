@@ -605,15 +605,19 @@ stays rootless. kubelet chowns its pods' volumes to user IDs a rootless
 worker's user namespace cannot express, so workload pods would sit in
 ContainerCreating forever — the recorded design decision for exactly
 that wall. The whole worker launch therefore happens inside one
-elevated invocation: the command re-runs itself through `sudo -A`, the
-user answers a single askpass prompt, and every podman call the command
-makes — the image build included, so the worker image lands in root's
-store where the rootful run can use it — runs as root, with no
-elevation nested inside. State the elevated run writes is handed back
-to the invoking user, so every unelevated command keeps working on it.
-Without an askpass helper the command fails naming what to configure
-instead of hanging; running the command under `sudo` yourself works
-too. `delete worker` elevates the same way, one prompt.
+elevated invocation: the command re-runs itself through sudo, asking
+for a password the way any other privileged Linux tool does —
+passwordless or cached sudo access runs it with no prompt at all, a
+terminal gets the plain password prompt, and an askpass helper covers
+terminal-less contexts — and every podman call the command makes — the
+image build included, so the worker image lands in root's store where
+the rootful run can use it — runs as root, with no elevation nested
+inside. State the elevated run writes is handed back to the invoking
+user, so every unelevated command keeps working on it. When no way to
+ask exists — no passwordless access, no terminal, no helper — the
+command fails naming what to configure instead of hanging; running the
+command under `sudo` yourself works too. `delete worker` elevates the
+same way, one prompt.
 
 Which network the worker runs on is decided by the cluster it joins.
 A cluster in a container has a network namespace of its own, and the
@@ -670,8 +674,9 @@ preserved.
 
 With a cluster running in either mode — in host mode, leave the `run
 cluster` terminal alone and use another one — join a worker to it. The
-command asks for elevation once, through an askpass prompt, because
-the whole worker launch runs as root:
+command asks for elevation once, because the whole worker launch runs
+as root: a password prompt on the terminal, or none at all when sudo
+access is passwordless:
 
 ```
 ./coreshift create worker

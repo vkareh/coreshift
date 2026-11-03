@@ -1112,13 +1112,16 @@ func (e *elevated) Error() string {
 	return fmt.Sprintf("the elevated run exited with code %d", e.code)
 }
 
-// elevate re-runs the running command as root, once, through sudo -A:
-// the user answers one askpass prompt, and every podman call the
-// command makes then runs as root, with no elevation nested inside.
-// The invoking user's state and cache homes are passed through, because
-// sudo resets the environment and the elevated run must keep reading
-// the same directories. It returns the elevated run's exit code as an
-// *elevated, and a plain error only when elevation itself failed.
+// elevate re-runs the running command as root, once, trying each way
+// sudo can obtain a password in turn: passwordless or cached access
+// needs no prompt at all, a terminal on standard input gets the plain
+// password prompt, and an askpass helper covers terminal-less
+// contexts. Only when none of them worked does the elevation fail,
+// naming the remedies. The invoking user's state and cache homes are
+// passed through, because sudo resets the environment and the elevated
+// run must keep reading the same directories. It returns the elevated
+// run's exit code as an *elevated, and a plain error only when
+// elevation itself failed.
 func elevate() error {
 	if _, err := exec.LookPath("sudo"); err != nil {
 		return fmt.Errorf("sudo is required to elevate this command: %w", err)
@@ -1131,34 +1134,80 @@ func elevate() error {
 	if err != nil {
 		return err
 	}
-	args := append([]string{"-A", "env",
+	args := append([]string{"env",
 		"XDG_STATE_HOME=" + stateHome,
 		"XDG_CACHE_HOME=" + cacheHome,
 		self}, os.Args[1:]...)
-	run := exec.Command("sudo", args...)
+	for _, flags := range elevationAttempts(stdinIsTerminal()) {
+		if err := sudoElevation(flags, args); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("elevating this command needs a password, but there is no terminal to ask on, no passwordless sudo access, and no askpass helper: run it under sudo yourself, or set SUDO_ASKPASS to a helper, for example /usr/libexec/gcr-ssh-askpass")
+}
+
+// elevationAttempts lists the password flags sudo is tried with, in
+// order: none, for passwordless or cached access; the plain terminal
+// prompt; then askpass, for contexts without a terminal.
+func elevationAttempts(terminal bool) [][]string {
+	attempts := [][]string{{"-n"}}
+	if terminal {
+		attempts = append(attempts, nil)
+	}
+	if helper := os.Getenv("SUDO_ASKPASS"); helper != "" {
+		if _, err := exec.LookPath(helper); err == nil {
+			attempts = append(attempts, []string{"-A"})
+		}
+	}
+	return attempts
+}
+
+// sudoElevation makes one attempt at re-running the command as root
+// through sudo, with the given password flags. A nil return means sudo
+// refused to produce a password — the chain probing its options, not
+// an error. A run that happened returns its exit code as an *elevated;
+// anything else is a plain error.
+func sudoElevation(flags, args []string) error {
+	run := exec.Command("sudo", append(slices.Clone(flags), args...)...)
 	run.Stdin = os.Stdin
 	run.Stdout = os.Stdout
-	// Standard error is streamed and kept: sudo's own failures, above
-	// all a missing askpass helper, are recognized from it.
+	// Standard error is streamed and kept: sudo's own refusals are
+	// recognized from it.
 	var stderr bytes.Buffer
 	run.Stderr = io.MultiWriter(os.Stderr, &stderr)
 	// The elevated run owns shutdown; this process only waits for it.
 	signal.Ignore(syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Reset(syscall.SIGINT, syscall.SIGTERM)
-	err = run.Run()
+	err := run.Run()
 	var exit *exec.ExitError
 	if err == nil {
 		return &elevated{0}
 	}
 	if errors.As(err, &exit) {
-		if strings.Contains(stderr.String(), "askpass") {
-			return fmt.Errorf("elevation needs an askpass helper: set SUDO_ASKPASS to one, for example /usr/libexec/gcr-ssh-askpass, or run this command under sudo yourself")
+		if sudoRefused(stderr.String()) {
+			return nil
 		}
 		// sudo exits with the elevated command's code; its own report
 		// already said everything.
 		return &elevated{exit.ExitCode()}
 	}
 	return fmt.Errorf("elevate this command: %w", err)
+}
+
+// sudoRefused reports whether stderr shows sudo refusing to produce a
+// password, the failure each chain link falls through on.
+func sudoRefused(stderr string) bool {
+	for _, refusal := range []string{
+		"a password is required",
+		"no password was provided",
+		"incorrect password attempts",
+		"askpass",
+	} {
+		if strings.Contains(stderr, refusal) {
+			return true
+		}
+	}
+	return false
 }
 
 // elevatedExit finishes an elevation: the elevated run already reported
