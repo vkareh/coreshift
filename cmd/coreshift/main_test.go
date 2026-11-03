@@ -1739,6 +1739,18 @@ func pemDecode(t *testing.T, data []byte) *pem.Block {
 // per-container file from PODMAN_LOGS. The image side: images answers
 // with the per-repository file from PODMAN_IMAGES, system df reports an
 // empty store, and rmi answers with success.
+// freePort returns a port a listener on loopback can take, for tests
+// that need a port nothing answers on beside live clusters.
+func freePort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
 func writeFakePodman(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
@@ -1972,7 +1984,10 @@ func TestRunGetClustersListsClusters(t *testing.T) {
 	}
 	setContainers(t, "coreshift-booting", "coreshift-early", "coreshift-ready")
 	setContainerPort(t, "coreshift-booting", 17443)
-	setContainerPort(t, "coreshift-early", 18443)
+	// A port nothing answers on, so the cluster reads as not ready
+	// beside whatever a live cluster publishes.
+	deadPort := freePort(t)
+	setContainerPort(t, "coreshift-early", deadPort)
 	setContainerPort(t, "coreshift-ready", readyPort)
 	for _, name := range []string{"booting", "early", "ready"} {
 		setContainerRunning(t, "coreshift-"+name, true)
@@ -2008,7 +2023,7 @@ func TestRunGetClustersListsClusters(t *testing.T) {
 	if got := rowFor("booting"); len(got) < 4 || got[1] != "17443" || got[2] != "reg.example/ocp-release:4.22.8-x86_64" || readiness(got) != "not ready" {
 		t.Fatalf("booting row = %q, want its port, release, and not ready", got)
 	}
-	if got := rowFor("early"); len(got) < 4 || got[1] != "18443" || got[2] != "-" || readiness(got) != "not ready" {
+	if got := rowFor("early"); len(got) < 4 || got[1] != strconv.Itoa(deadPort) || got[2] != "-" || readiness(got) != "not ready" {
 		t.Fatalf("early row = %q, want its port, an unknown release, and not ready", got)
 	}
 	if got := rowFor("ready"); len(got) != 4 || got[1] != strconv.Itoa(readyPort) || got[3] != "ready" {
