@@ -204,6 +204,26 @@ scheduled on any node — and that is the truth of a deployed network
 stack with nothing to run it, the same truth the payload's other
 Deployments tell.
 
+When a worker joins a cluster in a container, the create command moves
+the rendered OVN workloads within reach of that worker, and only them.
+The operator offers no placement configuration for its operands, and
+labeling the worker a master would wake all thirty-five Pending
+operator Deployments at once, whose operands would fight the
+supervised processes — so the operator is instead put into Unmanaged,
+its own supported hands-off state, and the objects it already rendered
+are patched: the one OVN control-plane Deployment is pointed at the
+cluster's nodes at a replica count one shared namespace carries, the
+node identity DaemonSet that approves the OVN pods' certificate
+requests is placed the same way, the node DaemonSets trade their own
+critical priority for the control plane's — the node one asks for an
+OOM adjustment only the initial user namespace grants, which a worker
+container cannot give — and the OVN configuration gives up network
+segmentation, whose node side needs a systemd no worker container
+runs. A render pass can straddle the switch to unmanaged and land its
+writes after the patches, so the placement verifies the objects and
+repairs them until the render has settled; the other operator
+Deployments stay Pending and asleep.
+
 ### Prerequisites
 
 - a Go toolchain (1.24 or newer) to build the `coreshift` binary
@@ -529,6 +549,11 @@ certificates and state.
   `coreshift cleanup`.
 - Cached images: `~/.cache/coreshift/`, shared by everything; see
   [Cache](#cache).
+- The podman network `coreshift`: the bridge network cluster containers
+  run on, created by the create command and kept until
+  `coreshift cleanup --cache` finds nothing using it. A joined worker's
+  OVN gateway takes over the container's interface on it, which the
+  rootless default network's proxy would not survive.
 - The container's own boot output: kept by podman; `podman logs
   coreshift-<name>` replays it, and the create command streams it live
   while it waits.
@@ -559,20 +584,54 @@ machine record the machine approver matches the worker's certificate
 request against, so the join is approved the way a real node's is,
 without anything minted by hand.
 
-The container runs privileged on the host network, dialing the control
-plane at loopback, with the join material mounted in read-only and the
-host's kernel modules mounted read-only. Everything else, above all the
-kubelet state, stays inside the container: workers are ephemeral,
-re-created rather than restarted, and a re-created worker joins fresh.
-When podman runs rootless, the launch happens under a delegated cgroup
-scope — the systemd user mechanism kubelet's cgroups need under rootless
-podman. Where that cannot be provided the command fails naming rootful
-podman as the worker-only requirement: run the same command with sudo.
+The container runs privileged, with the join material and the host's
+kernel modules mounted in read-only, and with the cluster's pull
+secret mounted in read-only where the worker copies it to the path a
+real node's configuration writes and its CRI-O reads for every pull,
+so the payload's images come from the authenticated registry the way
+a real node's do. Everything else, above all the kubelet state, stays
+inside the container: workers are ephemeral, re-created rather than
+restarted, and a re-created worker joins fresh. When podman runs
+rootless, the launch happens under a delegated cgroup scope — the
+systemd user mechanism kubelet's cgroups need under rootless podman.
+Where that cannot be provided the command fails naming rootful podman
+as the worker-only requirement: run the same command with sudo.
 
-A node reports NotReady until a CNI exists, and this control plane runs
-none, so every worker's node shows NotReady; that is the honest
-readiness `get workers` lists. When a worker fails — its container exits,
-or its node never registers — the error quotes the tail of the
+Which network the worker runs on is decided by the cluster it joins.
+A cluster in a container has a network namespace of its own, and the
+worker shares it: the join dials the control plane at the loopback
+they share, and the worker brings up the node's OVS and the br-ex
+gateway bridge inside that namespace — the job a real node's
+openvswitch and ovs-configuration services do — so the OVN node pod,
+host-networked itself, reconfigures the interfaces of the cluster
+container and never the host's. A marker file mounted by the create
+command gates that bring-up, and a host-mode worker, which runs on
+the host's own network, brings up neither: the cluster must not
+reconfigure the developer's machine. Because both worker and control
+plane live in one namespace, a container cluster carries one worker
+only, the create command refuses the pasta network a rootless cluster
+container may run on — its proxy would not survive the gateway
+takeover — and clusters created now run on the project's own podman
+network instead. Whether a host-mode cluster can have a network of
+its own behind its worker is an open question: isolating the worker
+there would cut the loopback the join dials.
+
+In that shared namespace the cluster's network comes up for real: the
+create command places the OVN workloads as above, waits for the OVN
+node pod and the control-plane pod to run on the worker, and the node
+reports Ready once the CNI configuration the pods write answers. The
+Open vSwitch kernel module is shared with the host — the worker loads
+it the way a real node does when it can, and the kernel loads it on
+demand when the worker's user namespace refuses the load — so a host
+that lacks the module cannot bring the network up. What still waits
+is workload pods beyond the network's own: their service-account
+volumes need file ownerships the worker's user namespace cannot
+express, so they sit in ContainerCreating until that is solved; the
+network stack itself, from the CNI plugin to the OVN databases, is
+running.
+
+When a worker fails — its container exits, its node never registers,
+or the OVN workloads never come up — the error quotes the tail of the
 container's log, the container is removed, and the cluster's state is
 preserved.
 
@@ -604,41 +663,50 @@ is tagged from the running binary:
 Worker name: worker1
 Minting the bootstrap identity
 Minting the machine stand-in
+Placing the OVN workloads
 Building container image localhost/coreshift-worker:46637e0-80ad7a553365
 Starting container coreshift-worker-worker1
 Waiting for the worker to join
 Requesting node certificate
 Waiting for the node certificate to be approved
+starting ovsdb-server
+starting ovs-vswitchd
 starting crio
 starting kubelet
 Waiting for the node to register
+Waiting for the OVN workloads to run
 
 Worker joined
-  Node:       worker1, reporting NotReady until a CNI exists
+  Node:       worker1, with the OVN-Kubernetes pods running on it
   Kubeconfig: /home/you/.local/state/coreshift/clusters/coreshift/admin.kubeconfig
   Container coreshift-worker-worker1 is running in the background
 ```
 
-Then watch the node, with the kubeconfig from the summary:
+Then watch the node and the network on it, with the kubeconfig from
+the summary:
 
 ```
 export KUBECONFIG=~/.local/state/coreshift/clusters/coreshift/admin.kubeconfig
 oc get nodes
-NAME      STATUS     ROLES    AGE   VERSION
-worker1   NotReady   <none>   6s    v1.35.9
+NAME      STATUS   ROLES    AGE   VERSION
+worker1   Ready    <none>   6m    v1.35.9
 ```
 
-NotReady is the expected end state, not a bug: the node's Ready
-condition names the reason, and the message behind it names the missing
-CNI configuration:
+```
+oc get pods -n openshift-ovn-kubernetes
+NAME                                     READY   STATUS    RESTARTS   AGE
+ovnkube-control-plane-79db54d88-wsns8    2/2     Running   0          6m
+ovnkube-node-df4l4                       8/8     Running   0          6m
+```
 
-```
-oc get node worker1 -o jsonpath='{range .status.conditions[*]}{.type}{"="}{.status}{" "}{.reason}{"\n"}{end}'
-MemoryPressure=False KubeletHasSufficientMemory
-DiskPressure=False KubeletHasNoDiskPressure
-PIDPressure=False KubeletHasSufficientPID
-Ready=False KubeletNotReady
-```
+Every container of the node pod runs: the OVN databases and northd,
+the ovn-controller that programs the node's OVS from them, the
+certificate-backed node controller, and their metrics proxies. The
+gateway bridge they built carries the cluster container's address, so
+the control plane keeps answering through the network its own pods
+now own — the takeover a real node's OVS configuration performs on
+the node's uplink, done here to a veth inside the cluster's
+namespace, with the host's own interfaces untouched.
 
 The join is real all the way through: the node's certificate request was
 approved by the machine approver the control plane runs, and issued:
@@ -659,7 +727,7 @@ Check what is running, and remove the worker again:
 ```
 ./coreshift get workers
 NAME      CLUSTER     READY
-worker1   coreshift   not ready
+worker1   coreshift   ready
 ```
 
 ```
@@ -708,8 +776,10 @@ should outlive the terminal, or when several clusters have to run side by
 side, each with its own name. Both answer the question "does it
 behave like OpenShift at the API level" equally well; `create worker`
 adds the node side to either, a real kubelet and CRI-O joining from a
-container, though the node reports NotReady until a CNI exists, so no
-workloads run.
+container. A worker joining a cluster in a container runs the cluster's
+whole network stack as the real OVN pods on it; a worker joining a
+host-mode cluster joins and stops there, its node NotReady, because
+the cluster must not reconfigure the host's own network.
 
 ## The `delete cluster` command
 
@@ -880,9 +950,11 @@ a container-mode cluster's state.
   survive.
 - `--cache` additionally removes everything derived and rebuildable: the
   shared image cache, and the minted container images from podman's store
-  — the `coreshift` and `coreshift-worker` tags. Both are safe to drop;
-  the cache is keyed by image digest and rebuilt by re-pulling, and the
-  images are minted from the binary again in seconds. The base images
+  — the `coreshift` and `coreshift-worker` tags — and the podman network
+  cluster containers run on, when nothing uses it anymore. All are safe
+  to drop: the cache is keyed by image digest and rebuilt by re-pulling,
+  the images are minted from the binary again in seconds, and the
+  network is re-created by the next cluster. The base images
   they were built from, such as the UBI and rhel-coreos bases, are shared
   with everything else and stay. A cluster whose state was kept simply
   mints its image again on re-create.
