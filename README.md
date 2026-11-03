@@ -6,7 +6,8 @@ required to actually run it. The control plane (etcd, kube-apiserver,
 kube-controller-manager, kube-scheduler, plus the full OpenShift API layer:
 openshift-apiserver, oauth-apiserver, oauth-server,
 openshift-controller-manager, cluster-policy-controller, the
-cluster-machine-approver, and the cluster-version-operator) is built from
+cluster-machine-approver, the cluster-version-operator, and the
+cluster-network-operator) is built from
 real, version-matched upstream OpenShift components, not reimplementations.
 
 CoreShift runs the same real control plane two ways. `coreshift run
@@ -63,7 +64,8 @@ cluster install. etcd,
 kube-apiserver, kube-controller-manager, and kube-scheduler run alongside the
 full OpenShift API layer: openshift-apiserver, oauth-apiserver, oauth-server,
 openshift-controller-manager, cluster-policy-controller,
-cluster-machine-approver, and cluster-version-operator. Everything
+cluster-machine-approver, cluster-version-operator, and
+cluster-network-operator. Everything
 listens on the host, and `oc` talks to the API server like it would to any
 cluster.
 
@@ -160,7 +162,47 @@ operator applies are the approver's, and it waits for them before
 starting like the other children. The OAuth client stays
 because no payload manifest carries it; the authentication operator
 bootstraps it in real clusters. The pull secret stays because the
-operator consumes it rather than producing it.
+operator consumes it rather than producing it. The network operator's
+stand-ins are recorded where its seed lives, with the rest of the
+installer output it stands in for.
+
+### The network operator
+
+The cluster network operator deploys the cluster's network stack: it
+reads the cluster's network configuration and renders the real
+OVN-Kubernetes workloads from the bindata beside its binary, the way
+its payload deployment runs it in a real cluster — same flags, and the
+same environment with every operand image resolved from the release,
+so the workloads it creates reference the payload's own images. It runs
+under the payload's own service-account identity, whose cluster-admin
+the payload's binding grants, and its start waits for the API
+definitions its watchers map and the network ClusterOperator its status
+machinery reads, all delivered by the version operator.
+
+What it reads and cannot get from the payload is seeded in ahead of it,
+standing in for installer output the way the pull secret and OAuth
+client do: the network ranges in the cluster network object (the
+payload delivers the object as a create-only empty shell), the
+infrastructure record (same shell, and the operator needs the platform
+and topologies), the install config record in kube-system (the operator
+counts control plane replicas from it), the release's feature gate
+record (the config operator maintains it in a real cluster, and the
+network operator's reader is not tolerant of its absence; it is rendered
+by the release's own feature set writer before the version operator
+starts, so that operator's stop-on-change controller finds it in
+place), and the probed host MTU (the operator's prober job needs nodes
+to probe; a standard interface's value stands in). The operator-scoped
+configuration object is derived, not supplied: the operator writes it
+itself on its first reconcile.
+
+The workloads it creates are real and their status is honest: the
+OVN-Kubernetes daemonsets and deployments, Multus, and the network
+diagnostics all exist, and all sit unscheduled, because they select
+nodes this control plane runs none of. The network ClusterOperator
+reports exactly that — progressing, naming each workload not yet
+scheduled on any node — and that is the truth of a deployed network
+stack with nothing to run it, the same truth the payload's other
+Deployments tell.
 
 ### Prerequisites
 
@@ -790,7 +832,7 @@ The image is built in two stages, both from Red Hat's UBI family and
 pinned by digest. The final stage is ubi10/ubi-micro, the micro variant
 of the latest UBI major line: the control plane binaries are dynamically
 linked against glibc, and RHEL 9-built binaries run on ubi10's newer
-glibc, verified live by running all eleven children in the image rather
+glibc, verified live by running every child in the image rather
 than assumed. The micro variant ships no CA certificates, so a run
 inside it cannot pull its release payload: the registry connection
 fails TLS. The build closes that gap inside the family by copying the
