@@ -48,6 +48,7 @@ import (
 	"github.com/vkareh/coreshift/internal/networkconfig"
 	"github.com/vkareh/coreshift/internal/oauth"
 	"github.com/vkareh/coreshift/internal/oauthclient"
+	"github.com/vkareh/coreshift/internal/ovn"
 	"github.com/vkareh/coreshift/internal/pullsecret"
 	"github.com/vkareh/coreshift/internal/rbac"
 	"github.com/vkareh/coreshift/internal/supervisor"
@@ -548,17 +549,17 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 				if err := aggregation.Seed(ctx, kubeconfig, aggregatedServers, filepath.Join(stateDir, certgen.CACertFilename)); err != nil {
 					return err
 				}
-			if err := rbac.Seed(ctx, kubeconfig); err != nil {
-				return err
-			}
-			if err := crd.Seed(ctx, kubeconfig); err != nil {
-				return err
-			}
-			// The pull secret is stored as the cluster's global pull
-			// secret, the object a real cluster keeps, so commands that
-			// need it after the fact read it from the cluster instead
-			// of asking for the file again.
-			return pullsecret.Seed(ctx, kubeconfig, pullSecret)
+				if err := rbac.Seed(ctx, kubeconfig); err != nil {
+					return err
+				}
+				if err := crd.Seed(ctx, kubeconfig); err != nil {
+					return err
+				}
+				// The pull secret is stored as the cluster's global pull
+				// secret, the object a real cluster keeps, so commands that
+				// need it after the fact read it from the cluster instead
+				// of asking for the file again.
+				return pullsecret.Seed(ctx, kubeconfig, pullSecret)
 			},
 		},
 		{
@@ -572,9 +573,15 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 				"--use-service-account-credentials=true",
 				// The control plane CA signs the node client certificates
 				// the approver approves, the way a real cluster's controller
-				// manager issues what its approver approves.
+				// manager issues what its approver approves: the kubelet
+				// client signer the join requests, and the client signer
+				// the node-side certificate managers, above all the OVN
+				// node pod's, request their short-lived certificates
+				// with.
 				"--cluster-signing-kubelet-client-cert-file=" + filepath.Join(stateDir, certgen.CACertFilename),
 				"--cluster-signing-kubelet-client-key-file=" + filepath.Join(stateDir, certgen.CAKeyFilename),
+				"--cluster-signing-kube-apiserver-client-cert-file=" + filepath.Join(stateDir, certgen.CACertFilename),
+				"--cluster-signing-kube-apiserver-client-key-file=" + filepath.Join(stateDir, certgen.CAKeyFilename),
 				// Single instance, no lease to elect.
 				"--leader-elect=false",
 			},
@@ -1232,6 +1239,9 @@ func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, 
 	}
 
 	fmt.Printf("Starting container %s\n", container)
+	if err := ensureClusterNetwork(); err != nil {
+		return err
+	}
 	args := podmanRunArgs(container, name, port, stateDir, cacheRoot, pullSecretPath, imageRef, release)
 	run := exec.CommandContext(ctx, "podman", args...)
 	run.Stdout = io.Discard // the detached run only prints the container ID
@@ -1240,6 +1250,40 @@ func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, 
 		return fmt.Errorf("start container: %w", err)
 	}
 	return streamUntilReady(ctx, container, stateDir, port)
+}
+
+// clusterNetworkName is the podman network cluster containers run on.
+// The default network will not do: rootless podman's pasta proxy breaks
+// the moment a worker's OVN gateway takes over the interface it
+// mirrors, so clusters that workers join run on a bridge network whose
+// veth interfaces survive the takeover, the way a real node's
+// interfaces do.
+const clusterNetworkName = "coreshift"
+
+// ensureClusterNetwork creates the network cluster containers run on
+// when it does not exist yet.
+func ensureClusterNetwork() error {
+	if exec.Command("podman", "network", "exists", clusterNetworkName).Run() == nil {
+		return nil
+	}
+	create := exec.Command("podman", "network", "create", clusterNetworkName)
+	create.Stderr = os.Stderr
+	if err := create.Run(); err != nil {
+		return fmt.Errorf("create the %s network: %w", clusterNetworkName, err)
+	}
+	return nil
+}
+
+// removeClusterNetwork removes the network cluster containers run on,
+// when nothing uses it anymore: like the minted images it is derived
+// state, rebuilt the next time a cluster is created.
+func removeClusterNetwork(ctx context.Context) {
+	if exec.Command("podman", "network", "exists", clusterNetworkName).Run() != nil {
+		return
+	}
+	if err := exec.CommandContext(ctx, "podman", "network", "rm", clusterNetworkName).Run(); err == nil {
+		fmt.Println("Removed network", clusterNetworkName)
+	}
 }
 
 // podmanRunArgs builds the podman command line that starts the cluster
@@ -1251,12 +1295,15 @@ func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, 
 // the OAuth server, the cluster's state directory and the shared image
 // cache bind-mounted, the pull secret mounted read-only, and the name, the
 // release flags, and the port passed through to the run inside. The
-// image's entrypoint is `coreshift run cluster`, so the arguments after
-// the image reference land on it.
+// container runs on the project's own podman network, the network a
+// joined worker's OVN gateway can take an interface of without breaking
+// the proxy behind a default one. The image's entrypoint is `coreshift
+// run cluster`, so the arguments after the image reference land on it.
 func podmanRunArgs(container, name string, port int, stateDir, cacheRoot, pullSecretPath, imageRef string, release releaseOptions) []string {
 	return []string{
 		"run", "--detach",
 		"--name", container,
+		"--network", clusterNetworkName,
 		"--publish", fmt.Sprintf("127.0.0.1:%d:%d", port, port),
 		"--publish", fmt.Sprintf("127.0.0.1:%d:%d", port+1, oauthServerPort),
 		"--env", "XDG_STATE_HOME=" + containerStateHome,
@@ -1537,6 +1584,12 @@ const (
 	workerContainerPrefix = "coreshift-worker-"
 	workerClusterLabel    = "coreshift-cluster"
 	workersDirName        = "workers"
+
+	// The join material files beyond the join package's own: the
+	// cluster's pull secret, and the marker telling the worker it runs
+	// in a network namespace of the tool's own.
+	workerPullSecretFilename      = "pull-secret"
+	workerNetworkIsolatedFilename = "network-isolated"
 )
 
 // defaultClusterName is the cluster every command addresses unless a
@@ -1630,12 +1683,36 @@ func runCreateWorker(ctx context.Context, name string, explicit bool, cluster, p
 	if !clusterReady(port) {
 		return fmt.Errorf("cluster %s is not running at %s; start it first", cluster, apiServerURL(port))
 	}
+	containerMode, err := workerJoinsContainer(cluster)
+	if err != nil {
+		return err
+	}
+	if containerMode {
+		if err := refusePastaNetwork(cluster); err != nil {
+			return err
+		}
+		if err := refuseSecondWorker(cluster); err != nil {
+			return err
+		}
+	}
 
 	materialDir := filepath.Join(stateDir, workersDirName, name)
 	if err := join.Mint(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), materialDir, name); err != nil {
 		return err
 	}
-	if err := launchWorker(ctx, container, cluster, name, stateDir, materialDir, pullSecretPath, verbose); err != nil {
+	if containerMode {
+		// The placement happens before the worker starts, so the OVN
+		// pods the worker's node draws in read the placed objects from
+		// their first start on. The marker tells the worker its
+		// network namespace is the tool's own, and may be configured.
+		if err := ovn.Prepare(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename)); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(materialDir, workerNetworkIsolatedFilename), nil, 0o644); err != nil {
+			return fmt.Errorf("write the worker's network marker: %w", err)
+		}
+	}
+	if err := launchWorker(ctx, container, cluster, name, stateDir, materialDir, pullSecretPath, containerMode, verbose); err != nil {
 		// The failure path removed the container, when one started; the
 		// join material is the worker's own ephemera and goes with it,
 		// while the cluster's state stays.
@@ -1668,10 +1745,63 @@ func nextWorkerName(cluster string) (string, error) {
 	}
 }
 
+// workerJoinsContainer reports whether the cluster the worker joins
+// runs as a container this podman can see, the cluster whose network
+// namespace the worker then shares. A rootful worker cannot see the
+// rootless containers of the user that invoked it, so that pairing is
+// named for what it is instead of being mistaken for a host-mode
+// cluster, whose worker the OVN workloads would never reach.
+func workerJoinsContainer(cluster string) (bool, error) {
+	container := clusterContainerPrefix + cluster
+	if exec.Command("podman", "container", "exists", container).Run() == nil {
+		return true, nil
+	}
+	if user := os.Getenv("SUDO_USER"); user != "" && os.Geteuid() == 0 {
+		if exec.Command("sudo", "-u", user, "podman", "container", "exists", container).Run() == nil {
+			return false, fmt.Errorf("cluster %s runs as %s's rootless containers, whose network a rootful worker cannot join;\nrun the worker rootless too, or re-create the cluster under sudo", cluster, user)
+		}
+	}
+	return false, nil
+}
+
+// refusePastaNetwork refuses a worker for a cluster container on the
+// rootless default network: its pasta proxy does not survive the OVN
+// gateway's takeover of the interface it mirrors, so the cluster's own
+// networking would go with it. Clusters created since the shared
+// network exists run on a bridge network instead.
+func refusePastaNetwork(cluster string) error {
+	out, err := exec.Command("podman", "inspect", "--format", "{{.HostConfig.NetworkMode}}", clusterContainerPrefix+cluster).Output()
+	if err != nil {
+		return fmt.Errorf("inspect the cluster container: %w", err)
+	}
+	if strings.TrimSpace(string(out)) != "pasta" {
+		return nil
+	}
+	return fmt.Errorf("cluster %s runs on the rootless default network, which a worker's OVN gateway would break; re-create the cluster to join a worker to it", cluster)
+}
+
+// refuseSecondWorker refuses a second worker for a cluster in a
+// container: the worker's network bring-up configures the cluster
+// container's one shared namespace, which a second worker's OVN would
+// fight over rather than share.
+func refuseSecondWorker(cluster string) error {
+	workers, err := clusterWorkers(cluster)
+	if err != nil {
+		return err
+	}
+	if len(workers) == 0 {
+		return nil
+	}
+	return fmt.Errorf("cluster %s already has the worker %s, and its network lives in the cluster container's one shared namespace; more workers per container cluster come later", cluster, workers[0])
+}
+
 // launchWorker mints the worker image from the release the cluster
 // records, so the node binaries in it match the control plane, starts
-// the worker container, and waits for its join.
-func launchWorker(ctx context.Context, container, cluster, name, stateDir, materialDir, pullSecretPath string, verbose bool) error {
+// the worker container, and waits for its join. The pull secret the
+// build resolved lands in the join material, mounted into the worker
+// where its container runtime reads it, the way a real node's
+// configuration delivers the cluster's secret.
+func launchWorker(ctx context.Context, container, cluster, name, stateDir, materialDir, pullSecretPath string, containerMode bool, verbose bool) error {
 	pullSecret, authfile, cleanup, err := workerPullSecret(ctx, cluster, stateDir, pullSecretPath)
 	if err != nil {
 		return err
@@ -1680,6 +1810,9 @@ func launchWorker(ctx context.Context, container, cluster, name, stateDir, mater
 		// The cluster's stored secret was written to a throwaway file;
 		// the image build is its only reader.
 		defer cleanup()
+	}
+	if err := os.WriteFile(filepath.Join(materialDir, workerPullSecretFilename), pullSecret, 0o600); err != nil {
+		return fmt.Errorf("write the worker's pull secret: %w", err)
 	}
 	client, err := image.NewClient(pullSecret)
 	if err != nil {
@@ -1703,10 +1836,10 @@ func launchWorker(ctx context.Context, container, cluster, name, stateDir, mater
 	}
 
 	fmt.Printf("Starting container %s\n", container)
-	if err := runWorkerPodman(ctx, workerRunArgs(container, cluster, materialDir, imageRef)); err != nil {
+	if err := runWorkerPodman(ctx, workerRunArgs(container, cluster, materialDir, imageRef, containerMode)); err != nil {
 		return err
 	}
-	return streamUntilWorkerReady(ctx, container, stateDir, name)
+	return streamUntilWorkerReady(ctx, container, stateDir, name, containerMode)
 }
 
 // workerPullSecret resolves the pull secret a worker image build pulls
@@ -1757,25 +1890,41 @@ func writeAuthFile(pullSecret []byte) (string, error) {
 }
 
 // workerRunArgs builds the podman command line that starts a worker
-// container: detached and named, labeled with the cluster it joins, on
-// the host network so it dials the control plane at loopback, and
+// container: detached and named, labeled with the cluster it joins, and
 // privileged, which hands it the writable cgroup hierarchy the node side
-// needs. The join material is mounted read-only at the paths the
-// entrypoint reads, and the host's kernel modules read-only for kubelet.
-// The kubelet state directory stays inside the container: workers are
-// ephemeral, recreated rather than restarted.
-func workerRunArgs(container, cluster, materialDir, imageRef string) []string {
-	return []string{
+// needs. A worker joining a cluster in a container shares that cluster
+// container's network namespace, so its join dials the control plane at
+// the loopback they share and the OVN node pod's host networking
+// configures the interfaces of that namespace, never the host's own; a
+// worker joining a host-mode cluster runs on the host network, and its
+// node stays NotReady, because isolating it there would cut the join.
+// The join material is mounted read-only at the paths the entrypoint
+// reads, with the pull secret at the path the node runtime reads it,
+// and the host's kernel modules read-only for kubelet. The kubelet
+// state directory stays inside the container: workers are ephemeral,
+// recreated rather than restarted.
+func workerRunArgs(container, cluster, materialDir, imageRef string, containerMode bool) []string {
+	args := []string{
 		"run", "--detach",
 		"--name", container,
 		"--label", workerClusterLabel + "=" + cluster,
-		"--network", "host",
-		"--privileged",
-		"--volume", filepath.Join(materialDir, join.BootstrapKubeconfigFilename) + ":" + worker.BootstrapKubeconfigPath + ":ro,z",
-		"--volume", filepath.Join(materialDir, join.NodeNameFilename) + ":" + worker.NodeNamePath + ":ro,z",
-		"--volume", "/lib/modules:/lib/modules:ro",
-		imageRef,
 	}
+	if containerMode {
+		args = append(args, "--network", "container:"+clusterContainerPrefix+cluster)
+	} else {
+		args = append(args, "--network", "host")
+	}
+	args = append(args,
+		"--privileged",
+		"--volume", filepath.Join(materialDir, join.BootstrapKubeconfigFilename)+":"+worker.BootstrapKubeconfigPath+":ro,z",
+		"--volume", filepath.Join(materialDir, join.NodeNameFilename)+":"+worker.NodeNamePath+":ro,z",
+		"--volume", filepath.Join(materialDir, workerPullSecretFilename)+":"+worker.PullSecretMountPath+":ro,z",
+		"--volume", "/lib/modules:/lib/modules:ro",
+	)
+	if containerMode {
+		args = append(args, "--volume", filepath.Join(materialDir, workerNetworkIsolatedFilename)+":"+worker.NetworkIsolatedPath+":ro,z")
+	}
+	return append(args, imageRef)
 }
 
 // rootlessCgroupRemedy names the requirement a rootless launch that
@@ -1806,11 +1955,20 @@ func runWorkerPodman(ctx context.Context, args []string) error {
 }
 
 // streamUntilWorkerReady follows the worker container's boot output
-// while waiting for its node to register.
-func streamUntilWorkerReady(ctx context.Context, container, stateDir, name string) error {
+// while waiting for its node to register and, for a cluster in a
+// container, for the OVN workloads to run on the joined worker.
+func streamUntilWorkerReady(ctx context.Context, container, stateDir, name string, containerMode bool) error {
 	return streamUntil(ctx, container, "the worker joined",
-		func(ctx context.Context) error { return waitWorkerNode(ctx, stateDir, name) },
-		func() { printWorkerSummary(container, stateDir, name) },
+		func(ctx context.Context) error {
+			if err := waitWorkerNode(ctx, stateDir, name); err != nil {
+				return err
+			}
+			if !containerMode {
+				return nil
+			}
+			return ovn.WaitWorkloads(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), name)
+		},
+		func() { printWorkerSummary(container, stateDir, name, containerMode) },
 		func(err error) error { return workerFailure(container, stateDir, name, err) },
 	)
 }
@@ -1844,13 +2002,18 @@ func waitWorkerNode(ctx context.Context, stateDir, name string) error {
 	return nil
 }
 
-// printWorkerSummary prints what a joined worker looks like: its node
-// reporting not ready until a CNI exists, and the container running in
-// the background.
-func printWorkerSummary(container, stateDir, name string) {
+// printWorkerSummary prints what a joined worker looks like: for a
+// cluster in a container, its network running as the real OVN pods on
+// the worker; for a host-mode cluster, its node reporting not ready
+// until a CNI exists. The container keeps running in the background.
+func printWorkerSummary(container, stateDir, name string, containerMode bool) {
 	fmt.Println()
 	fmt.Println("Worker joined")
-	fmt.Printf("  Node:       %s, reporting NotReady until a CNI exists\n", name)
+	if containerMode {
+		fmt.Printf("  Node:       %s, with the OVN-Kubernetes pods running on it\n", name)
+	} else {
+		fmt.Printf("  Node:       %s, reporting NotReady until a CNI exists\n", name)
+	}
 	fmt.Printf("  Kubeconfig: %s\n", filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
 	fmt.Printf("Container %s is running in the background\n", container)
 }
@@ -2534,6 +2697,7 @@ func runCleanup(ctx context.Context, name string, all, clearCache bool) error {
 		}
 		freed += imageFreed
 		removed = removed || imageFreed > 0
+		removeClusterNetwork(ctx)
 	}
 	targets, err := cleanupTargets(name, all)
 	if err != nil {

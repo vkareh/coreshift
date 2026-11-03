@@ -653,6 +653,8 @@ func TestCleanupCacheRemovesMintedImages(t *testing.T) {
 		"rmi localhost/coreshift:v1-a",
 		"rmi localhost/coreshift-worker:v1-c",
 		"system df --format json",
+		"network exists coreshift",
+		"network rm coreshift",
 	}
 	if !slices.Equal(calls, want) {
 		t.Fatalf("podman calls = %q\nwant %q", calls, want)
@@ -661,6 +663,7 @@ func TestCleanupCacheRemovesMintedImages(t *testing.T) {
 		"Removing image localhost/coreshift:v1-a",
 		"Removing image localhost/coreshift-worker:v1-c",
 		"No image cache at ",
+		"Removed network coreshift",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output = %q, want %q named", out, want)
@@ -920,6 +923,7 @@ func TestPodmanRunArgs(t *testing.T) {
 	want := []string{
 		"run", "--detach",
 		"--name", "coreshift-dev",
+		"--network", "coreshift",
 		"--publish", "127.0.0.1:7443:7443",
 		"--publish", "127.0.0.1:7444:8445",
 		"--env", "XDG_STATE_HOME=/var/lib/coreshift/state",
@@ -2493,12 +2497,13 @@ func TestDeleteWorkerFlagDefaults(t *testing.T) {
 }
 
 // TestWorkerRunArgs checks the podman command line that starts a worker
-// container: its name and cluster label, the host network it dials the
-// control plane on, the privilege its cgroup hierarchy needs, the join
-// material mounted read-only where the entrypoint reads it, and the
-// host's kernel modules read-only.
+// container for a host-mode cluster: its name and cluster label, the
+// host network it dials the control plane on, the privilege its cgroup
+// hierarchy needs, the join material and pull secret mounted read-only
+// where the entrypoint and runtime read them, and the host's kernel
+// modules read-only.
 func TestWorkerRunArgs(t *testing.T) {
-	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1")
+	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", false)
 	want := []string{
 		"run", "--detach",
 		"--name", "coreshift-worker-w1",
@@ -2507,12 +2512,35 @@ func TestWorkerRunArgs(t *testing.T) {
 		"--privileged",
 		"--volume", "/state/api/workers/w1/bootstrap-kubeconfig:/etc/kubernetes/bootstrap-kubeconfig:ro,z",
 		"--volume", "/state/api/workers/w1/node-name:/etc/coreshift/node-name:ro,z",
+		"--volume", "/state/api/workers/w1/pull-secret:/etc/coreshift/pull-secret:ro,z",
 		"--volume", "/lib/modules:/lib/modules:ro",
 		"localhost/coreshift-worker:v1",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("podman args = %q\nwant %q", got, want)
 	}
+}
+
+// TestWorkerRunArgsContainerMode checks the podman command line that
+// starts a worker joining a cluster in a container: it shares the
+// cluster container's network namespace instead of the host's, and
+// carries the marker that tells the worker its network is the tool's
+// own to configure.
+func TestWorkerRunArgsContainerMode(t *testing.T) {
+	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", true)
+	for i, arg := range got {
+		switch arg {
+		case "--network":
+			if got[i+1] != "container:coreshift-dev" {
+				t.Fatalf("worker network = %q, want the cluster container's namespace", got[i+1])
+			}
+		case "--volume":
+			if got[i+1] == "/state/api/workers/w1/network-isolated:/etc/coreshift/network-isolated:ro,z" {
+				return
+			}
+		}
+	}
+	t.Fatalf("podman args = %q, want the network marker mounted", got)
 }
 
 // TestRunCreateWorkerRefusals checks the refusals that must arrive before
