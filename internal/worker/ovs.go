@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -48,12 +49,10 @@ const (
 const gatewayBridge = "br-ex"
 
 // networkDirs are the node directories the payload's network pods
-// mount, each at the exact path its hostPath volume names — the image
-// carries /var/run and /run as separate trees, so the two spellings
-// cannot stand in for each other. Real nodes have them from their OS
-// and services; the pods' mounts resolve against the worker
-// container's own tree, so the worker creates them before kubelet
-// starts the pods that need them.
+// mount, each at the exact path its hostPath volume names. Real nodes
+// have them from their OS and services; the pods' mounts resolve
+// against the worker container's own tree, so the worker creates them
+// before kubelet starts the pods that need them.
 var networkDirs = []string{
 	"/var/run/openvswitch",
 	"/var/lib/openvswitch/data",
@@ -65,6 +64,39 @@ var networkDirs = []string{
 	"/run/systemd/private",
 	"/var/log/ovn",
 	"/var/lib/cni/networks/ovn-k8s-cni-overlay",
+}
+
+// varRunPath is where the /run symlink is placed. A variable for test
+// override.
+var varRunPath = "/var/run"
+
+// prepareVarRunSymlink points /var/run at /run, the symlink every real
+// node's systemd writes at boot and the ostree image carries no
+// substitute for: the image keeps the two as separate trees, while the
+// node runtime and the network pods spell the same places both ways —
+// the runtime puts pod network namespaces under /var/run/netns while
+// the network pods mount /run/netns, and the CNI server's socket is
+// dialed as /var/run/... against its /run/... — so without the symlink
+// the two sides never meet and no pod's network can come up.
+func prepareVarRunSymlink() error {
+	if err := os.MkdirAll(filepath.Dir(varRunPath), 0o755); err != nil {
+		return fmt.Errorf("create the parent of %s: %w", varRunPath, err)
+	}
+	info, err := os.Lstat(varRunPath)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		// A real directory the image or an earlier start left: replaced,
+		// the way systemd's own tmpfiles rule replaces it.
+		if err := os.RemoveAll(varRunPath); err != nil {
+			return fmt.Errorf("replace %s with the /run symlink: %w", varRunPath, err)
+		}
+	}
+	if err := os.Symlink("../run", varRunPath); err != nil {
+		return fmt.Errorf("point %s at /run: %w", varRunPath, err)
+	}
+	return nil
 }
 
 // prepareNetworkDirs creates the directories the payload's network

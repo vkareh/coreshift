@@ -127,6 +127,9 @@ func Run(ctx context.Context) error {
 	if err := enableCgroupControllers(cgroupRoot); err != nil {
 		return err
 	}
+	if err := prepareVarRunSymlink(); err != nil {
+		return err
+	}
 	if err := prepareNetworkDirs(); err != nil {
 		return err
 	}

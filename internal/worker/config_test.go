@@ -201,3 +201,51 @@ func readFile(t *testing.T, path string) []byte {
 	}
 	return data
 }
+
+// TestPrepareVarRunSymlink checks the /run link the node runtime and
+// the network pods' paths meet through: created where the image has no
+// /var/run at all, kept where one is already in place, and a real
+// directory the image or an earlier start left is replaced, the way
+// systemd's own tmpfiles rule replaces it.
+func TestPrepareVarRunSymlink(t *testing.T) {
+	base := t.TempDir()
+	varRunPath = filepath.Join(base, "var", "run")
+	t.Cleanup(func() { varRunPath = "/var/run" })
+
+	if err := prepareVarRunSymlink(); err != nil {
+		t.Fatal(err)
+	}
+	if link, err := os.Readlink(varRunPath); err != nil {
+		t.Fatalf("/var/run is not a symlink: %v", err)
+	} else if link != "../run" {
+		t.Fatalf("symlink = %q, want ../run", link)
+	}
+
+	// An existing symlink is left as it is.
+	if err := os.Remove(varRunPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/run", varRunPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareVarRunSymlink(); err != nil {
+		t.Fatal(err)
+	}
+	if link, err := os.Readlink(varRunPath); err != nil || link != "/run" {
+		t.Fatalf("symlink = %q, %v; want the existing one kept", link, err)
+	}
+
+	// A real directory is replaced.
+	if err := os.Remove(varRunPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(varRunPath, "leftover"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareVarRunSymlink(); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(varRunPath); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("after replacement: %v, %v; want the symlink", info, err)
+	}
+}
