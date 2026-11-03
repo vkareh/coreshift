@@ -278,11 +278,15 @@ func newClusterCommand() *cobra.Command {
 // container: it joins the control plane whose bootstrap material is
 // mounted in and runs the node side until the container stops. Its
 // configuration arrives as files, never as flags: the host-side create
-// command mounts the bootstrap kubeconfig and the node name in.
+// command mounts the bootstrap kubeconfig and the node name in. The
+// command is the worker image's entrypoint and nothing a user types,
+// so it stays out of the listings; the README's worker section
+// documents it.
 func newWorkerCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "worker",
 		Short: "Join a control plane and run the node side",
+		Hidden: true,
 		// Failures carry their own report, and the worker container
 		// surfaces this command's errors as the container's log; a usage
 		// dump after them would bury it.

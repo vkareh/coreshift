@@ -584,6 +584,12 @@ machine record the machine approver matches the worker's certificate
 request against, so the join is approved the way a real node's is,
 without anything minted by hand.
 
+The entrypoint the image runs is `coreshift run worker`, the command
+that joins the control plane and runs the node side until the container
+stops. Users never type it — the create command mounts the join material
+in and the image runs it on its own — so it is hidden from the run
+listing and the help; it exists to be the image's executable.
+
 The container runs privileged, with the join material and the host's
 kernel modules mounted in read-only, and with the cluster's pull
 secret mounted in read-only where the worker copies it to the path a

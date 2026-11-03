@@ -814,7 +814,9 @@ func TestRootWithoutArgumentsPrintsHelp(t *testing.T) {
 }
 
 // TestRunWithoutNounPrintsHelp checks that bare run prints the list of
-// runnable things and succeeds.
+// runnable things and succeeds: the worker entrypoint is the worker
+// image's own, not something a user types, so it stays out of the
+// listing.
 func TestRunWithoutNounPrintsHelp(t *testing.T) {
 	var out bytes.Buffer
 	root := newRootCommand()
@@ -824,10 +826,29 @@ func TestRunWithoutNounPrintsHelp(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"cluster", "worker"} {
-		if !strings.Contains(out.String(), want) {
-			t.Fatalf("run help missing the %s noun:\n%s", want, out.String())
-		}
+	if !strings.Contains(out.String(), "cluster") {
+		t.Fatalf("run help missing the cluster noun:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "worker") {
+		t.Fatalf("run help lists the worker entrypoint, which users never type:\n%s", out.String())
+	}
+}
+
+// TestWorkerCommandHiddenButRunnable checks that the worker entrypoint
+// is hidden from the listings while remaining resolvable: it is the
+// worker image's entrypoint, typed by no user but run by every worker
+// container.
+func TestWorkerCommandHiddenButRunnable(t *testing.T) {
+	root := newRootCommand()
+	worker, _, err := root.Find([]string{"run", "worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.Name() != "worker" {
+		t.Fatalf("found %q, want the worker entrypoint", worker.Name())
+	}
+	if !worker.Hidden {
+		t.Fatal("the worker entrypoint must be hidden: it is the image's own, not a user command")
 	}
 }
 
