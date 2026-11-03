@@ -1872,6 +1872,15 @@ exec "$@"
 	t.Setenv("SUDO_CONTAINERS", containers)
 }
 
+// setRootfulContainers makes the fake sudo's root-side podman report
+// exactly these containers as existing.
+func setRootfulContainers(t *testing.T, names ...string) {
+	t.Helper()
+	if err := os.WriteFile(os.Getenv("SUDO_CONTAINERS"), []byte(strings.Join(names, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // setContainerPID makes the fake podman answer pid inspection for
 // container with the given process id.
 func setContainerPID(t *testing.T, container string, pid int) {
@@ -3035,9 +3044,11 @@ func TestWorkerClusterTarget(t *testing.T) {
 }
 
 // TestRunGetWorkersEmpty checks that an empty worker list is reported
-// plainly.
+// plainly, with the root side read without a prompt: nothing there and
+// nothing here means no workers, and no note.
 func TestRunGetWorkersEmpty(t *testing.T) {
 	writeFakePodman(t)
+	writeFakeSudo(t)
 	var err error
 	out := captureStdout(t, func() { err = runGetWorkers() })
 	if err != nil {
@@ -3045,6 +3056,9 @@ func TestRunGetWorkersEmpty(t *testing.T) {
 	}
 	if !strings.Contains(out, "No workers") {
 		t.Fatalf("output = %q, want the empty list reported", out)
+	}
+	if strings.Contains(out, "elevation") {
+		t.Fatalf("output = %q, want no elevation note: the root side was read", out)
 	}
 }
 
@@ -3055,6 +3069,7 @@ func TestRunGetWorkersEmpty(t *testing.T) {
 // one without a label shows no cluster.
 func TestRunGetWorkersListsWorkers(t *testing.T) {
 	writeFakePodman(t)
+	writeFakeSudo(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	setContainers(t, "coreshift-dev", "coreshift-worker-w1", "coreshift-worker-w2")
 	setContainerPort(t, "coreshift-dev", 7443)
@@ -3078,12 +3093,79 @@ func TestRunGetWorkersListsWorkers(t *testing.T) {
 	}
 }
 
+// TestRunGetWorkersListsRootfulWorkers checks the split the listing is
+// honest about: worker containers live in root's store, read through
+// the non-interactive elevation, and a worker only that side can see is
+// listed with its row read the same way.
+func TestRunGetWorkersListsRootfulWorkers(t *testing.T) {
+	writeFakePodman(t)
+	writeFakeSudo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	setContainers(t, "coreshift-dev")
+	setRootfulContainers(t, "coreshift-worker-w1")
+	setContainerPort(t, "coreshift-dev", 7443)
+	setContainerLabel(t, "coreshift-worker-w1", "dev")
+	setContainerRunning(t, "coreshift-worker-w1", true)
+
+	var err error
+	out := captureStdout(t, func() { err = runGetWorkers() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("output has %d lines, want a header and the rootful worker:\n%s", len(lines), out)
+	}
+	if fields := strings.Fields(lines[1]); len(fields) < 4 || fields[0] != "w1" || fields[1] != "dev" || strings.Join(fields[2:], " ") != "not ready" {
+		t.Fatalf("w1 row = %q, want its name, cluster, and not ready", lines[1])
+	}
+	// The row was read through the root side: the label read went
+	// through elevation, not plain podman. (The fake podman logs both
+	// paths alike; the sudo log is the one that tells them apart.)
+	if sudo := sudoCalls(t); !slices.ContainsFunc(sudo, func(call string) bool {
+		return strings.Contains(call, `inspect --format {{index .Config.Labels "coreshift-cluster"}} coreshift-worker-w1`)
+	}) {
+		t.Fatalf("sudo calls = %q, want the rootful worker's label read elevated", sudo)
+	}
+	if strings.Contains(out, "elevation") {
+		t.Fatalf("output = %q, want no elevation note: the root side was read", out)
+	}
+}
+
+// TestRunGetWorkersNotesRefusedElevation checks the fallback's honesty:
+// when the non-interactive read of root's store is refused — no cached
+// credentials — the listing reports only what the unprivileged side
+// can see and says plainly that rootful workers need elevation.
+func TestRunGetWorkersNotesRefusedElevation(t *testing.T) {
+	writeFakePodman(t)
+	writeFakeSudo(t)
+	refusal := filepath.Join(t.TempDir(), "refused")
+	if err := os.WriteFile(refusal, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SUDO_REFUSE", refusal)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	var err error
+	out := captureStdout(t, func() { err = runGetWorkers() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "No workers") {
+		t.Fatalf("output = %q, want the empty list reported", out)
+	}
+	if !strings.Contains(out, "needs elevation") {
+		t.Fatalf("output = %q, want the elevation note", out)
+	}
+}
+
 // TestRunGetWorkersStoppedContainerNotReady checks the row a stopped
 // worker gets: not ready, without probing, even when its node's
 // condition still reads ready in the cluster's API, which is the shape
 // a just-stopped worker leaves behind until the cluster notices.
 func TestRunGetWorkersStoppedContainerNotReady(t *testing.T) {
 	writeFakePodman(t)
+	writeFakeSudo(t)
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
 

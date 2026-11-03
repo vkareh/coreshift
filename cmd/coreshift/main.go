@@ -1234,6 +1234,17 @@ func podmanRootless(args ...string) *exec.Cmd {
 	return exec.Command("sudo", drop...)
 }
 
+// podmanRootful builds a podman call against root's store, where worker
+// containers live. Unelevated it goes through sudo -n, which refuses
+// instead of prompting, so no listing or read ever asks; elevated it is
+// plain podman.
+func podmanRootful(args ...string) *exec.Cmd {
+	if os.Geteuid() == 0 {
+		return exec.Command("podman", args...)
+	}
+	return exec.Command("sudo", append([]string{"-n", "podman"}, args...)...)
+}
+
 // newCreateCommand builds the parent of everything creatable. It takes a
 // noun naming what to create: the control plane, or a worker joining a
 // running one. With no noun, or an unknown one, it prints the list and
@@ -2516,32 +2527,49 @@ func newGetWorkersCommand() *cobra.Command {
 	}
 }
 
-// runGetWorkers lists the workers. Readiness requires the worker's
-// container running and its node's condition, read live from the
-// cluster's API, ready: a stopped container is not ready without
-// probing, and a running worker whose node reports not ready — every
-// worker until a CNI exists — is not ready either.
+// runGetWorkers lists the workers. Worker containers are rootful, in
+// root's podman store, which an unprivileged listing cannot see: the
+// listing reads that side too, without ever prompting — sudo -n refuses
+// when it would need a password — and reports only what it could read
+// when the read was refused, saying so plainly. Readiness requires the
+// worker's container running and its node's condition, read live from
+// the cluster's API, ready: a stopped container is not ready without
+// probing, and a running worker whose node reports not ready is not
+// ready either.
 func runGetWorkers() error {
 	if _, err := exec.LookPath("podman"); err != nil {
 		return fmt.Errorf("podman is required to list workers: %w", err)
 	}
-	containers, err := containersNamed(podmanPlain, workerContainerPrefix)
+	mine, err := containersNamed(podmanPlain, workerContainerPrefix)
 	if err != nil {
 		return err
 	}
+	rootful, elevated := rootfulWorkerNames()
+	containers := append(slices.Clone(mine), rootful...)
+	slices.Sort(containers)
+	containers = slices.Compact(containers)
 	if len(containers) == 0 {
 		fmt.Println("No workers")
+		if !elevated {
+			fmt.Println("Rootful workers are not listed; seeing them needs elevation, so run this command under sudo")
+		}
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(w, "NAME\tCLUSTER\tREADY")
 	for _, container := range containers {
 		name := strings.TrimPrefix(container, workerContainerPrefix)
+		// A worker this side cannot see is read through the same
+		// non-prompting elevation the listing used.
+		podman := podmanRootful
+		if slices.Contains(mine, container) {
+			podman = podmanPlain
+		}
 		cluster := "-"
 		ready := "not ready"
-		if label, err := containerLabel(podmanPlain, container, workerClusterLabel); err == nil && label != "" {
+		if label, err := containerLabel(podman, container, workerClusterLabel); err == nil && label != "" {
 			cluster = label
-			if running, err := containerRunning(podmanPlain, container); err == nil && running {
+			if running, err := containerRunning(podman, container); err == nil && running {
 				if _, stateDir, err := workerClusterTarget(label); err == nil && workerNodeReady(stateDir, name) {
 					ready = "ready"
 				}
@@ -2549,7 +2577,25 @@ func runGetWorkers() error {
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\n", name, cluster, ready)
 	}
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if !elevated {
+		fmt.Println("Rootful workers are not listed; seeing them needs elevation, so run this command under sudo")
+	}
+	return nil
+}
+
+// rootfulWorkerNames lists the worker containers in root's store, where
+// workers run. The read never prompts: unelevated it goes through
+// sudo -n, which refuses when it would need a password, and the caller
+// then reports only what the unprivileged side could see.
+func rootfulWorkerNames() ([]string, bool) {
+	names, err := containersNamed(podmanRootful, workerContainerPrefix)
+	if err != nil {
+		return nil, false
+	}
+	return names, true
 }
 
 // workerNodeReady reports whether the worker's node object carries a

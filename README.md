@@ -893,11 +893,15 @@ exists for the name, listing the clusters that do:
 ```
 
 `coreshift get workers` lists the workers: name, cluster, and readiness.
-Readiness requires the worker's container running and its node's own
-condition, read live from the cluster's API, ready: a stopped container
-is not ready without probing, and a worker whose node reports not
-ready — every worker here, until a CNI exists — is not ready either.
-With no workers it prints `No workers`.
+Worker containers are rootful, in root's podman store, which an
+unprivileged listing cannot see, so the listing reads that side too,
+without ever prompting — `sudo -n` refuses where it would need a
+password — and when the read is refused it reports only what the
+unprivileged side can see, with a plain note that seeing rootful
+workers needs elevation. Readiness requires the worker's container
+running and its node's own condition, read live from the cluster's
+API, ready: a stopped container is not ready without probing. With no
+workers it prints `No workers`.
 
 ## The `version` command
 
