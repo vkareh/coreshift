@@ -28,6 +28,13 @@ const (
 // release's nodes run infra containers from.
 const pauseImage = "quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:e5fc73fc66cd2ff4e781d9af380348be759b6917c3703325d340669c3764e136"
 
+// pullSecretPath is where real nodes carry the cluster's pull secret,
+// written there by their configuration operator and read by CRI-O for
+// every pull. The create command mounts the cluster's secret here, so
+// the worker's runtime pulls the payload's images the way a real
+// node's does. A variable for test override.
+var pullSecretPath = "/var/lib/kubelet/config.json"
+
 // cgroupRoot is the root of the cgroup hierarchy the container sees.
 const cgroupRoot = "/sys/fs/cgroup"
 
@@ -103,6 +110,8 @@ func moveCgroupProcesses(root, name string) error {
 // not a real node: there is no systemd to drive cgroups, no SELinux
 // policy for containers to run under, and no permission for the
 // nftables host port mapping, so those three run the container's way.
+// The pull secret is passed through where the create command mounted
+// it, matching the payload's rendered configuration.
 func writeCRIConfig(path string) error {
 	config := fmt.Sprintf(`[crio.runtime]
 conmon = "/usr/libexec/crio/conmon"
@@ -119,6 +128,10 @@ network_dir = "%s"
 pause_image = "%s"
 pause_command = "/usr/bin/pod"
 `, cniPluginDir, cniConfigDir, pauseImage)
+	if _, err := os.Stat(pullSecretPath); err == nil {
+		config += "global_auth_file = \"" + pullSecretPath + "\"\n" +
+			"pause_image_auth_file = \"" + pullSecretPath + "\"\n"
+	}
 	if err := os.WriteFile(path, []byte(config), 0o644); err != nil {
 		return fmt.Errorf("write CRI-O config: %w", err)
 	}

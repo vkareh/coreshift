@@ -29,6 +29,36 @@ func TestWriteCRIConfig(t *testing.T) {
 			t.Fatalf("CRI-O config missing %q:\n%s", want, config)
 		}
 	}
+	if strings.Contains(config, "global_auth_file") {
+		t.Fatalf("CRI-O config passes a pull secret that was not mounted:\n%s", config)
+	}
+}
+
+// TestWriteCRIConfigWithPullSecret checks that a mounted pull secret
+// reaches CRI-O the way the payload's rendered configuration passes it,
+// so the worker's runtime pulls the payload's images authenticated.
+func TestWriteCRIConfigWithPullSecret(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(secret, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := pullSecretPath
+	pullSecretPath = secret
+	defer func() { pullSecretPath = original }()
+	path := filepath.Join(dir, "crio.conf")
+	if err := writeCRIConfig(path); err != nil {
+		t.Fatal(err)
+	}
+	config := string(readFile(t, path))
+	for _, want := range []string{
+		`global_auth_file = "` + secret + `"`,
+		`pause_image_auth_file = "` + secret + `"`,
+	} {
+		if !strings.Contains(config, want) {
+			t.Fatalf("CRI-O config missing %q:\n%s", want, config)
+		}
+	}
 }
 
 // TestWriteKubeletConfig checks the kubelet configuration against what

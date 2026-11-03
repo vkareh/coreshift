@@ -121,6 +121,21 @@ func Run(ctx context.Context) error {
 	if err := enableCgroupControllers(cgroupRoot); err != nil {
 		return err
 	}
+	if err := prepareNetworkDirs(); err != nil {
+		return err
+	}
+	// A worker in a network namespace the tool owns brings up OVS and
+	// the gateway bridge itself, the node services a real node's
+	// openvswitch and ovs-configuration units provide; a worker on the
+	// host's own network must not reconfigure the host's interfaces,
+	// so there it brings up neither.
+	isolated := false
+	if _, err := os.Stat(NetworkIsolatedPath); err == nil {
+		isolated = true
+		if err := prepareOVS(); err != nil {
+			return err
+		}
+	}
 	serverPort, healthzPort, err := kubeletPorts()
 	if err != nil {
 		return err
@@ -152,6 +167,9 @@ func Run(ctx context.Context) error {
 				"--healthz-port=" + strconv.Itoa(healthzPort),
 			},
 		},
+	}
+	if isolated {
+		processes = append(ovsProcesses(), processes...)
 	}
 	sup := &supervisor.Supervisor{
 		LogDir: logDir,
