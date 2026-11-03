@@ -215,9 +215,10 @@ are patched: the one OVN control-plane Deployment is pointed at the
 cluster's nodes at a replica count one shared namespace carries, the
 node identity DaemonSet that approves the OVN pods' certificate
 requests is placed the same way, the node DaemonSets trade their own
-critical priority for the control plane's — the node one asks for an
-OOM adjustment only the initial user namespace grants, which a worker
-container cannot give — and the OVN configuration gives up network
+critical priority for the control plane's — recorded when the node
+one asked for an OOM adjustment only the initial user namespace
+grants, which the rootless workers of that design could not give —
+and the OVN configuration gives up network
 segmentation, whose node side needs a systemd no worker container
 runs. A render pass can straddle the switch to unmanaged and land its
 writes after the patches, so the placement verifies the objects and
@@ -643,14 +644,22 @@ create command places the OVN workloads as above, waits for the OVN
 node pod and the control-plane pod to run on the worker, and the node
 reports Ready once the CNI configuration the pods write answers. The
 Open vSwitch kernel module is shared with the host — the worker loads
-it the way a real node does when it can, and the kernel loads it on
-demand when the worker's user namespace refuses the load — so a host
-that lacks the module cannot bring the network up. What still waits
-is workload pods beyond the network's own: their service-account
-volumes need file ownerships the worker's user namespace cannot
-express, so they sit in ContainerCreating until that is solved; the
-network stack itself, from the CNI plugin to the OVN databases, is
-running.
+it the way a real node does — so a host that lacks the module cannot
+bring the network up. The worker also writes the `/var/run → /run`
+symlink every real node's systemd provides and the ostree image
+carries no substitute for: without it the node runtime and the network
+pods spell the same places two ways that never meet — pod network
+namespaces land under `/var/run/netns` while the network pods mount
+`/run/netns`, and the CNI server's socket is dialed through the other
+spelling than it is created with — and no workload pod's network can
+come up.
+
+Workload pods beyond the network's own run for real: under the rootful
+worker, kubelet's volume chowns to pod user IDs succeed — the wall that
+kept pods in ContainerCreating — so a plain pod schedules onto the
+worker, gets a cluster-network address from the CNI, and runs. The
+proof, captured below: pods answer each other through the overlay, and
+the API server answers from inside the pod network.
 
 When a worker fails — its container exits, its node never registers,
 or the OVN workloads never come up — the error quotes the tail of the
@@ -660,7 +669,9 @@ preserved.
 ### Quickstart
 
 With a cluster running in either mode — in host mode, leave the `run
-cluster` terminal alone and use another one — join a worker to it:
+cluster` terminal alone and use another one — join a worker to it. The
+command asks for elevation once, through an askpass prompt, because
+the whole worker launch runs as root:
 
 ```
 ./coreshift create worker
@@ -729,6 +740,50 @@ the control plane keeps answering through the network its own pods
 now own — the takeover a real node's OVS configuration performs on
 the node's uplink, done here to a veth inside the cluster's
 namespace, with the host's own interfaces untouched.
+
+With the network running, workload pods run for real — the phase's
+end-to-end proof. A plain busybox deployment schedules onto the
+worker, leaves ContainerCreating — the volume chowns that sat stuck
+before succeed under root — and runs with a cluster-network address:
+
+```
+oc get pods -o wide
+NAME                       READY   STATUS    RESTARTS   AGE     IP            NODE      NOMINATED NODE   READINESS GATES
+echoer                     1/1     Running   0          51s     10.128.0.14   worker1   <none>           <none>
+prober                     1/1     Running   0          36s     10.128.0.15   worker1   <none>           <none>
+sleeper-78f4dbc4b8-c9fp   1/1     Running   0          14m     10.128.0.6    worker1   <none>           <none>
+sleeper-78f4dbc4b8-hfrdq   1/1     Running   0          6m34s   10.128.0.10   worker1   <none>           <none>
+```
+
+The `sleeper` pods run `sleep`; the `echoer` pod serves a line over
+`nc`; the `prober` pod fetches from inside the pod network. From
+inside a pod, another pod answers through the OVN overlay:
+
+```
+$ wget -q -O - http://10.128.0.14:9000
+pong
+```
+
+and the API server answers from inside the pod network, at the
+kubernetes service's cluster address:
+
+```
+$ wget --no-check-certificate -q -O - https://172.30.0.1/version
+{
+  "major": "1",
+  "minor": "35",
+  ...
+  "gitVersion": "v1.35.9",
+  "platform": "linux/amd64"
+}
+```
+
+In-cluster DNS does not exist yet — that is the next phase — so the
+proof runs on addresses, not names. The node reports Ready throughout,
+and the host's interfaces and routes are unchanged: the worker's OVN
+configures the cluster container's namespace and never the host's,
+proven by before-and-after snapshots of the host's address and route
+state.
 
 The join is real all the way through: the node's certificate request was
 approved by the machine approver the control plane runs, and issued:
