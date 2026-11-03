@@ -811,7 +811,12 @@ certificate authority keys, the admin credentials, the stored pull
 secret, and the etcd data. Stopping the container tears the control
 plane down in reverse startup order, like a host-mode shutdown, and the
 workers go first, each deleted the same way `delete worker` deletes it,
-while the cluster's API still answers. The command says what was removed
+while the cluster's API still answers. A cluster that has workers
+deletes under elevation — the whole command re-run as root through one
+`sudo -A` prompt, because the rootful worker containers live in root's
+podman store — while the cluster's own rootless container is still
+managed through the invoking user's podman from inside the elevated
+run. The command says what was removed
 and where the state was, and leaves nothing behind: no containers, no
 state directory, not even an empty clusters tree. Keeping any of it is
 the explicit act.

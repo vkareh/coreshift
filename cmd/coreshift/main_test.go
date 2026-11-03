@@ -2419,6 +2419,72 @@ func TestRunDeleteMissingCluster(t *testing.T) {
 	}
 }
 
+// writeWorkerMaterial stands up a cluster state directory holding one
+// worker's join material, the record an unprivileged side has of a
+// rootful worker.
+func writeWorkerMaterial(t *testing.T, stateDir, worker string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(stateDir, workersDirName, worker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRunDeleteElevatesForWorkers checks that deleting a cluster with
+// workers re-runs under elevation, before anything is touched: the
+// worker containers are rootful, beyond the unprivileged listing, and
+// the join material records them. The same holds when the workers are
+// preserved, because the report of what stays behind reads them too.
+func TestRunDeleteElevatesForWorkers(t *testing.T) {
+	for _, preserveWorkers := range []bool{false, true} {
+		writeFakePodman(t)
+		writeFakeSudo(t)
+		base := t.TempDir()
+		t.Setenv("XDG_STATE_HOME", base)
+		stateDir, err := clusterDir("dev")
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeStateTree(t, stateDir, "dev")
+		writeWorkerMaterial(t, stateDir, "worker1")
+
+		err = runDelete(context.Background(), "dev", false, preserveWorkers)
+		var done *elevated
+		if !errors.As(err, &done) {
+			t.Fatalf("preserveWorkers=%v: err = %v, want the elevated re-run", preserveWorkers, err)
+		}
+		if calls := podmanCalls(t); len(calls) != 0 {
+			t.Fatalf("preserveWorkers=%v: podman calls = %q, want the deletion left to the elevated run", preserveWorkers, calls)
+		}
+		if _, err := os.Stat(stateDir); err != nil {
+			t.Fatalf("preserveWorkers=%v: the refusal path removed the state", preserveWorkers)
+		}
+	}
+}
+
+// TestRunDeleteWithoutWorkersStaysUnelevated checks that a cluster
+// without workers deletes without asking for elevation: no material,
+// nothing rootful to touch.
+func TestRunDeleteWithoutWorkersStaysUnelevated(t *testing.T) {
+	writeFakePodman(t)
+	writeFakeSudo(t)
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	stateDir, err := clusterDir("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeStateTree(t, stateDir, "dev")
+
+	var delErr error
+	captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false, false) })
+	if delErr != nil {
+		t.Fatal(delErr)
+	}
+	if sudo := sudoCalls(t); len(sudo) != 0 {
+		t.Fatalf("sudo calls = %q, want none: the cluster has no workers", sudo)
+	}
+}
+
 // TestRunDeleteCascadesWorkers checks the cascade: deleting a cluster
 // deletes each of its workers the way delete worker does, containers
 // stopped and removed, before the cluster's own container goes. Another

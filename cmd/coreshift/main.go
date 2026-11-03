@@ -2221,7 +2221,7 @@ func newDeleteClusterCommand() *cobra.Command {
 		Short:        "Delete a cluster, its workers, and its state",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDelete(cmd.Context(), name, preserveState, preserveWorkers)
+			return elevatedExit(runDelete(cmd.Context(), name, preserveState, preserveWorkers))
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", defaultClusterName, "name of the cluster to delete")
@@ -2242,9 +2242,12 @@ const containerStopSeconds = 120
 // state directory, and the preserve-workers flag leaves the workers
 // running instead of deleting them, for the control-plane restart; it
 // implies preserve-state, because a worker cannot rejoin a cluster
-// re-created without its state. A cluster whose container is already gone
-// but whose state remains reports that, and the state follows the same
-// rule.
+// re-created without its state. Worker containers are rootful, beyond an
+// unprivileged listing's reach, and removing or reporting them needs
+// elevation, so a cluster that has workers deletes under elevation: the
+// whole command re-runs as root through one prompt. A cluster whose
+// container is already gone but whose state remains reports that, and the
+// state follows the same rule.
 func runDelete(ctx context.Context, name string, preserveState, preserveWorkers bool) error {
 	if preserveWorkers {
 		preserveState = true
@@ -2256,8 +2259,11 @@ func runDelete(ctx context.Context, name string, preserveState, preserveWorkers 
 	if err != nil {
 		return err
 	}
+	if os.Geteuid() != 0 && workerMaterialExists(stateDir) {
+		return elevate()
+	}
 	container := clusterContainerPrefix + name
-	running := exec.Command("podman", "container", "exists", container).Run() == nil
+	running := podmanRootless("container", "exists", container).Run() == nil
 	if !running {
 		if _, statErr := os.Stat(stateDir); statErr != nil {
 			return unknownCluster(name)
@@ -2279,12 +2285,12 @@ func runDelete(ctx context.Context, name string, preserveState, preserveWorkers 
 	}
 	if running {
 		fmt.Printf("Stopping container %s\n", container)
-		stop := exec.Command("podman", "stop", "--timeout", strconv.Itoa(containerStopSeconds), container)
+		stop := podmanRootless("stop", "--timeout", strconv.Itoa(containerStopSeconds), container)
 		stop.Stderr = os.Stderr
 		if err := stop.Run(); err != nil {
 			return fmt.Errorf("stop container: %w", err)
 		}
-		if err := exec.Command("podman", "rm", container).Run(); err != nil {
+		if err := podmanRootless("rm", container).Run(); err != nil {
 			return fmt.Errorf("remove container: %w", err)
 		}
 		fmt.Printf("Deleted cluster %s\n", name)
@@ -2305,6 +2311,16 @@ func runDelete(ctx context.Context, name string, preserveState, preserveWorkers 
 	}
 	fmt.Printf("State removed at %s\n", stateDir)
 	return pruneClustersTree()
+}
+
+// workerMaterialExists reports whether the cluster's state records
+// joined workers: their join material directories, one per worker
+// created and not deleted. Worker containers are rootful, beyond an
+// unprivileged listing's reach, so the material is what tells this
+// side a worker exists.
+func workerMaterialExists(stateDir string) bool {
+	entries, err := os.ReadDir(filepath.Join(stateDir, workersDirName))
+	return err == nil && len(entries) > 0
 }
 
 // clusterWorkers lists the names of a cluster's workers: the worker
