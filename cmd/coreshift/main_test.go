@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -1785,11 +1786,12 @@ if [ "$1" = "ps" ]; then
 	cat "$PODMAN_CONTAINERS"
 	exit 0
 fi
-if [ "$1" = "inspect" ]; then
+	if [ "$1" = "inspect" ]; then
 	eval "container=\${$#}"
 	case "$3" in
 	*Labels*) cat "$PODMAN_LABELS/$container" 2>/dev/null ;;
 	*Running*) cat "$PODMAN_STATE/$container" 2>/dev/null || echo false ;;
+	*Pid*) cat "$PODMAN_PIDS/$container" 2>/dev/null || echo 0 ;;
 	*) cat "$PODMAN_PORTS/$container" ;;
 	esac
 	exit 0
@@ -1824,6 +1826,76 @@ exit 0
 	t.Setenv("PODMAN_STATE", t.TempDir())
 	t.Setenv("PODMAN_LOGS", t.TempDir())
 	t.Setenv("PODMAN_IMAGES", t.TempDir())
+	t.Setenv("PODMAN_PIDS", t.TempDir())
+}
+
+// writeFakeSudo stands in for sudo, recording its calls. A read against
+// root's store (-n) is answered by running the call against the
+// container set SUDO_CONTAINERS names, so the root side is a world of
+// its own, unless SUDO_REFUSE names a file: then it is refused, the way
+// a real sudo refuses without a cached password. An elevation (-A) is
+// answered with success without running anything — the real re-run
+// cannot happen inside a test — unless SUDO_NO_ASKPASS names a file:
+// then it fails the way sudo does with no askpass helper configured.
+func writeFakeSudo(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	script := `#!/bin/sh
+echo "sudo $@" >> "$SUDO_LOG"
+if [ "$1" = "-n" ]; then
+	if [ -e "$SUDO_REFUSE" ]; then
+		echo "sudo: a password is required" >&2
+		exit 1
+	fi
+	shift
+	exec env PODMAN_CONTAINERS="$SUDO_CONTAINERS" "$@"
+fi
+if [ "$1" = "-A" ]; then
+	if [ -e "$SUDO_NO_ASKPASS" ]; then
+		echo "sudo: no askpass program specified, try setting SUDO_ASKPASS" >&2
+		exit 1
+	fi
+	exit 0
+fi
+exec "$@"
+`
+	path := filepath.Join(dir, "sudo")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	t.Setenv("SUDO_LOG", filepath.Join(t.TempDir(), "calls"))
+	containers := filepath.Join(t.TempDir(), "containers")
+	if err := os.WriteFile(containers, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SUDO_CONTAINERS", containers)
+}
+
+// setContainerPID makes the fake podman answer pid inspection for
+// container with the given process id.
+func setContainerPID(t *testing.T, container string, pid int) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(os.Getenv("PODMAN_PIDS"), container), []byte(fmt.Sprintf("%d\n", pid)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// sudoCalls returns the calls the fake sudo recorded; a fake sudo never
+// invoked recorded none.
+func sudoCalls(t *testing.T) []string {
+	t.Helper()
+	data, err := os.ReadFile(os.Getenv("SUDO_LOG"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 }
 
 // setRepositoryImages makes the fake podman answer the images listing
@@ -2539,7 +2611,7 @@ func TestDeleteWorkerFlagDefaults(t *testing.T) {
 // where the entrypoint and runtime read them, and the host's kernel
 // modules read-only.
 func TestWorkerRunArgs(t *testing.T) {
-	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", false)
+	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", "")
 	want := []string{
 		"run", "--detach",
 		"--name", "coreshift-worker-w1",
@@ -2558,17 +2630,19 @@ func TestWorkerRunArgs(t *testing.T) {
 }
 
 // TestWorkerRunArgsContainerMode checks the podman command line that
-// starts a worker joining a cluster in a container: it shares the
-// cluster container's network namespace instead of the host's, and
-// carries the marker that tells the worker its network is the tool's
-// own to configure.
+// starts a worker joining a cluster in a container: it joins the cluster
+// container's network namespace by its path — the worker runs rootful,
+// the cluster container rootless, and the two podman stores cannot see
+// each other's containers — and carries the marker that tells the
+// worker its network is the tool's own to configure.
 func TestWorkerRunArgsContainerMode(t *testing.T) {
-	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", true)
+	netns := "/proc/4242/ns/net"
+	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", netns)
 	for i, arg := range got {
 		switch arg {
 		case "--network":
-			if got[i+1] != "container:coreshift-dev" {
-				t.Fatalf("worker network = %q, want the cluster container's namespace", got[i+1])
+			if got[i+1] != "ns:"+netns {
+				t.Fatalf("worker network = %q, want the cluster container's namespace by path", got[i+1])
 			}
 		case "--volume":
 			if got[i+1] == "/state/api/workers/w1/network-isolated:/etc/coreshift/network-isolated:ro,z" {
@@ -2577,6 +2651,105 @@ func TestWorkerRunArgsContainerMode(t *testing.T) {
 		}
 	}
 	t.Fatalf("podman args = %q, want the network marker mounted", got)
+}
+
+// TestElevateReRunsUnderSudo checks the elevation contract: the whole
+// command is re-run as root through exactly one sudo -A call, with the
+// invoking user's state and cache homes passed through, because sudo
+// resets the environment, and the finished run reported as done.
+func TestElevateReRunsUnderSudo(t *testing.T) {
+	writeFakeSudo(t)
+
+	err := elevate()
+	var done *elevated
+	if !errors.As(err, &done) || done.code != 0 {
+		t.Fatalf("err = %v, want the finished elevated run", err)
+	}
+	calls := sudoCalls(t)
+	if len(calls) != 1 {
+		t.Fatalf("sudo calls = %q, want exactly one elevation", calls)
+	}
+	for _, want := range []string{"-A", "env", "XDG_STATE_HOME=", "XDG_CACHE_HOME="} {
+		if !strings.Contains(calls[0], want) {
+			t.Fatalf("elevation call %q missing %q", calls[0], want)
+		}
+	}
+}
+
+// TestElevateNamesMissingAskpass checks the failure elevation must
+// refuse clearly: with no askpass helper configured, sudo -A fails
+// rather than hangs, and the error names what to configure.
+func TestElevateNamesMissingAskpass(t *testing.T) {
+	writeFakeSudo(t)
+	refusal := filepath.Join(t.TempDir(), "no-askpass")
+	if err := os.WriteFile(refusal, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SUDO_NO_ASKPASS", refusal)
+
+	err := elevate()
+	if err == nil {
+		t.Fatal("expected a refusal naming the askpass helper")
+	}
+	if !strings.Contains(err.Error(), "SUDO_ASKPASS") {
+		t.Fatalf("refusal = %v, want the askpass helper named", err)
+	}
+	var done *elevated
+	if errors.As(err, &done) {
+		t.Fatal("a failed elevation must not report a finished run")
+	}
+}
+
+// TestWorkerCommandsElevateBeforePodman checks that an unelevated
+// worker command elevates before touching anything: with elevation
+// impossible the command refuses naming the askpass helper, and no
+// podman call was made.
+func TestWorkerCommandsElevateBeforePodman(t *testing.T) {
+	for _, args := range [][]string{
+		{"create", "worker"},
+		{"delete", "worker"},
+	} {
+		writeFakePodman(t)
+		writeFakeSudo(t)
+		refusal := filepath.Join(t.TempDir(), "no-askpass")
+		if err := os.WriteFile(refusal, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("SUDO_NO_ASKPASS", refusal)
+
+		root := newRootCommand()
+		root.SetArgs(args)
+		err := root.Execute()
+		if err == nil || !strings.Contains(err.Error(), "SUDO_ASKPASS") {
+			t.Fatalf("%v: err = %v, want the askpass refusal", args, err)
+		}
+		if calls := podmanCalls(t); len(calls) != 0 {
+			t.Fatalf("%v: podman calls = %q, want none before elevation", args, calls)
+		}
+	}
+}
+
+// TestClusterNetworkNamespace checks the namespace path a worker joins:
+// the cluster container's main process, whose namespace root joins by
+// path because the two podman stores cannot see each other's
+// containers. A stopped container has no process left to join.
+func TestClusterNetworkNamespace(t *testing.T) {
+	writeFakePodman(t)
+	setContainers(t, "coreshift-dev")
+	setContainerPID(t, "coreshift-dev", 4242)
+
+	got, err := clusterNetworkNamespace("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/proc/4242/ns/net" {
+		t.Fatalf("namespace = %q, want the cluster container's by path", got)
+	}
+
+	setContainerPID(t, "coreshift-dev", 0)
+	if _, err := clusterNetworkNamespace("dev"); err == nil || !strings.Contains(err.Error(), "not running") {
+		t.Fatalf("err = %v, want the stopped cluster refused", err)
+	}
 }
 
 // TestRunCreateWorkerRefusals checks the refusals that must arrive before
@@ -3024,12 +3197,11 @@ func TestRunDeleteWorkerMissing(t *testing.T) {
 }
 
 // TestWorkerFailureQuotesLogAndRemoves checks the failure contract: the
-// error carries the container's log tail, a cgroup delegation failure
-// gains the rootful remedy, and the container is removed.
+// error carries the container's log tail and the container is removed.
 func TestWorkerFailureQuotesLogAndRemoves(t *testing.T) {
 	writeFakePodman(t)
 	setContainerLog(t, "coreshift-worker-w1",
-		"enabling the cgroup controllers failed\nthe worker container's cgroup hierarchy must be delegated to it\n")
+		"enabling the cgroup controllers failed\n")
 
 	err := workerFailure("coreshift-worker-w1", "/state/api", "w1", fmt.Errorf("the worker did not join"))
 	if err == nil {
@@ -3038,8 +3210,6 @@ func TestWorkerFailureQuotesLogAndRemoves(t *testing.T) {
 	for _, want := range []string{
 		"the worker did not join",
 		"recent log output:",
-		"must be delegated to it",
-		"sudo",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("failure missing %q:\n%v", want, err)

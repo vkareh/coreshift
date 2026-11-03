@@ -597,30 +597,46 @@ real node's configuration writes and its CRI-O reads for every pull,
 so the payload's images come from the authenticated registry the way
 a real node's do. Everything else, above all the kubelet state, stays
 inside the container: workers are ephemeral, re-created rather than
-restarted, and a re-created worker joins fresh. When podman runs
-rootless, the launch happens under a delegated cgroup scope — the
-systemd user mechanism kubelet's cgroups need under rootless podman.
-Where that cannot be provided the command fails naming rootful podman
-as the worker-only requirement: run the same command with sudo.
+restarted, and a re-created worker joins fresh.
+
+Workers are a rootful, worker-only requirement, and the control plane
+stays rootless. kubelet chowns its pods' volumes to user IDs a rootless
+worker's user namespace cannot express, so workload pods would sit in
+ContainerCreating forever — the recorded design decision for exactly
+that wall. The whole worker launch therefore happens inside one
+elevated invocation: the command re-runs itself through `sudo -A`, the
+user answers a single askpass prompt, and every podman call the command
+makes — the image build included, so the worker image lands in root's
+store where the rootful run can use it — runs as root, with no
+elevation nested inside. State the elevated run writes is handed back
+to the invoking user, so every unelevated command keeps working on it.
+Without an askpass helper the command fails naming what to configure
+instead of hanging; running the command under `sudo` yourself works
+too. `delete worker` elevates the same way, one prompt.
 
 Which network the worker runs on is decided by the cluster it joins.
 A cluster in a container has a network namespace of its own, and the
-worker shares it: the join dials the control plane at the loopback
-they share, and the worker brings up the node's OVS and the br-ex
-gateway bridge inside that namespace — the job a real node's
-openvswitch and ovs-configuration services do — so the OVN node pod,
-host-networked itself, reconfigures the interfaces of the cluster
-container and never the host's. A marker file mounted by the create
-command gates that bring-up, and a host-mode worker, which runs on
-the host's own network, brings up neither: the cluster must not
-reconfigure the developer's machine. Because both worker and control
-plane live in one namespace, a container cluster carries one worker
-only, the create command refuses the pasta network a rootless cluster
-container may run on — its proxy would not survive the gateway
-takeover — and clusters created now run on the project's own podman
-network instead. Whether a host-mode cluster can have a network of
-its own behind its worker is an open question: isolating the worker
-there would cut the loopback the join dials.
+worker joins it: the join dials the control plane at the loopback they
+share, and the worker brings up the node's OVS and the br-ex gateway
+bridge inside that namespace — the job a real node's openvswitch and
+ovs-configuration services do — so the OVN node pod, host-networked
+itself, reconfigures the interfaces of the cluster container and never
+the host's. The worker runs rootful and the cluster container rootless,
+two podman stores that cannot see each other's containers, so the join
+is by path, not by name: the create command resolves the cluster
+container's main process network namespace from the user's podman and
+hands the elevated podman the namespace's path, which root can join.
+A marker file mounted by the create command gates that bring-up, and a
+host-mode worker, which runs on the host's own network, brings up
+neither: the cluster must not reconfigure the developer's machine.
+Because both worker and control plane live in one namespace, a
+container cluster carries one worker only, the create command refuses
+the pasta network a rootless cluster container may run on — its proxy
+would not survive the gateway takeover — and clusters created now run
+on the project's own podman network instead. Whether a host-mode
+cluster can have a network of its own behind its worker is an open
+question: isolating the worker there would cut the loopback the join
+dials.
 
 In that shared namespace the cluster's network comes up for real: the
 create command places the OVN workloads as above, waits for the OVN
@@ -837,11 +853,13 @@ deletes.
 
 `coreshift delete worker` stops the named worker's container and removes
 it, then removes the node and the machine record its join created, so
-the cluster's node list is clean again. The cluster must be running to
-remove them; when it is not, the container still goes, and the node
-stays until the cluster's state does. When the cluster's state is already
-gone, the container still goes too, with a note that the node went with
-the cluster's state.
+the cluster's node list is clean again. The worker container is rootful,
+so the deletion runs under elevation like the creation did: the command
+re-runs itself through one `sudo -A` prompt. The cluster must be running
+to remove the pair; when it is not, the container still goes, and the
+node stays until the cluster's state does. When the cluster's state is
+already gone, the container still goes too, with a note that the node
+went with the cluster's state.
 
 Deleting a cluster without `--preserve-workers` deletes its workers the
 same way, one by one before the cluster's own container goes; see

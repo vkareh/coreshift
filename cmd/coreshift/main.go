@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -1102,6 +1103,137 @@ func printReadySummary(stateDir string, port int) {
 		endpoint, filepath.Join(stateDir, certgen.CACertFilename))
 }
 
+// elevated marks a finished re-run under elevation: the elevated run
+// already reported whatever happened, so nothing more is printed and
+// the process exits with its code.
+type elevated struct{ code int }
+
+func (e *elevated) Error() string {
+	return fmt.Sprintf("the elevated run exited with code %d", e.code)
+}
+
+// elevate re-runs the running command as root, once, through sudo -A:
+// the user answers one askpass prompt, and every podman call the
+// command makes then runs as root, with no elevation nested inside.
+// The invoking user's state and cache homes are passed through, because
+// sudo resets the environment and the elevated run must keep reading
+// the same directories. It returns the elevated run's exit code as an
+// *elevated, and a plain error only when elevation itself failed.
+func elevate() error {
+	if _, err := exec.LookPath("sudo"); err != nil {
+		return fmt.Errorf("sudo is required to elevate this command: %w", err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate this command: %w", err)
+	}
+	stateHome, cacheHome, err := userHomes()
+	if err != nil {
+		return err
+	}
+	args := append([]string{"-A", "env",
+		"XDG_STATE_HOME=" + stateHome,
+		"XDG_CACHE_HOME=" + cacheHome,
+		self}, os.Args[1:]...)
+	run := exec.Command("sudo", args...)
+	run.Stdin = os.Stdin
+	run.Stdout = os.Stdout
+	// Standard error is streamed and kept: sudo's own failures, above
+	// all a missing askpass helper, are recognized from it.
+	var stderr bytes.Buffer
+	run.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	// The elevated run owns shutdown; this process only waits for it.
+	signal.Ignore(syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Reset(syscall.SIGINT, syscall.SIGTERM)
+	err = run.Run()
+	var exit *exec.ExitError
+	if err == nil {
+		return &elevated{0}
+	}
+	if errors.As(err, &exit) {
+		if strings.Contains(stderr.String(), "askpass") {
+			return fmt.Errorf("elevation needs an askpass helper: set SUDO_ASKPASS to one, for example /usr/libexec/gcr-ssh-askpass, or run this command under sudo yourself")
+		}
+		// sudo exits with the elevated command's code; its own report
+		// already said everything.
+		return &elevated{exit.ExitCode()}
+	}
+	return fmt.Errorf("elevate this command: %w", err)
+}
+
+// elevatedExit finishes an elevation: the elevated run already reported
+// everything, so nothing is printed and the process exits with its
+// code. A plain error, for an elevation that could not happen, is
+// returned for reporting.
+func elevatedExit(err error) error {
+	var done *elevated
+	if errors.As(err, &done) {
+		os.Exit(done.code)
+	}
+	return err
+}
+
+// userHomes resolves the state and cache homes of the invoking user.
+// sudo resets the environment, so the elevated run gets the values
+// passed through explicitly, with unset variables resolved against the
+// invoking user's home rather than root's.
+func userHomes() (stateHome, cacheHome string, err error) {
+	stateHome = os.Getenv("XDG_STATE_HOME")
+	cacheHome = os.Getenv("XDG_CACHE_HOME")
+	if stateHome != "" && cacheHome != "" {
+		return stateHome, cacheHome, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", "", fmt.Errorf("determine home directory: %w", err)
+	}
+	if stateHome == "" {
+		stateHome = filepath.Join(home, ".local", "state")
+	}
+	if cacheHome == "" {
+		cacheHome = filepath.Join(home, ".cache")
+	}
+	return stateHome, cacheHome, nil
+}
+
+// chownToUser hands path and everything below it back to the invoking
+// user, so state written by an elevated command stays the user's own
+// and every unelevated command keeps working on it. Unelevated nothing
+// was written as root, so it is a no-op.
+func chownToUser(path string) error {
+	uid, uidErr := strconv.Atoi(os.Getenv("SUDO_UID"))
+	if os.Getenv("SUDO_USER") == "" || os.Geteuid() != 0 || uidErr != nil {
+		return nil
+	}
+	gid, _ := strconv.Atoi(os.Getenv("SUDO_GID"))
+	return filepath.WalkDir(path, func(name string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chown(name, uid, gid)
+	})
+}
+
+// podmanPlain builds a podman call against the store of whoever is
+// running: root's under elevation, the invoking user's rootless store
+// otherwise.
+func podmanPlain(args ...string) *exec.Cmd {
+	return exec.Command("podman", args...)
+}
+
+// podmanRootless builds a podman call against the store cluster
+// containers live in: the invoking user's rootless store. Unelevated
+// that is plain podman; elevated, root drops back to the user, which
+// never prompts.
+func podmanRootless(args ...string) *exec.Cmd {
+	user := os.Getenv("SUDO_USER")
+	if user == "" || os.Geteuid() != 0 {
+		return exec.Command("podman", args...)
+	}
+	drop := append([]string{"-u", user, "env", "XDG_RUNTIME_DIR=/run/user/" + os.Getenv("SUDO_UID"), "podman"}, args...)
+	return exec.Command("sudo", drop...)
+}
+
 // newCreateCommand builds the parent of everything creatable. It takes a
 // noun naming what to create: the control plane, or a worker joining a
 // running one. With no noun, or an unknown one, it prints the list and
@@ -1431,7 +1563,7 @@ func streamUntil(ctx context.Context, container, waitingFor string, wait func(co
 	dead := make(chan struct{}, 1)
 	go func() {
 		for {
-			running, err := containerRunning(container)
+			running, err := containerRunning(podmanPlain, container)
 			if err == nil && !running {
 				dead <- struct{}{}
 				return
@@ -1466,11 +1598,13 @@ func stopStreaming(logs *exec.Cmd) {
 	_ = logs.Wait()
 }
 
-// containerRunning reports whether the container is running. A failed
-// inspect, such as under a busy podman, is transient; the boot wait
-// retries it, and the listings read it as not running.
-func containerRunning(container string) (bool, error) {
-	out, err := exec.Command("podman", "inspect", "--format", "{{.State.Running}}", container).Output()
+// containerRunning reports whether the container is running, read
+// through podman: the builder names the store that can see the
+// container. A failed inspect, such as under a busy podman, is
+// transient; the boot wait retries it, and the listings read it as not
+// running.
+func containerRunning(podman func(...string) *exec.Cmd, container string) (bool, error) {
+	out, err := podman("inspect", "--format", "{{.State.Running}}", container).Output()
 	if err != nil {
 		return false, err
 	}
@@ -1619,7 +1753,8 @@ func refuseInvalidClusterName(name string) error {
 // running cluster: it mints the worker's container image and join
 // material, starts one privileged worker container, and waits for the
 // worker's node to register. Without --name the worker is named by
-// counting the cluster's workers.
+// counting the cluster's workers. The whole launch runs under
+// elevation, because workers are rootful.
 func newCreateWorkerCommand() *cobra.Command {
 	var pullSecretPath, name, cluster string
 	var verbose bool
@@ -1628,6 +1763,9 @@ func newCreateWorkerCommand() *cobra.Command {
 		Short:        "Join a worker to a cluster in a podman container",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if os.Geteuid() != 0 {
+				return elevatedExit(elevate())
+			}
 			return runCreateWorker(cmd.Context(), name, cmd.Flags().Changed("name"), cluster, pullSecretPath, verbose)
 		},
 	}
@@ -1704,6 +1842,11 @@ func runCreateWorker(ctx context.Context, name string, explicit bool, cluster, p
 	if err := join.Mint(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), materialDir, name); err != nil {
 		return err
 	}
+	// The worker joins the cluster container's network namespace by its
+	// path: the worker runs rootful, the cluster container rootless, and
+	// root's podman cannot see the container by name — but root can join
+	// any namespace by path.
+	netns := ""
 	if containerMode {
 		// The placement happens before the worker starts, so the OVN
 		// pods the worker's node draws in read the placed objects from
@@ -1715,15 +1858,21 @@ func runCreateWorker(ctx context.Context, name string, explicit bool, cluster, p
 		if err := os.WriteFile(filepath.Join(materialDir, workerNetworkIsolatedFilename), nil, 0o644); err != nil {
 			return fmt.Errorf("write the worker's network marker: %w", err)
 		}
+		netns, err = clusterNetworkNamespace(cluster)
+		if err != nil {
+			return err
+		}
 	}
-	if err := launchWorker(ctx, container, cluster, name, stateDir, materialDir, pullSecretPath, containerMode, verbose); err != nil {
+	if err := launchWorker(ctx, container, cluster, name, stateDir, materialDir, pullSecretPath, netns, verbose); err != nil {
 		// The failure path removed the container, when one started; the
 		// join material is the worker's own ephemera and goes with it,
 		// while the cluster's state stays.
 		_ = os.RemoveAll(materialDir)
 		return err
 	}
-	return nil
+	// The join material was written under elevation; it stays for the
+	// worker's lifetime, so it belongs to the user it belongs to.
+	return chownToUser(materialDir)
 }
 
 // nextWorkerName picks the name a bare worker creation takes: the number
@@ -1731,13 +1880,13 @@ func runCreateWorker(ctx context.Context, name string, explicit bool, cluster, p
 // first free slot — and skips upward past any worker name already in
 // use, so repeated bare commands scale out without colliding.
 func nextWorkerName(cluster string) (string, error) {
-	containers, err := containersNamed(workerContainerPrefix)
+	containers, err := containersNamed(podmanPlain, workerContainerPrefix)
 	if err != nil {
 		return "", err
 	}
 	count := 0
 	for _, container := range containers {
-		if label, err := containerLabel(container, workerClusterLabel); err == nil && label == cluster {
+		if label, err := containerLabel(podmanPlain, container, workerClusterLabel); err == nil && label == cluster {
 			count++
 		}
 	}
@@ -1750,22 +1899,33 @@ func nextWorkerName(cluster string) (string, error) {
 }
 
 // workerJoinsContainer reports whether the cluster the worker joins
-// runs as a container this podman can see, the cluster whose network
-// namespace the worker then shares. A rootful worker cannot see the
-// rootless containers of the user that invoked it, so that pairing is
-// named for what it is instead of being mistaken for a host-mode
-// cluster, whose worker the OVN workloads would never reach.
+// runs as a container in the invoking user's podman, the cluster whose
+// network namespace the worker then joins. Root's podman cannot see
+// that rootless container, so the elevated command drops to the user's
+// podman for the check; what it cannot see is a host-mode cluster.
 func workerJoinsContainer(cluster string) (bool, error) {
 	container := clusterContainerPrefix + cluster
-	if exec.Command("podman", "container", "exists", container).Run() == nil {
+	if podmanRootless("container", "exists", container).Run() == nil {
 		return true, nil
 	}
-	if user := os.Getenv("SUDO_USER"); user != "" && os.Geteuid() == 0 {
-		if exec.Command("sudo", "-u", user, "podman", "container", "exists", container).Run() == nil {
-			return false, fmt.Errorf("cluster %s runs as %s's rootless containers, whose network a rootful worker cannot join;\nrun the worker rootless too, or re-create the cluster under sudo", cluster, user)
-		}
-	}
 	return false, nil
+}
+
+// clusterNetworkNamespace resolves the path of the cluster container's
+// network namespace, read from the user's podman the same way: the
+// container's main process, whose namespace root joins by path. A
+// stopped container has no process left, and no namespace to join.
+func clusterNetworkNamespace(cluster string) (string, error) {
+	container := clusterContainerPrefix + cluster
+	out, err := podmanRootless("inspect", "--format", "{{.State.Pid}}", container).Output()
+	if err != nil {
+		return "", fmt.Errorf("inspect the cluster container: %w", err)
+	}
+	pid := strings.TrimSpace(string(out))
+	if pid == "" || pid == "0" {
+		return "", fmt.Errorf("cluster %s is not running; its network namespace is gone", cluster)
+	}
+	return "/proc/" + pid + "/ns/net", nil
 }
 
 // refusePastaNetwork refuses a worker for a cluster container on the
@@ -1774,7 +1934,7 @@ func workerJoinsContainer(cluster string) (bool, error) {
 // networking would go with it. Clusters created since the shared
 // network exists run on a bridge network instead.
 func refusePastaNetwork(cluster string) error {
-	out, err := exec.Command("podman", "inspect", "--format", "{{.HostConfig.NetworkMode}}", clusterContainerPrefix+cluster).Output()
+	out, err := podmanRootless("inspect", "--format", "{{.HostConfig.NetworkMode}}", clusterContainerPrefix+cluster).Output()
 	if err != nil {
 		return fmt.Errorf("inspect the cluster container: %w", err)
 	}
@@ -1805,7 +1965,7 @@ func refuseSecondWorker(cluster string) error {
 // build resolved lands in the join material, mounted into the worker
 // where its container runtime reads it, the way a real node's
 // configuration delivers the cluster's secret.
-func launchWorker(ctx context.Context, container, cluster, name, stateDir, materialDir, pullSecretPath string, containerMode bool, verbose bool) error {
+func launchWorker(ctx context.Context, container, cluster, name, stateDir, materialDir, pullSecretPath, netns string, verbose bool) error {
 	pullSecret, authfile, cleanup, err := workerPullSecret(ctx, cluster, stateDir, pullSecretPath)
 	if err != nil {
 		return err
@@ -1840,10 +2000,13 @@ func launchWorker(ctx context.Context, container, cluster, name, stateDir, mater
 	}
 
 	fmt.Printf("Starting container %s\n", container)
-	if err := runWorkerPodman(ctx, workerRunArgs(container, cluster, materialDir, imageRef, containerMode)); err != nil {
-		return err
+	run := exec.CommandContext(ctx, "podman", workerRunArgs(container, cluster, materialDir, imageRef, netns)...)
+	run.Stdout = io.Discard // the detached run only prints the container ID
+	run.Stderr = os.Stderr
+	if err := run.Run(); err != nil {
+		return fmt.Errorf("start worker container: %w", err)
 	}
-	return streamUntilWorkerReady(ctx, container, stateDir, name, containerMode)
+	return streamUntilWorkerReady(ctx, container, stateDir, name, netns != "")
 }
 
 // workerPullSecret resolves the pull secret a worker image build pulls
@@ -1896,25 +2059,27 @@ func writeAuthFile(pullSecret []byte) (string, error) {
 // workerRunArgs builds the podman command line that starts a worker
 // container: detached and named, labeled with the cluster it joins, and
 // privileged, which hands it the writable cgroup hierarchy the node side
-// needs. A worker joining a cluster in a container shares that cluster
-// container's network namespace, so its join dials the control plane at
-// the loopback they share and the OVN node pod's host networking
-// configures the interfaces of that namespace, never the host's own; a
-// worker joining a host-mode cluster runs on the host network, and its
-// node stays NotReady, because isolating it there would cut the join.
-// The join material is mounted read-only at the paths the entrypoint
-// reads, with the pull secret at the path the node runtime reads it,
-// and the host's kernel modules read-only for kubelet. The kubelet
-// state directory stays inside the container: workers are ephemeral,
-// recreated rather than restarted.
-func workerRunArgs(container, cluster, materialDir, imageRef string, containerMode bool) []string {
+// needs. A worker joining a cluster in a container joins that cluster
+// container's network namespace by its path — the two podman stores
+// cannot see each other's containers, but the namespace of the cluster
+// container's process is joinable by path — so its join dials the
+// control plane at the loopback they share and the OVN node pod's host
+// networking configures the interfaces of that namespace, never the
+// host's own; a worker joining a host-mode cluster runs on the host
+// network, and its node stays NotReady, because isolating it there
+// would cut the join. The join material is mounted read-only at the
+// paths the entrypoint reads, with the pull secret at the path the node
+// runtime reads it, and the host's kernel modules read-only for kubelet.
+// The kubelet state directory stays inside the container: workers are
+// ephemeral, recreated rather than restarted.
+func workerRunArgs(container, cluster, materialDir, imageRef, netns string) []string {
 	args := []string{
 		"run", "--detach",
 		"--name", container,
 		"--label", workerClusterLabel + "=" + cluster,
 	}
-	if containerMode {
-		args = append(args, "--network", "container:"+clusterContainerPrefix+cluster)
+	if netns != "" {
+		args = append(args, "--network", "ns:"+netns)
 	} else {
 		args = append(args, "--network", "host")
 	}
@@ -1925,37 +2090,10 @@ func workerRunArgs(container, cluster, materialDir, imageRef string, containerMo
 		"--volume", filepath.Join(materialDir, workerPullSecretFilename)+":"+worker.PullSecretMountPath+":ro,z",
 		"--volume", "/lib/modules:/lib/modules:ro",
 	)
-	if containerMode {
+	if netns != "" {
 		args = append(args, "--volume", filepath.Join(materialDir, workerNetworkIsolatedFilename)+":"+worker.NetworkIsolatedPath+":ro,z")
 	}
 	return append(args, imageRef)
-}
-
-// rootlessCgroupRemedy names the requirement a rootless launch that
-// could not delegate cgroups leaves the user with: the worker is the
-// only part of CoreShift that needs rootful podman.
-const rootlessCgroupRemedy = "Rootless podman cannot give kubelet the cgroup hierarchy it needs here.\n" +
-	"Rootful podman is the worker-only requirement: run the same command with sudo."
-
-// runWorkerPodman starts the worker container, under a delegated cgroup
-// scope when rootless: kubelet creates cgroups inside the container,
-// which rootless podman only permits from a subtree systemd delegated to
-// the user, so the launch asks the user's systemd for one.
-func runWorkerPodman(ctx context.Context, args []string) error {
-	command := append([]string{"podman"}, args...)
-	if os.Geteuid() != 0 {
-		if _, err := exec.LookPath("systemd-run"); err != nil {
-			return fmt.Errorf("systemd-run is required to delegate cgroups to a rootless worker container: %w\n%s", err, rootlessCgroupRemedy)
-		}
-		command = append([]string{"systemd-run", "--user", "--scope", "--quiet", "--property=Delegate=yes"}, command...)
-	}
-	run := exec.CommandContext(ctx, command[0], command[1:]...)
-	run.Stdout = io.Discard // the detached run only prints the container ID
-	run.Stderr = os.Stderr
-	if err := run.Run(); err != nil {
-		return fmt.Errorf("start worker container: %w", err)
-	}
-	return nil
 }
 
 // streamUntilWorkerReady follows the worker container's boot output
@@ -2023,14 +2161,10 @@ func printWorkerSummary(container, stateDir, name string, containerMode bool) {
 }
 
 // workerFailure reports a worker container that did not join: the error
-// carries the tail of the container's log, a join that failed on the
-// cgroup hierarchy gains the rootful remedy, and the container is
-// removed while the cluster's state is preserved.
+// carries the tail of the container's log, and the container is removed
+// while the cluster's state is preserved.
 func workerFailure(container, stateDir, name string, err error) error {
 	tail := containerLogTail(container)
-	if strings.Contains(tail, worker.CgroupDelegationMark) {
-		err = fmt.Errorf("%w\n%s", err, rootlessCgroupRemedy)
-	}
 	if tail != "" {
 		err = fmt.Errorf("%w\n\nrecent log output:\n%s", err, tail)
 	}
@@ -2165,13 +2299,13 @@ func runDelete(ctx context.Context, name string, preserveState, preserveWorkers 
 // clusterWorkers lists the names of a cluster's workers: the worker
 // containers carrying its label.
 func clusterWorkers(cluster string) ([]string, error) {
-	containers, err := containersNamed(workerContainerPrefix)
+	containers, err := containersNamed(podmanPlain, workerContainerPrefix)
 	if err != nil {
 		return nil, err
 	}
 	var names []string
 	for _, container := range containers {
-		if label, err := containerLabel(container, workerClusterLabel); err == nil && label == cluster {
+		if label, err := containerLabel(podmanPlain, container, workerClusterLabel); err == nil && label == cluster {
 			names = append(names, strings.TrimPrefix(container, workerContainerPrefix))
 		}
 	}
@@ -2181,7 +2315,7 @@ func clusterWorkers(cluster string) ([]string, error) {
 // newDeleteWorkerCommand builds the command that deletes a worker: its
 // container is stopped and removed, and the node object and machine
 // stand-in its join created go with it, leaving the cluster's node list
-// clean.
+// clean. Deleting a worker runs under elevation, like creating one.
 func newDeleteWorkerCommand() *cobra.Command {
 	var name string
 	cmd := &cobra.Command{
@@ -2189,6 +2323,9 @@ func newDeleteWorkerCommand() *cobra.Command {
 		Short:        "Delete a worker, stopping its container and its node",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if os.Geteuid() != 0 {
+				return elevatedExit(elevate())
+			}
 			return runDeleteWorker(cmd.Context(), name)
 		},
 	}
@@ -2206,7 +2343,7 @@ func runDeleteWorker(ctx context.Context, name string) error {
 	if exec.Command("podman", "container", "exists", container).Run() != nil {
 		return fmt.Errorf("no worker named %s", name)
 	}
-	cluster, err := containerLabel(container, workerClusterLabel)
+	cluster, err := containerLabel(podmanPlain, container, workerClusterLabel)
 	if err != nil {
 		return err
 	}
@@ -2328,7 +2465,7 @@ func runGetClusters() error {
 			release = "-"
 		}
 		ready := "not ready"
-		if running, err := containerRunning(container); err == nil && running && clusterReady(port) {
+		if running, err := containerRunning(podmanPlain, container); err == nil && running && clusterReady(port) {
 			ready = "ready"
 		}
 		fmt.Fprintf(w, "%s\t%d\t%s\t%s\n", name, port, release, ready)
@@ -2388,7 +2525,7 @@ func runGetWorkers() error {
 	if _, err := exec.LookPath("podman"); err != nil {
 		return fmt.Errorf("podman is required to list workers: %w", err)
 	}
-	containers, err := containersNamed(workerContainerPrefix)
+	containers, err := containersNamed(podmanPlain, workerContainerPrefix)
 	if err != nil {
 		return err
 	}
@@ -2402,9 +2539,9 @@ func runGetWorkers() error {
 		name := strings.TrimPrefix(container, workerContainerPrefix)
 		cluster := "-"
 		ready := "not ready"
-		if label, err := containerLabel(container, workerClusterLabel); err == nil && label != "" {
+		if label, err := containerLabel(podmanPlain, container, workerClusterLabel); err == nil && label != "" {
 			cluster = label
-			if running, err := containerRunning(container); err == nil && running {
+			if running, err := containerRunning(podmanPlain, container); err == nil && running {
 				if _, stateDir, err := workerClusterTarget(label); err == nil && workerNodeReady(stateDir, name) {
 					ready = "ready"
 				}
@@ -2444,7 +2581,7 @@ func workerNodeReady(stateDir, name string) bool {
 // every container named coreshift-* is one, except the workers, which
 // share the prefix and are listed by their own command.
 func clusterContainers() ([]string, error) {
-	containers, err := containersNamed(clusterContainerPrefix)
+	containers, err := containersNamed(podmanPlain, clusterContainerPrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -2458,9 +2595,10 @@ func clusterContainers() ([]string, error) {
 }
 
 // containersNamed returns the names of the containers carrying the given
-// prefix, sorted.
-func containersNamed(prefix string) ([]string, error) {
-	out, err := exec.Command("podman", "ps", "-a", "--format", "{{.Names}}").Output()
+// prefix, sorted, read through podman: the builder names the store that
+// can see them.
+func containersNamed(podman func(...string) *exec.Cmd, prefix string) ([]string, error) {
+	out, err := podman("ps", "-a", "--format", "{{.Names}}").Output()
 	if err != nil {
 		return nil, fmt.Errorf("list containers: %w", err)
 	}
@@ -2477,10 +2615,12 @@ func containersNamed(prefix string) ([]string, error) {
 // clusterTarget resolves a cluster running in a container to its port and
 // state directory, refusing when no cluster with that name exists. The
 // state directory comes from the name directly; only the port is asked of
-// the container, which is where this deployment's API server binds.
+// the container, which is where this deployment's API server binds. The
+// container lives in the invoking user's rootless store, whichever side
+// asks.
 func clusterTarget(name string) (int, string, error) {
 	container := clusterContainerPrefix + name
-	if exec.Command("podman", "container", "exists", container).Run() != nil {
+	if podmanRootless("container", "exists", container).Run() != nil {
 		return 0, "", unknownCluster(name)
 	}
 	port, err := containerPort(container)
@@ -2534,9 +2674,10 @@ func kubeconfigServerPort(stateDir string) int {
 }
 
 // containerLabel returns the value of a container's label, or an empty
-// string when the container carries none.
-func containerLabel(container, label string) (string, error) {
-	out, err := exec.Command("podman", "inspect", "--format",
+// string when the container carries none, reading it through podman:
+// the builder names the store that can see the container.
+func containerLabel(podman func(...string) *exec.Cmd, container, label string) (string, error) {
+	out, err := podman("inspect", "--format",
 		fmt.Sprintf(`{{index .Config.Labels %q}}`, label), container).Output()
 	if err != nil {
 		return "", fmt.Errorf("inspect container %s: %w", container, err)
@@ -2545,12 +2686,13 @@ func containerLabel(container, label string) (string, error) {
 }
 
 // containerPort returns the port a cluster container publishes its API
-// on. The create command publishes the API as an identity mapping, so
-// among the container's mappings — the OAuth login endpoint's is the only
-// other one — the API's is the one whose host side matches its container
+// on, read from the store cluster containers live in. The create
+// command publishes the API as an identity mapping, so among the
+// container's mappings — the OAuth login endpoint's is the only other
+// one — the API's is the one whose host side matches its container
 // side, and the host port is the port the cluster runs on.
 func containerPort(container string) (int, error) {
-	out, err := exec.Command("podman", "inspect", "--format",
+	out, err := podmanRootless("inspect", "--format",
 		"{{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{.HostPort}} {{$port}}{{println}}{{end}}{{end}}",
 		container).Output()
 	if err != nil {
