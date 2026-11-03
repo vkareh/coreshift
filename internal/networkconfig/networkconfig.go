@@ -1,11 +1,14 @@
-// Package networkconfig seeds the network configuration the cluster
-// network operator reads. The release payload carries the cluster
-// network object only as a create-only empty shell — the ranges are
-// installer output, and the operator refuses an empty configuration —
-// and nothing carries the probed host MTU, which the operator's prober
-// job records from a node this control plane does not have. This
-// package stands in for both the way the pull secret and the OAuth
-// client stand in for theirs: cluster inputs, not payload manifests.
+// Package networkconfig seeds the installer's network-relevant cluster
+// configuration, the records the cluster network operator reads that
+// nothing else delivers. The release payload carries the cluster
+// network and infrastructure objects only as create-only empty shells
+// — the ranges and the infrastructure record are installer output —
+// nothing carries the install config record the operator counts
+// control plane replicas from, and nothing carries the probed host MTU,
+// which the operator's prober job records from a node this control
+// plane does not have. This package stands in for all of them the way
+// the pull secret and the OAuth client stand in for theirs: cluster
+// inputs, not payload manifests.
 package networkconfig
 
 import (
@@ -38,13 +41,20 @@ const (
 // payload's default network MTU assumes beneath its encapsulation.
 const probedMTU = "1500"
 
-// The objects the seed writes: the cluster network configuration and,
-// in the operator's namespace, the record the prober leaves behind.
+// The objects the seed writes: the cluster network configuration, the
+// cluster's infrastructure record, the install config record in
+// kube-system, and in the operator's namespace the record the prober
+// leaves behind.
 var (
 	networks = schema.GroupVersionResource{
 		Group:    "config.openshift.io",
 		Version:  "v1",
 		Resource: "networks",
+	}
+	infrastructures = schema.GroupVersionResource{
+		Group:    "config.openshift.io",
+		Version:  "v1",
+		Resource: "infrastructures",
 	}
 	configMaps = schema.GroupVersionResource{
 		Version:  "v1",
@@ -52,19 +62,21 @@ var (
 	}
 	probedMTUNamespace = "openshift-network-operator"
 	probedMTUName      = "mtu"
+	installConfigName  = "cluster-config-v1"
 )
 
 // objectRetryInterval spaces out retries while the version operator is
-// still delivering the definitions and namespaces these writes land
+// still delivering the definitions and objects these writes land
 // against. A variable for test override.
 var objectRetryInterval = 3 * time.Second
 
-// Seed writes the network configuration through the admin kubeconfig:
+// Seed writes the installer's records through the admin kubeconfig:
 // the cluster network object with the ranges the control plane runs
-// with, then the probed MTU record. Both writes are retried and
-// idempotent, and an object that already carries its configuration —
-// a warm re-boot's — is left exactly as it is.
-func Seed(ctx context.Context, kubeconfigPath string) error {
+// with, the infrastructure record the operator renders by, the install
+// config record, and the probed MTU. The writes are retried and
+// idempotent, and an object that already carries its record — a warm
+// re-boot's — is left exactly as it is.
+func Seed(ctx context.Context, kubeconfigPath, apiServerURL, clusterName string) error {
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("load kubeconfig: %w", err)
@@ -73,16 +85,16 @@ func Seed(ctx context.Context, kubeconfigPath string) error {
 	if err != nil {
 		return fmt.Errorf("create dynamic client: %w", err)
 	}
-	return seedWithRetry(ctx, client)
+	return seedWithRetry(ctx, client, apiServerURL, clusterName)
 }
 
 // seedWithRetry keeps retrying until the context expires. The version
 // operator's delivery decides when the writes can land, so early
 // failures are expected and retried.
-func seedWithRetry(ctx context.Context, client dynamic.Interface) error {
+func seedWithRetry(ctx context.Context, client dynamic.Interface, apiServerURL, clusterName string) error {
 	var lastErr error
 	pollErr := wait.PollUntilContextCancel(ctx, objectRetryInterval, true, func(ctx context.Context) (bool, error) {
-		if lastErr = seed(ctx, client); lastErr != nil {
+		if lastErr = seed(ctx, client, apiServerURL, clusterName); lastErr != nil {
 			return false, nil
 		}
 		return true, nil
@@ -96,8 +108,14 @@ func seedWithRetry(ctx context.Context, client dynamic.Interface) error {
 	return nil
 }
 
-func seed(ctx context.Context, client dynamic.Interface) error {
+func seed(ctx context.Context, client dynamic.Interface, apiServerURL, clusterName string) error {
 	if err := ensureNetwork(ctx, client); err != nil {
+		return err
+	}
+	if err := ensureInfrastructure(ctx, client, apiServerURL, clusterName); err != nil {
+		return err
+	}
+	if err := ensureInstallConfig(ctx, client); err != nil {
 		return err
 	}
 	return ensureProbedMTU(ctx, client)
@@ -161,6 +179,86 @@ func ensureProbedMTU(ctx context.Context, client dynamic.Interface) error {
 		"data":       map[string]any{"mtu": probedMTU},
 	}}
 	_, err := client.Resource(configMaps).Namespace(probedMTUNamespace).Create(ctx, object, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(err) {
+		return nil
+	}
+	return err
+}
+
+// infrastructureStatus returns the status the installer writes for a
+// default install on no platform: the API endpoint this control plane
+// serves as both its public and internal address, the cluster's name
+// as its infrastructure name, and the highly available topologies the
+// payload's standard manifests assume.
+func infrastructureStatus(apiServerURL, clusterName string) map[string]any {
+	return map[string]any{
+		"infrastructureName":   clusterName,
+		"apiServerURL":         apiServerURL,
+		"apiServerInternalURI": apiServerURL,
+		"platformStatus":       map[string]any{"type": "None"},
+		"controlPlaneTopology": "HighlyAvailable",
+		"infrastructureTopology": "HighlyAvailable",
+	}
+}
+
+// ensureInfrastructure fills the cluster's infrastructure record. The
+// payload delivers the object as a create-only empty shell and the
+// installer owns its status; the operator reads the platform and
+// topologies to pick what it renders, so the record must exist before
+// it reconciles. The payload's object is waited for, never created, and
+// one that already carries a platform — a warm re-boot's — is left
+// untouched. The status is written through the status subresource: the
+// main resource ignores it.
+func ensureInfrastructure(ctx context.Context, client dynamic.Interface, apiServerURL, clusterName string) error {
+	existing, err := client.Resource(infrastructures).Get(ctx, "cluster", metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if _, found, _ := unstructured.NestedString(existing.Object, "status", "platformStatus", "type"); found {
+		return nil
+	}
+	if err := unstructured.SetNestedMap(existing.Object, infrastructureStatus(apiServerURL, clusterName), "status"); err != nil {
+		return err
+	}
+	_, err = client.Resource(infrastructures).UpdateStatus(ctx, existing, metav1.UpdateOptions{})
+	return err
+}
+
+// installConfig is the installer's record of the install config, the
+// redacted document it stores in kube-system: the cluster's shape as
+// this run stands in for it. The operator reads the control plane's
+// replica count from it when it renders.
+const installConfig = `compute:
+- name: worker
+  replicas: 0
+controlPlane:
+  name: master
+  replicas: 3
+networking:
+  clusterNetwork:
+  - cidr: 10.128.0.0/14
+    hostPrefix: 23
+  machineNetwork:
+  - cidr: 10.0.0.0/16
+  networkType: OVNKubernetes
+  serviceNetwork:
+  - 172.30.0.0/16
+platform:
+  none: {}
+`
+
+// ensureInstallConfig stores the installer's record of the install
+// config. Nothing in the payload carries it; the operator counts the
+// control plane's replicas from it, so it must exist before it
+// reconciles. An existing record is never overwritten.
+func ensureInstallConfig(ctx context.Context, client dynamic.Interface) error {
+	object := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata":   map[string]any{"name": installConfigName, "namespace": "kube-system"},
+		"data":       map[string]any{"install-config": installConfig},
+	}}
+	_, err := client.Resource(configMaps).Namespace("kube-system").Create(ctx, object, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
 		return nil
 	}

@@ -27,6 +27,8 @@ type openshiftComponent struct {
 // those are embedded in the coreshift binary instead of extracted here.
 // cluster-network-operator renders its workloads from the bindata
 // directory beside its binary, so its extraction carries that too.
+// cluster-config-api is extracted for its feature set writer, which
+// renders the release's feature gates.
 var openshiftComponents = []openshiftComponent{
 	{component: "openshift-apiserver", path: "/usr/bin/openshift-apiserver"},
 	{component: "oauth-apiserver", path: "/usr/bin/oauth-apiserver"},
@@ -36,6 +38,7 @@ var openshiftComponents = []openshiftComponent{
 	{component: "cluster-machine-approver", path: "/usr/bin/machine-approver"},
 	{component: "cluster-version-operator", path: "/usr/bin/cluster-version-operator"},
 	{component: "cluster-network-operator", path: "/usr/bin/cluster-network-operator", dirs: []string{"/bindata"}},
+	{component: "cluster-config-api", path: "/usr/bin/write-available-featuresets"},
 }
 
 // ExtractOpenShiftComponents resolves each requested OpenShift API layer

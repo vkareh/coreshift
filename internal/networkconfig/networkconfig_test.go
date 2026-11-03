@@ -41,6 +41,19 @@ func object(t *testing.T, manifest string) *unstructured.Unstructured {
 	return parsed
 }
 
+// infrastructureShell returns the infrastructure object the payload
+// delivers: a create-only empty shell.
+func infrastructureShell(t *testing.T) *unstructured.Unstructured {
+	return object(t, `apiVersion: config.openshift.io/v1
+kind: Infrastructure
+metadata:
+  name: cluster
+  annotations:
+    release.openshift.io/create-only: "true"
+spec: {}
+`)
+}
+
 // readNetwork returns the cluster network configuration.
 func readNetwork(t *testing.T, client *dynamicfake.FakeDynamicClient) *unstructured.Unstructured {
 	t.Helper()
@@ -83,22 +96,63 @@ func checkSpec(t *testing.T, network *unstructured.Unstructured) {
 	}
 }
 
-// TestSeedCreatesTheConfiguration checks a fresh boot: both objects the
-// operator reads exist afterwards, carrying what the control plane
-// runs with.
+// TestSeedCreatesTheConfiguration checks a fresh boot: every record
+// the operator reads exists afterwards, carrying what the control
+// plane runs with.
 func TestSeedCreatesTheConfiguration(t *testing.T) {
 	objectRetryInterval = time.Millisecond
 	t.Cleanup(func() { objectRetryInterval = 3 * time.Second })
 
-	client := newClient()
-	if err := seedWithRetry(context.Background(), client); err != nil {
+	client := newClient(infrastructureShell(t))
+	if err := seedWithRetry(context.Background(), client, "https://api.example.com:6443", "example"); err != nil {
 		t.Fatal(err)
 	}
 
 	checkSpec(t, readNetwork(t, client))
+	checkInfrastructureStatus(t, readInfrastructure(t, client))
+	checkInstallConfig(t, client)
 	mtu, _, _ := unstructured.NestedString(readProbedMTU(t, client).Object, "data", "mtu")
 	if mtu != probedMTU {
 		t.Fatalf("probed MTU = %q, want %s", mtu, probedMTU)
+	}
+}
+
+// readInfrastructure returns the cluster's infrastructure record.
+func readInfrastructure(t *testing.T, client *dynamicfake.FakeDynamicClient) *unstructured.Unstructured {
+	t.Helper()
+	infrastructure, err := client.Resource(infrastructures).Get(context.Background(), "cluster", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("read the cluster infrastructure: %v", err)
+	}
+	return infrastructure
+}
+
+// checkInfrastructureStatus fails unless the record carries the
+// platform and topologies a default install records.
+func checkInfrastructureStatus(t *testing.T, infrastructure *unstructured.Unstructured) {
+	t.Helper()
+	platform, _, _ := unstructured.NestedString(infrastructure.Object, "status", "platformStatus", "type")
+	if platform != "None" {
+		t.Fatalf("platform = %q, want None", platform)
+	}
+	for _, field := range []string{"controlPlaneTopology", "infrastructureTopology"} {
+		if topology, _, _ := unstructured.NestedString(infrastructure.Object, "status", field); topology != "HighlyAvailable" {
+			t.Fatalf("%s = %q, want HighlyAvailable", field, topology)
+		}
+	}
+}
+
+// checkInstallConfig fails unless the install config record exists and
+// carries the control plane replica count.
+func checkInstallConfig(t *testing.T, client *dynamicfake.FakeDynamicClient) {
+	t.Helper()
+	record, err := client.Resource(configMaps).Namespace("kube-system").Get(context.Background(), installConfigName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("read the install config record: %v", err)
+	}
+	data, _, _ := unstructured.NestedString(record.Object, "data", "install-config")
+	if !strings.Contains(data, "replicas: 3") {
+		t.Fatalf("install config record = %q, want the control plane replica count", data)
 	}
 }
 
@@ -117,8 +171,8 @@ metadata:
     release.openshift.io/create-only: "true"
 spec: {}
 `)
-	client := newClient(shell)
-	if err := seedWithRetry(context.Background(), client); err != nil {
+	client := newClient(shell, infrastructureShell(t))
+	if err := seedWithRetry(context.Background(), client, "https://api.example.com:6443", "example"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -145,8 +199,8 @@ spec:
 status:
   networkType: OVNKubernetes
 `)
-	client := newClient(configured)
-	if err := seedWithRetry(context.Background(), client); err != nil {
+	client := newClient(configured, infrastructureShell(t))
+	if err := seedWithRetry(context.Background(), client, "https://api.example.com:6443", "example"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -173,8 +227,8 @@ metadata:
 data:
   mtu: "9001"
 `)
-	client := newClient(record)
-	if err := seedWithRetry(context.Background(), client); err != nil {
+	client := newClient(record, infrastructureShell(t))
+	if err := seedWithRetry(context.Background(), client, "https://api.example.com:6443", "example"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -191,7 +245,7 @@ func TestSeedRetriesUntilDelivery(t *testing.T) {
 	objectRetryInterval = time.Millisecond
 	t.Cleanup(func() { objectRetryInterval = 3 * time.Second })
 
-	client := newClient()
+	client := newClient(infrastructureShell(t))
 	var missing atomic.Bool
 	missing.Store(true)
 	client.PrependReactor("create", "networks", func(action ktesting.Action) (bool, runtime.Object, error) {
@@ -202,7 +256,7 @@ func TestSeedRetriesUntilDelivery(t *testing.T) {
 	})
 	delivered := make(chan struct{})
 	go func() {
-		_ = seedWithRetry(context.Background(), client)
+		_ = seedWithRetry(context.Background(), client, "https://api.example.com:6443", "example")
 		close(delivered)
 	}()
 	select {
@@ -233,7 +287,7 @@ metadata:
   name: cluster
 spec: {}
 `)
-	client := newClient()
+	client := newClient(infrastructureShell(t))
 	client.PrependReactor("create", "networks", func(action ktesting.Action) (bool, runtime.Object, error) {
 		// The version operator delivers its empty shell while the
 		// seed's create is in flight; the create lands second.
@@ -243,7 +297,7 @@ spec: {}
 		return true, nil, apierrors.NewAlreadyExists(schema.GroupResource{Group: "config.openshift.io", Resource: "networks"}, "cluster")
 	})
 
-	if err := seedWithRetry(context.Background(), client); err != nil {
+	if err := seedWithRetry(context.Background(), client, "https://api.example.com:6443", "example"); err != nil {
 		t.Fatal(err)
 	}
 	checkSpec(t, readNetwork(t, client))
@@ -257,13 +311,70 @@ func TestSeedReportsWriteFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	client := newClient()
+	client := newClient(infrastructureShell(t))
 	client.PrependReactor("create", "configmaps", func(action ktesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("injected failure")
 	})
 
-	err := seedWithRetry(ctx, client)
+	err := seedWithRetry(ctx, client, "https://api.example.com:6443", "example")
 	if err == nil || !strings.Contains(err.Error(), "injected failure") {
 		t.Fatalf("error = %v, want the injected failure named", err)
+	}
+}
+
+// TestSeedLeavesRecordedInfrastructureAlone checks a warm boot: an
+// infrastructure record the installer already wrote survives the seed
+// untouched.
+func TestSeedLeavesRecordedInfrastructureAlone(t *testing.T) {
+	objectRetryInterval = time.Millisecond
+	t.Cleanup(func() { objectRetryInterval = 3 * time.Second })
+
+	recorded := object(t, `apiVersion: config.openshift.io/v1
+kind: Infrastructure
+metadata:
+  name: cluster
+spec: {}
+status:
+  platformStatus:
+    type: BareMetal
+`)
+	client := newClient(recorded)
+	if err := seedWithRetry(context.Background(), client, "https://api.example.com:6443", "example"); err != nil {
+		t.Fatal(err)
+	}
+
+	if platform, _, _ := unstructured.NestedString(readInfrastructure(t, client).Object, "status", "platformStatus", "type"); platform != "BareMetal" {
+		t.Fatalf("platform = %q, want the recorded record kept", platform)
+	}
+}
+
+// TestSeedKeepsExistingInstallConfig checks an existing install config
+// record is never overwritten.
+func TestSeedKeepsExistingInstallConfig(t *testing.T) {
+	objectRetryInterval = time.Millisecond
+	t.Cleanup(func() { objectRetryInterval = 3 * time.Second })
+
+	record := object(t, `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-config-v1
+  namespace: kube-system
+data:
+  install-config: |
+    controlPlane:
+      replicas: 1
+`)
+	client := newClient(record, infrastructureShell(t))
+	if err := seedWithRetry(context.Background(), client, "https://api.example.com:6443", "example"); err != nil {
+		t.Fatal(err)
+	}
+
+	existing, err := client.Resource(configMaps).Namespace("kube-system").Get(context.Background(), installConfigName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _, _ := unstructured.NestedString(existing.Object, "data", "install-config")
+	if !strings.Contains(data, "replicas: 1") {
+		t.Fatalf("install config record = %q, want the existing record kept", data)
 	}
 }

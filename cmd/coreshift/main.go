@@ -40,6 +40,7 @@ import (
 	"github.com/vkareh/coreshift/internal/certgen"
 	"github.com/vkareh/coreshift/internal/clusterversion"
 	"github.com/vkareh/coreshift/internal/crd"
+	"github.com/vkareh/coreshift/internal/featuregates"
 	"github.com/vkareh/coreshift/internal/gate"
 	"github.com/vkareh/coreshift/internal/gpgme"
 	"github.com/vkareh/coreshift/internal/join"
@@ -359,7 +360,7 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 		return fmt.Errorf("extract kube components: %w", err)
 	}
 	openShiftBinaries, err := client.ExtractOpenShiftComponents(ctx, releaseRoot,
-		"openshift-apiserver", "oauth-apiserver", "oauth-server", "openshift-controller-manager", "cluster-policy-controller", "cluster-machine-approver", "cluster-version-operator", "cluster-network-operator")
+		"openshift-apiserver", "oauth-apiserver", "oauth-server", "openshift-controller-manager", "cluster-policy-controller", "cluster-machine-approver", "cluster-version-operator", "cluster-network-operator", "cluster-config-api")
 	if err != nil {
 		return fmt.Errorf("extract openshift components: %w", err)
 	}
@@ -613,12 +614,22 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 			// The operator reads cluster configuration from its first
 			// moments and waits for the version object before applying
 			// anything, so its prerequisites are seeded here, after every
-			// earlier seed has run, right before it starts.
+			// earlier seed has run, right before it starts: the objects
+			// it waits for, then the feature gate record its operand
+			// maintains in a real cluster — the network operator's
+			// feature gate reader requires it, and the version
+			// operator's own stop-on-change controller must find it
+			// already in place.
 			BeforeStart: func(ctx context.Context) error {
 				ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 				defer cancel()
 				fmt.Println("Seeding cluster version operator prerequisites")
-				return clusterversion.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), payloadDir)
+				if err := clusterversion.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), payloadDir); err != nil {
+					return err
+				}
+				fmt.Println("Seeding feature gate record")
+				return featuregates.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename),
+					openShiftBinaries["cluster-config-api"], payloadDir)
 			},
 		},
 		{
@@ -828,7 +839,7 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 				ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 				defer cancel()
 				fmt.Println("Seeding network configuration")
-				return networkconfig.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
+				return networkconfig.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), apiServerURL(port), name)
 			},
 		},
 	}
