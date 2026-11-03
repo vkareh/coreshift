@@ -133,3 +133,48 @@ func TestSelectClusterVersionOperatorBinary(t *testing.T) {
 		t.Fatalf("cluster-version-operator path = %q, want /usr/bin/cluster-version-operator", selected[0].path)
 	}
 }
+
+func TestSelectClusterNetworkOperatorBinary(t *testing.T) {
+	selected, err := selectOpenShiftComponents("cluster-network-operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The release image runs this binary as its own entrypoint, and it
+	// renders its workloads from the bindata directory beside it.
+	if selected[0].path != "/usr/bin/cluster-network-operator" {
+		t.Fatalf("cluster-network-operator path = %q, want /usr/bin/cluster-network-operator", selected[0].path)
+	}
+	if len(selected[0].dirs) != 1 || selected[0].dirs[0] != "/bindata" {
+		t.Fatalf("cluster-network-operator dirs = %v, want /bindata", selected[0].dirs)
+	}
+}
+
+func TestCopyOpenShiftDirs(t *testing.T) {
+	root := t.TempDir()
+	writeImageFiles(t, root, "/bindata/network/ovn-kubernetes/000-ns.yaml")
+	target := t.TempDir()
+
+	if err := copyOpenShiftDirs(findOpenShiftComponent(t, "cluster-network-operator"), root, target); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(target, "bindata", "network", "ovn-kubernetes", "000-ns.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) == 0 {
+		t.Fatal("bindata file copied empty")
+	}
+
+	noDirs := findOpenShiftComponent(t, "openshift-apiserver")
+	if err := copyOpenShiftDirs(noDirs, root, target); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "bindata" {
+		t.Fatalf("target has %v, want only the copied directory", entries)
+	}
+}

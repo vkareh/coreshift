@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 )
@@ -14,12 +15,18 @@ import (
 type openshiftComponent struct {
 	component string
 	path      string
+	// dirs are directories beside the binary in the image that the
+	// component reads at runtime, copied into the extraction beside the
+	// binary.
+	dirs []string
 }
 
 // openshiftComponents lists the OpenShift API layer components and their
 // binary paths inside their images, in extraction order. openshift-
 // controller-manager links against the gpgme libraries beyond glibc;
 // those are embedded in the coreshift binary instead of extracted here.
+// cluster-network-operator renders its workloads from the bindata
+// directory beside its binary, so its extraction carries that too.
 var openshiftComponents = []openshiftComponent{
 	{component: "openshift-apiserver", path: "/usr/bin/openshift-apiserver"},
 	{component: "oauth-apiserver", path: "/usr/bin/oauth-apiserver"},
@@ -28,6 +35,7 @@ var openshiftComponents = []openshiftComponent{
 	{component: "cluster-policy-controller", path: "/usr/bin/cluster-policy-controller"},
 	{component: "cluster-machine-approver", path: "/usr/bin/machine-approver"},
 	{component: "cluster-version-operator", path: "/usr/bin/cluster-version-operator"},
+	{component: "cluster-network-operator", path: "/usr/bin/cluster-network-operator", dirs: []string{"/bindata"}},
 }
 
 // ExtractOpenShiftComponents resolves each requested OpenShift API layer
@@ -77,21 +85,36 @@ func selectOpenShiftComponents(names ...string) ([]openshiftComponent, error) {
 }
 
 // extractOpenShiftComponent resolves one component's image from a
-// cached release manifest, extracts the binary into the cache, and
-// returns the extracted binary path.
+// cached release manifest, extracts the binary and any directories it
+// reads at runtime into the cache, and returns the extracted binary
+// path.
 func (c *Client) extractOpenShiftComponent(ctx context.Context, releaseRoot string, component openshiftComponent) (string, error) {
 	imageRef, err := ResolveComponentImage(releaseRoot, component.component)
 	if err != nil {
 		return "", fmt.Errorf("resolve %s image: %w", component.component, err)
 	}
 	dir, err := c.extractCached(ctx, componentsKind, imageRef, func(filesystem, target string) error {
-		_, err := extractOpenShiftBinary(component, filesystem, target)
-		return err
+		if _, err := extractOpenShiftBinary(component, filesystem, target); err != nil {
+			return err
+		}
+		return copyOpenShiftDirs(component, filesystem, target)
 	})
 	if err != nil {
 		return "", fmt.Errorf("extract %s: %w", component.component, err)
 	}
 	return filepath.Join(dir, filepath.Base(component.path)), nil
+}
+
+// copyOpenShiftDirs copies the directories a component reads at runtime
+// from its unpacked image filesystem into the extraction beside its
+// binary, keeping their basename.
+func copyOpenShiftDirs(component openshiftComponent, filesystemRoot, target string) error {
+	for _, dir := range component.dirs {
+		if err := os.CopyFS(filepath.Join(target, filepath.Base(dir)), os.DirFS(filepath.Join(filesystemRoot, dir))); err != nil {
+			return fmt.Errorf("copy %s: %w", dir, err)
+		}
+	}
+	return nil
 }
 
 // extractOpenShiftBinary copies one component's binary from its unpacked
