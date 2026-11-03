@@ -44,6 +44,7 @@ import (
 	"github.com/vkareh/coreshift/internal/gpgme"
 	"github.com/vkareh/coreshift/internal/join"
 	"github.com/vkareh/coreshift/internal/mint"
+	"github.com/vkareh/coreshift/internal/networkconfig"
 	"github.com/vkareh/coreshift/internal/oauth"
 	"github.com/vkareh/coreshift/internal/oauthclient"
 	"github.com/vkareh/coreshift/internal/pullsecret"
@@ -104,6 +105,7 @@ const (
 	openShiftControllerManagerPort = 8446
 	clusterPolicyControllerPort    = 10357
 	machineApproverMetricsPort     = 9191
+	networkOperatorMetricsPort     = 9104
 )
 
 // The etcd endpoints built from the ports above, so they cannot drift.
@@ -119,7 +121,7 @@ var reservedPorts = []int{
 	etcdClientPort, etcdPeerPort,
 	openShiftAPIServerPort, oauthAPIServerPort, oauthServerPort,
 	openShiftControllerManagerPort, clusterPolicyControllerPort,
-	machineApproverMetricsPort,
+	machineApproverMetricsPort, networkOperatorMetricsPort,
 }
 
 // refuseReservedPort refuses an API port a control-plane child listens
@@ -357,7 +359,7 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 		return fmt.Errorf("extract kube components: %w", err)
 	}
 	openShiftBinaries, err := client.ExtractOpenShiftComponents(ctx, releaseRoot,
-		"openshift-apiserver", "oauth-apiserver", "oauth-server", "openshift-controller-manager", "cluster-policy-controller", "cluster-machine-approver", "cluster-version-operator")
+		"openshift-apiserver", "oauth-apiserver", "oauth-server", "openshift-controller-manager", "cluster-policy-controller", "cluster-machine-approver", "cluster-version-operator", "cluster-network-operator")
 	if err != nil {
 		return fmt.Errorf("extract openshift components: %w", err)
 	}
@@ -441,6 +443,34 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 	controllerRBAC := []gate.Object{
 		gate.ClusterRole("system:openshift:scc:restricted-v3"),
 		gate.ClusterRoleBinding("system:openshift:scc:restricted-v3"),
+	}
+
+	// The network operator maps a broad slice of the API before its
+	// controllers can start: its watchers resolve the config, operator,
+	// and machine-configuration APIs, and its status machinery reads the
+	// network ClusterOperator the payload carries. The version operator
+	// delivers every one; the binding behind the operator's own
+	// service-account identity is in the set for the same reason the
+	// approver's is.
+	networkOperatorWaits := []gate.Object{
+		gate.Definition("networks.config.openshift.io"),
+		gate.Definition("networks.operator.openshift.io"),
+		gate.Definition("egressrouters.network.operator.openshift.io"),
+		gate.Definition("operatorpkis.network.operator.openshift.io"),
+		gate.Definition("infrastructures.config.openshift.io"),
+		gate.Definition("proxies.config.openshift.io"),
+		gate.Definition("ingresscontrollers.operator.openshift.io"),
+		gate.Definition("machineconfigs.machineconfiguration.openshift.io"),
+		gate.Definition("machineconfigpools.machineconfiguration.openshift.io"),
+		gate.ClusterOperator("network"),
+		gate.ClusterRoleBinding("cluster-network-operator"),
+	}
+
+	// The environment the network operator's payload deployment gives
+	// it, with every image resolved from the release the run resolved.
+	networkOperatorEnvironment, err := networkOperatorEnv(releaseRoot, payloadDir)
+	if err != nil {
+		return fmt.Errorf("build the network operator environment: %w", err)
 	}
 
 	// Flag sets verified against the 4.22.8 payload: kube-apiserver reaches
@@ -762,6 +792,45 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 					gate.ClusterRoleBinding("system:openshift:controller:machine-approver"))
 			},
 		},
+		// The network operator deploys the cluster's network stack: it
+		// reads the network configuration and renders the real
+		// OVN-Kubernetes workloads from the bindata beside its binary,
+		// running for the control plane's lifetime. The flags and the
+		// environment mirror its payload's deployment — the metrics
+		// listener, and the release version and images rendered into its
+		// workloads — with the kubeconfig following the component
+		// pattern under the payload's own service-account identity,
+		// whose cluster-admin the payload's binding grants. Its start
+		// gates on the API definitions its watchers map, and the network
+		// configuration it reconciles is seeded in ahead of it. The
+		// workloads it creates select nodes this control plane runs none
+		// of, so they sit unscheduled: deployed, honest about it, the
+		// same truth the payload's other Deployments tell.
+		{
+			Name: "cluster-network-operator",
+			Path: openShiftBinaries["cluster-network-operator"],
+			// The operator reads its bindata relative to its working
+			// directory, the way its image runs it from the image root.
+			Dir: filepath.Dir(openShiftBinaries["cluster-network-operator"]),
+			Args: []string{
+				"start",
+				"--listen=0.0.0.0:" + strconv.Itoa(networkOperatorMetricsPort),
+				"--kubeconfig=" + filepath.Join(stateDir, certgen.ClusterNetworkOperatorKubeconfigFilename),
+				// The deployment's pod reads its namespace from its
+				// service account; a bare process names it the same way.
+				"--namespace=openshift-network-operator",
+			},
+			Env: networkOperatorEnvironment,
+			BeforeStart: func(ctx context.Context) error {
+				if err := gateOn(ctx, "the network operator's APIs", networkOperatorWaits...); err != nil {
+					return err
+				}
+				ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				defer cancel()
+				fmt.Println("Seeding network configuration")
+				return networkconfig.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
+			},
+		},
 	}
 
 	sup := &supervisor.Supervisor{
@@ -780,6 +849,65 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 		},
 	}
 	return sup.Run(ctx, processes)
+}
+
+// networkOperatorImages lists the image variables the network
+// operator's payload deployment sets, each with the release component
+// its image comes from, so the workloads the operator renders carry
+// the payload's real images. The table is verified against the 4.22
+// payload's deployment; the misspelled route override variable is the
+// deployment's own, kept verbatim.
+var networkOperatorImages = []struct{ env, component string }{
+	{"KUBE_PROXY_IMAGE", "kube-proxy"},
+	{"KUBE_RBAC_PROXY_IMAGE", "kube-rbac-proxy"},
+	{"MULTUS_IMAGE", "multus-cni"},
+	{"MULTUS_ADMISSION_CONTROLLER_IMAGE", "multus-admission-controller"},
+	{"CNI_PLUGINS_IMAGE", "container-networking-plugins"},
+	{"BOND_CNI_PLUGIN_IMAGE", "network-interface-bond-cni"},
+	{"WHEREABOUTS_CNI_IMAGE", "multus-whereabouts-ipam-cni"},
+	{"ROUTE_OVERRRIDE_CNI_IMAGE", "multus-route-override-cni"},
+	{"MULTUS_NETWORKPOLICY_IMAGE", "multus-networkpolicy"},
+	{"OVN_IMAGE", "ovn-kubernetes"},
+	{"EGRESS_ROUTER_CNI_IMAGE", "egress-router-cni"},
+	{"NETWORK_METRICS_DAEMON_IMAGE", "network-metrics-daemon"},
+	{"NETWORK_CHECK_SOURCE_IMAGE", "cluster-network-operator"},
+	{"NETWORK_CHECK_TARGET_IMAGE", "cluster-network-operator"},
+	{"NETWORK_OPERATOR_IMAGE", "cluster-network-operator"},
+	{"CLOUD_NETWORK_CONFIG_CONTROLLER_IMAGE", "cloud-network-config-controller"},
+	{"CLI_IMAGE", "cli"},
+	{"FRR_K8S_IMAGE", "metallb-frr"},
+	{"NETWORKING_CONSOLE_PLUGIN_IMAGE", "networking-console-plugin"},
+}
+
+// networkOperatorTunings are the OVN-Kubernetes timers the payload's
+// deployment passes the operator as literals.
+var networkOperatorTunings = []string{
+	"OVN_NB_RAFT_ELECTION_TIMER=10",
+	"OVN_SB_RAFT_ELECTION_TIMER=16",
+	"OVN_NORTHD_PROBE_INTERVAL=10000",
+	"OVN_CONTROLLER_INACTIVITY_PROBE=180000",
+	"OVN_NB_INACTIVITY_PROBE=60000",
+}
+
+// networkOperatorEnv builds the environment the network operator's
+// payload deployment gives it: the release's version, from the
+// payload's own record so a digest-pinned release still reports what
+// it is, the images resolved from the release, and the deployment's
+// OVN timers.
+func networkOperatorEnv(releaseRoot, payloadDir string) ([]string, error) {
+	version, err := image.PayloadVersion(payloadDir)
+	if err != nil {
+		return nil, err
+	}
+	env := append(os.Environ(), "RELEASE_VERSION="+version)
+	for _, entry := range networkOperatorImages {
+		pullspec, err := image.ResolveComponentImage(releaseRoot, entry.component)
+		if err != nil {
+			return nil, fmt.Errorf("resolve the %s image: %w", entry.component, err)
+		}
+		env = append(env, entry.env+"="+pullspec)
+	}
+	return append(env, networkOperatorTunings...), nil
 }
 
 // ensureGpgmeDir writes the embedded gpgme libraries into the image
@@ -829,6 +957,7 @@ var kubeconfigFilenames = []string{
 	certgen.OpenShiftControllerManagerKubeconfigFilename,
 	certgen.ClusterPolicyControllerKubeconfigFilename,
 	certgen.ClusterMachineApproverKubeconfigFilename,
+	certgen.ClusterNetworkOperatorKubeconfigFilename,
 }
 
 // followAPIPort points the kubeconfigs at the port in use. The port is

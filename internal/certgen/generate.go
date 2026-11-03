@@ -46,6 +46,7 @@ const (
 	OpenShiftControllerManagerKubeconfigFilename         = "openshift-controller-manager.kubeconfig"
 	ClusterPolicyControllerKubeconfigFilename            = "cluster-policy-controller.kubeconfig"
 	ClusterMachineApproverKubeconfigFilename             = "cluster-machine-approver.kubeconfig"
+	ClusterNetworkOperatorKubeconfigFilename             = "cluster-network-operator.kubeconfig"
 	SessionSecretsFilename                       = "session-secrets.yaml"
 	SAKeyFilename                                = "sa.key"
 	SAPubFilename                                = "sa.pub"
@@ -57,6 +58,12 @@ const (
 // A certificate common name stands in for the account's token the way
 // the other component identities stand in for theirs.
 const machineApproverIdentity = "system:serviceaccount:openshift-cluster-machine-approver:machine-approver-sa"
+
+// networkOperatorIdentity is the username the cluster network
+// operator's client certificate carries: the service account the
+// release payload's own cluster-admin binding grants, so the operator
+// needs no permissions seeded for it.
+const networkOperatorIdentity = "system:serviceaccount:openshift-network-operator:cluster-network-operator"
 
 // GenerateAll generates every certificate and key needed to run a CoreShift
 // control plane, plus client kubeconfigs, writing all of them to outputDir.
@@ -75,8 +82,9 @@ const machineApproverIdentity = "system:serviceaccount:openshift-cluster-machine
 //	oauth-apiserver.kubeconfig                      kubeconfig for the OAuth API server
 //	oauth-server.kubeconfig                         kubeconfig for the OAuth server
 //	openshift-controller-manager.kubeconfig          kubeconfig for the OpenShift controller manager
-//	cluster-policy-controller.kubeconfig             kubeconfig for the cluster policy controller
+//	cluster-policy-controller.kubeconfig            kubeconfig for the cluster policy controller
 //	cluster-machine-approver.kubeconfig              kubeconfig for the cluster machine approver
+//	cluster-network-operator.kubeconfig              kubeconfig for the cluster network operator
 //	session-secrets.yaml                            session signing and encryption secrets for the OAuth server
 //	sa.key, sa.pub                                  service-account signing key pair
 //
@@ -169,6 +177,13 @@ func GenerateAll(outputDir string, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("generate cluster-machine-approver kubeconfig: %w", err)
 	}
+	// The network operator runs with the payload's own service-account
+	// identity for the same reason: the cluster-admin binding the
+	// version operator delivers is the operator's permission set.
+	clusterNetworkOperatorKubeconfig, err := generateComponentKubeconfig(networkOperatorIdentity, serverURL, clusterName, caCertPEM, caKeyPEM)
+	if err != nil {
+		return fmt.Errorf("generate cluster-network-operator kubeconfig: %w", err)
+	}
 
 	files := []struct {
 		name string
@@ -196,6 +211,7 @@ func GenerateAll(outputDir string, opts Options) error {
 		{OpenShiftControllerManagerKubeconfigFilename, openShiftControllerManagerKubeconfig, 0o600},
 		{ClusterPolicyControllerKubeconfigFilename, clusterPolicyControllerKubeconfig, 0o600},
 		{ClusterMachineApproverKubeconfigFilename, clusterMachineApproverKubeconfig, 0o600},
+		{ClusterNetworkOperatorKubeconfigFilename, clusterNetworkOperatorKubeconfig, 0o600},
 		{SessionSecretsFilename, sessionSecrets, 0o600},
 		{SAKeyFilename, saKeyPEM, 0o600},
 		{SAPubFilename, saPubPEM, 0o644},

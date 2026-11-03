@@ -53,6 +53,15 @@ func ClusterRoleBinding(name string) Object {
 	}
 }
 
+// ClusterOperator returns the wait for one cluster operator object.
+func ClusterOperator(name string) Object {
+	return Object{
+		resource: schema.GroupVersionResource{Group: "config.openshift.io", Version: "v1", Resource: "clusteroperators"},
+		name:     name,
+		kind:     "cluster operator",
+	}
+}
+
 // waitTimeout bounds the whole wait. The version operator's manifest
 // application is what the wait usually sits on; on a cold boot its
 // gated objects arrive within about a minute of the API server

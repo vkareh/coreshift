@@ -145,6 +145,25 @@ func writeTestPayload(t *testing.T, root string) {
 	}
 }
 
+func TestPayloadVersion(t *testing.T) {
+	payload := t.TempDir()
+	writeTestPayload(t, payload)
+
+	version, err := PayloadVersion(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != "4.22.21" {
+		t.Fatalf("version = %q, want 4.22.21", version)
+	}
+}
+
+func TestPayloadVersionMissingMetadata(t *testing.T) {
+	if _, err := PayloadVersion(t.TempDir()); err == nil {
+		t.Fatal("expected error for missing release metadata")
+	}
+}
+
 func TestExtractPayload(t *testing.T) {
 	filesystem := t.TempDir()
 	writeTestPayload(t, filesystem)

@@ -69,6 +69,35 @@ func ResolveComponentImage(releaseRoot, componentName string) (string, error) {
 	return "", fmt.Errorf("component %q not found in release manifest", componentName)
 }
 
+// releaseMetadataName is the file the cached payload's own version
+// record lives under, beside the manifest directories.
+const releaseMetadataName = releaseManifestDir + "/release-metadata"
+
+// releaseMetadata is the subset of the payload's version record the
+// image functions read.
+type releaseMetadata struct {
+	Version string `json:"version"`
+}
+
+// PayloadVersion returns the version the release payload records for
+// itself, e.g. 4.22.21, from the directory CachedPayload returns. It is
+// the version the release's own manifests name, whatever reference the
+// run resolved the payload through.
+func PayloadVersion(payloadDir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(payloadDir, releaseMetadataName))
+	if err != nil {
+		return "", fmt.Errorf("read release metadata: %w", err)
+	}
+	var metadata releaseMetadata
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return "", fmt.Errorf("parse release metadata: %w", err)
+	}
+	if metadata.Version == "" {
+		return "", fmt.Errorf("release metadata records no version")
+	}
+	return metadata.Version, nil
+}
+
 // CachedRelease returns a directory holding the release image's
 // manifest of component image references, pulling the release image
 // only when that manifest is not already cached. The manifest is cached

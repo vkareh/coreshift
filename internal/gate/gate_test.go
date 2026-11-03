@@ -24,6 +24,7 @@ func newClient(objects ...runtime.Object) *dynamicfake.FakeDynamicClient {
 			{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}: "CustomResourceDefinitionList",
 			{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterroles"}:         "ClusterRoleList",
 			{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterrolebindings"}:  "ClusterRoleBindingList",
+			{Group: "config.openshift.io", Version: "v1", Resource: "clusteroperators"}:            "ClusterOperatorList",
 		},
 		objects...,
 	)
@@ -75,16 +76,27 @@ func shortenTimeout(t *testing.T) {
 	t.Cleanup(func() { waitTimeout = 10 * time.Minute })
 }
 
+// clusterOperator returns a cluster operator object as the API serves
+// it.
+func clusterOperator(name string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "config.openshift.io/v1",
+		"kind":       "ClusterOperator",
+		"metadata":   map[string]any{"name": name},
+	}}
+}
+
 // TestWaitPassesSilentlyWhenObjectsExist checks the gate is invisible
 // when what a child needs is already there, whatever applied it.
 func TestWaitPassesSilentlyWhenObjectsExist(t *testing.T) {
 	shortenPolling(t)
 
-	client := newClient(definition("clusterresourcequotas.quota.openshift.io"))
+	client := newClient(definition("clusterresourcequotas.quota.openshift.io"), clusterOperator("network"))
 	var err error
 	out := captureStdout(t, func() {
 		err = poll(context.Background(), client, "the quota definition", "",
-			Definition("clusterresourcequotas.quota.openshift.io"))
+			Definition("clusterresourcequotas.quota.openshift.io"),
+			ClusterOperator("network"))
 	})
 	if err != nil {
 		t.Fatal(err)

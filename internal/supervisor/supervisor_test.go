@@ -406,6 +406,30 @@ func TestRunSetsChildEnvironment(t *testing.T) {
 	}
 }
 
+func TestRunSetsChildWorkingDirectory(t *testing.T) {
+	logDir := t.TempDir()
+	dir := t.TempDir()
+	done := make(chan error, 1)
+	go func() {
+		done <- (&Supervisor{LogDir: logDir, Progress: &syncBuffer{}}).Run(context.Background(), []Process{
+			{
+				Name: "homebody",
+				Path: "bash",
+				Args: []string{"-c", "pwd; exit 7"},
+				Dir:  dir,
+			},
+		})
+	}()
+
+	err := waitForRun(t, done)
+	if err == nil || !strings.Contains(err.Error(), "homebody exited") {
+		t.Fatalf("expected error naming the exited child, got: %v", err)
+	}
+	if log := readLogFile(t, logDir, "homebody"); !strings.Contains(log, dir) {
+		t.Fatalf("child working directory was not set, log:\n%s", log)
+	}
+}
+
 func TestRunBeforeStartRunsBeforeProcess(t *testing.T) {
 	gated := filepath.Join(t.TempDir(), "gated")
 	out := &syncBuffer{}

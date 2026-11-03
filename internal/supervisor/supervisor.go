@@ -34,6 +34,9 @@ type Process struct {
 	Path string
 	// Args are the arguments passed to the executable.
 	Args []string
+	// Dir, when set, is the working directory the child runs in, for
+	// children that read files relative to where they run.
+	Dir string
 	// Env, when set, is the complete environment for the child, replacing
 	// this process's environment. When nil the child inherits it.
 	Env []string
@@ -289,6 +292,7 @@ func (s *Supervisor) progress(line string) {
 
 func (s *Supervisor) startChild(proc *Process, stdout, stderr io.Writer, mu *sync.Mutex) (*child, error) {
 	cmd := exec.Command(proc.Path, proc.Args...)
+	cmd.Dir = proc.Dir
 	cmd.Env = proc.Env
 
 	logPath := filepath.Join(s.LogDir, proc.Name+".log")

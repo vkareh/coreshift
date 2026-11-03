@@ -19,7 +19,7 @@ func TestGenerateAll(t *testing.T) {
 
 	certs := []string{CACertFilename, APIServerCertFilename, FrontProxyCACertFilename, FrontProxyClientCertFilename, ServiceServingCertFilename, AdminCertFilename, SAPubFilename}
 	keys := []string{CAKeyFilename, APIServerKeyFilename, FrontProxyCAKeyFilename, FrontProxyClientKeyFilename, ServiceServingKeyFilename, AdminKeyFilename, SAKeyFilename}
-	kubeconfigs := []string{AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, OAuthServerKubeconfigFilename, OpenShiftControllerManagerKubeconfigFilename, ClusterPolicyControllerKubeconfigFilename, ClusterMachineApproverKubeconfigFilename}
+	kubeconfigs := []string{AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, OAuthServerKubeconfigFilename, OpenShiftControllerManagerKubeconfigFilename, ClusterPolicyControllerKubeconfigFilename, ClusterMachineApproverKubeconfigFilename, ClusterNetworkOperatorKubeconfigFilename}
 	for _, name := range append(append(certs, keys...), kubeconfigs...) {
 		if _, err := os.Stat(filepath.Join(outputDir, name)); err != nil {
 			t.Fatalf("expected %s to be written: %v", name, err)
@@ -93,26 +93,31 @@ func TestGenerateAll(t *testing.T) {
 			t.Fatalf("%s client certificate is not in the system:masters group", name)
 		}
 	}
-	// The machine approver runs with the payload's service-account
-	// identity, so its kubeconfig's certificate carries that name and no
-	// group.
-	config, err = clientcmd.Load(readFile(t, outputDir, ClusterMachineApproverKubeconfigFilename))
-	if err != nil {
-		t.Fatalf("load %s: %v", ClusterMachineApproverKubeconfigFilename, err)
-	}
-	user, ok := config.AuthInfos[machineApproverIdentity+"@coreshift"]
-	if !ok {
-		t.Fatalf("%s has no machine approver user", ClusterMachineApproverKubeconfigFilename)
-	}
-	cert := parseCertificate(t, user.ClientCertificateData)
-	if cert.Subject.CommonName != machineApproverIdentity {
-		t.Fatalf("%s client certificate common name = %q", ClusterMachineApproverKubeconfigFilename, cert.Subject.CommonName)
-	}
-	if len(cert.Subject.Organization) != 0 {
-		t.Fatalf("%s client certificate carries groups: %v", ClusterMachineApproverKubeconfigFilename, cert.Subject.Organization)
-	}
-	if err := cert.CheckSignatureFrom(caCert); err != nil {
-		t.Fatalf("%s client certificate is not signed by CA: %v", ClusterMachineApproverKubeconfigFilename, err)
+	// The machine approver and the network operator run with the
+	// payload's service-account identities, so their kubeconfigs'
+	// certificates carry those names and no group.
+	for name, identity := range map[string]string{
+		ClusterMachineApproverKubeconfigFilename: machineApproverIdentity,
+		ClusterNetworkOperatorKubeconfigFilename: networkOperatorIdentity,
+	} {
+		config, err = clientcmd.Load(readFile(t, outputDir, name))
+		if err != nil {
+			t.Fatalf("load %s: %v", name, err)
+		}
+		user, ok := config.AuthInfos[identity+"@coreshift"]
+		if !ok {
+			t.Fatalf("%s has no service account user", name)
+		}
+		cert := parseCertificate(t, user.ClientCertificateData)
+		if cert.Subject.CommonName != identity {
+			t.Fatalf("%s client certificate common name = %q", name, cert.Subject.CommonName)
+		}
+		if len(cert.Subject.Organization) != 0 {
+			t.Fatalf("%s client certificate carries groups: %v", name, cert.Subject.Organization)
+		}
+		if err := cert.CheckSignatureFrom(caCert); err != nil {
+			t.Fatalf("%s client certificate is not signed by CA: %v", name, err)
+		}
 	}
 }
 
@@ -168,7 +173,7 @@ func TestGenerateAllCustomAPIServerURL(t *testing.T) {
 		t.Fatalf("unexpected cluster config: %#v", cluster)
 	}
 
-	for _, name := range []string{ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, OAuthServerKubeconfigFilename, OpenShiftControllerManagerKubeconfigFilename, ClusterPolicyControllerKubeconfigFilename, ClusterMachineApproverKubeconfigFilename} {
+	for _, name := range []string{ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, OAuthServerKubeconfigFilename, OpenShiftControllerManagerKubeconfigFilename, ClusterPolicyControllerKubeconfigFilename, ClusterMachineApproverKubeconfigFilename, ClusterNetworkOperatorKubeconfigFilename} {
 		config, err := clientcmd.Load(readFile(t, outputDir, name))
 		if err != nil {
 			t.Fatalf("load %s: %v", name, err)
