@@ -163,8 +163,8 @@ func TestSeedIsRepeatable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bindings.Items) != 4 {
-		t.Fatalf("expected the same four cluster role bindings after reseeding, got %d", len(bindings.Items))
+	if len(bindings.Items) != 5 {
+		t.Fatalf("expected the same five cluster role bindings after reseeding, got %d", len(bindings.Items))
 	}
 }
 

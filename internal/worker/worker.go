@@ -33,7 +33,10 @@ const (
 	// under; the host-side create command mounts its minted file here.
 	NodeNamePath = "/etc/coreshift/node-name"
 
-	nodeKubeconfigPath = "/etc/kubernetes/kubeconfig"
+	// The node's kubeconfig sits where the payload's node pods read it
+	// from, the path the machine configuration gives real nodes' kubelet
+	// and the node identity setup copies for the OVN pods.
+	nodeKubeconfigPath = "/var/lib/kubelet/kubeconfig"
 	crioConfigPath     = "/etc/crio/crio.conf"
 	kubeletConfigPath  = "/etc/kubernetes/kubelet.conf"
 )
@@ -104,6 +107,9 @@ func Run(ctx context.Context) error {
 		return err
 	}
 	if err := join(ctx, nodeName); err != nil {
+		return err
+	}
+	if err := storePullSecret(); err != nil {
 		return err
 	}
 	if err := writeCRIConfig(crioConfigPath); err != nil {

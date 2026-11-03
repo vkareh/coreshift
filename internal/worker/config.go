@@ -28,12 +28,36 @@ const (
 // release's nodes run infra containers from.
 const pauseImage = "quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:e5fc73fc66cd2ff4e781d9af380348be759b6917c3703325d340669c3764e136"
 
-// pullSecretPath is where real nodes carry the cluster's pull secret,
-// written there by their configuration operator and read by CRI-O for
-// every pull. The create command mounts the cluster's secret here, so
-// the worker's runtime pulls the payload's images the way a real
-// node's does. A variable for test override.
-var pullSecretPath = "/var/lib/kubelet/config.json"
+// PullSecretMountPath is where the create command mounts the cluster's
+// pull secret into the worker container. PullSecretPath is where real
+// nodes carry it, written there by their configuration operator and
+// read by CRI-O for every pull; the worker copies the mounted secret
+// there itself, the delivery-then-write a real node's configuration
+// does in one step. Variables for test override.
+var (
+	PullSecretMountPath = "/etc/coreshift/pull-secret"
+	PullSecretPath      = "/var/lib/kubelet/config.json"
+)
+
+// storePullSecret copies the mounted pull secret to the path the node
+// runtime reads it from, keeping the copy out of the container's
+// ephemeral state the way the mount itself is.
+func storePullSecret() error {
+	if _, err := os.Stat(PullSecretMountPath); err != nil {
+		return nil
+	}
+	secret, err := os.ReadFile(PullSecretMountPath)
+	if err != nil {
+		return fmt.Errorf("read the mounted pull secret: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(PullSecretPath), 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(PullSecretPath), err)
+	}
+	if err := os.WriteFile(PullSecretPath, secret, 0o600); err != nil {
+		return fmt.Errorf("write the node's pull secret: %w", err)
+	}
+	return nil
+}
 
 // cgroupRoot is the root of the cgroup hierarchy the container sees.
 const cgroupRoot = "/sys/fs/cgroup"
@@ -128,9 +152,9 @@ network_dir = "%s"
 pause_image = "%s"
 pause_command = "/usr/bin/pod"
 `, cniPluginDir, cniConfigDir, pauseImage)
-	if _, err := os.Stat(pullSecretPath); err == nil {
-		config += "global_auth_file = \"" + pullSecretPath + "\"\n" +
-			"pause_image_auth_file = \"" + pullSecretPath + "\"\n"
+	if _, err := os.Stat(PullSecretPath); err == nil {
+		config += "global_auth_file = \"" + PullSecretPath + "\"\n" +
+			"pause_image_auth_file = \"" + PullSecretPath + "\"\n"
 	}
 	if err := os.WriteFile(path, []byte(config), 0o644); err != nil {
 		return fmt.Errorf("write CRI-O config: %w", err)

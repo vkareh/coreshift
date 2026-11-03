@@ -34,9 +34,10 @@ const (
 	ovsDBPath     = "/etc/openvswitch/conf.db"
 	ovsSchemaPath = "/usr/share/openvswitch/vswitch.ovsschema"
 	ovsSocket     = "/var/run/openvswitch/db.sock"
+	ovsRunDir     = "/var/run/openvswitch/"
 	ovsDBServer   = "/usr/sbin/ovsdb-server"
 	ovsVswitchd   = "/usr/sbin/ovs-vswitchd"
-	ovsVsctl      = "/usr/sbin/ovs-vsctl"
+	ovsVsctl      = "/usr/bin/ovs-vsctl"
 	ipTool        = "/usr/sbin/ip"
 )
 
@@ -47,31 +48,41 @@ const (
 const gatewayBridge = "br-ex"
 
 // networkDirs are the node directories the payload's network pods
-// mount. Real nodes have them from their OS and services; the pods'
-// hostPath mounts resolve against the worker container's own tree, so
-// the worker creates them before kubelet starts the pods that need
-// them.
+// mount, each at the exact path its hostPath volume names — the image
+// carries /var/run and /run as separate trees, so the two spellings
+// cannot stand in for each other. Real nodes have them from their OS
+// and services; the pods' mounts resolve against the worker
+// container's own tree, so the worker creates them before kubelet
+// starts the pods that need them.
 var networkDirs = []string{
 	"/var/run/openvswitch",
 	"/var/lib/openvswitch/data",
 	"/var/lib/ovn-ic/etc",
 	"/var/run/ovn-ic",
-	"/var/run/ovn-kubernetes",
+	"/run/ovn-kubernetes",
 	"/var/run/multus/cni/net.d",
-	"/var/run/netns",
-	"/var/run/systemd/private",
+	"/run/netns",
+	"/run/systemd/private",
 	"/var/log/ovn",
 	"/var/lib/cni/networks/ovn-k8s-cni-overlay",
 }
 
 // prepareNetworkDirs creates the directories the payload's network
 // pods mount from the node, and the syslog socket their audit logging
-// writes to, which a container has neither of until it makes them.
+// writes to, which a container has neither of until it makes them. The
+// image's /var is empty — an ostree image fills it at boot, which a
+// container never does — so everything below it that the node runtime
+// and the pods touch is made here.
 func prepareNetworkDirs() error {
 	for _, dir := range networkDirs {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
+	}
+	// The real /var/tmp: the container runtime unpacks images through
+	// it, with the sticky bit the standard location carries.
+	if err := os.MkdirAll("/var/tmp", 0o1777); err != nil {
+		return fmt.Errorf("create /var/tmp: %w", err)
 	}
 	// Real nodes point /dev/log at their syslog; the pods' ACL audit
 	// logging writes there. A socket nothing reads keeps the writes
@@ -80,6 +91,17 @@ func prepareNetworkDirs() error {
 		if err := os.Symlink("/dev/null", "/dev/log"); err != nil {
 			return fmt.Errorf("provide /dev/log: %w", err)
 		}
+	}
+	return shareRootMount()
+}
+
+// shareRootMount makes the worker's root mount shared, the adjustment
+// kind's node containers make at startup: the network pods mount the
+// node's filesystem with host-to-container propagation, which a
+// container's private root cannot serve.
+func shareRootMount() error {
+	if err := runCommand("/usr/bin/mount", "--make-rshared", "/"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -94,7 +116,7 @@ func prepareOVS() error {
 	if _, err := os.Stat(ovsDBPath); err == nil {
 		return nil
 	}
-	return runCommand("ovsdb-tool", "create", ovsDBPath, ovsSchemaPath)
+	return runCommand("/usr/bin/ovsdb-tool", "create", ovsDBPath, ovsSchemaPath)
 }
 
 // ovsProcesses returns the OVS daemons as supervised children, in the
@@ -110,6 +132,10 @@ func ovsProcesses() []supervisor.Process {
 			Args: []string{
 				ovsDBPath,
 				"--remote=punix:" + ovsSocket,
+				// The pid files are where the payload's OVN pods read
+				// the daemons' identities from, the layout the
+				// openvswitch service's own units use.
+				"--pidfile=" + ovsRunDir + "ovsdb-server.pid",
 				"-vconsole:info",
 				"--no-chdir",
 			},
@@ -120,6 +146,7 @@ func ovsProcesses() []supervisor.Process {
 			Path: ovsVswitchd,
 			Args: []string{
 				"unix:" + ovsSocket,
+				"--pidfile=" + ovsRunDir + "ovs-vswitchd.pid",
 				"-vconsole:info",
 				"--no-chdir",
 			},
@@ -130,7 +157,9 @@ func ovsProcesses() []supervisor.Process {
 
 // initOVS initializes the OVS database with the system identity a real
 // node's openvswitch service records, the identity OVN registers the
-// node's chassis under.
+// node's chassis under. The command runs before the switch daemon
+// exists, so it takes the no-wait form the service's own script uses,
+// recording the identity without waiting for the switch to apply it.
 func initOVS(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, ovsReadyTimeout)
 	defer cancel()
@@ -141,15 +170,15 @@ func initOVS(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("wait for OVS's database socket: %w", ctx.Err())
 	}
-	return ovsCommand("--", "init", "--", "set", "Open_vSwitch", ".",
+	return ovsCommand("--no-wait", "--", "init", "--", "set", "Open_vSwitch", ".",
 		"external-ids:system-id="+string(uuid.NewUUID()),
 		"external-ids:rundir=/var/run/openvswitch")
 }
 
-// ovsCommandTimeout bounds every ovs-vsctl call, so a control command
-// against a wedged daemon fails in seconds instead of hanging the
-// worker's startup.
-const ovsCommandTimeout = 15 * time.Second
+// ovsCommandTimeout bounds every ovs-vsctl call in seconds, so a
+// control command against a wedged daemon fails in seconds instead of
+// hanging the worker's startup.
+const ovsCommandTimeout = "15"
 
 // ovsReadyTimeout bounds the waits for the OVS daemons' sockets.
 const ovsReadyTimeout = 25 * time.Second
@@ -157,7 +186,7 @@ const ovsReadyTimeout = 25 * time.Second
 // ovsCommand runs ovs-vsctl with a timeout, reporting the command with
 // its output on failure.
 func ovsCommand(args ...string) error {
-	return runCommand(ovsVsctl, append([]string{"--timeout=" + ovsCommandTimeout.String()}, args...)...)
+	return runCommand(ovsVsctl, append([]string{"--timeout=" + ovsCommandTimeout}, args...)...)
 }
 
 // runCommand runs a command, reporting its output on failure.
@@ -175,18 +204,21 @@ func runCommand(name string, args ...string) error {
 // interface's addresses and default route move onto the bridge, so
 // traffic keeps flowing while OVN owns the gateway. A bridge a previous
 // worker left behind is undone first, because this worker's own OVS
-// database starts empty and cannot adopt it.
+// database starts empty and cannot adopt what it does not know.
 func configureGateway(ctx context.Context) error {
+	if linkExists(gatewayBridge) {
+		if err := undoGateway(); err != nil {
+			return err
+		}
+	}
 	iface, gateway, metric, err := defaultRoute()
 	if err != nil {
 		return err
 	}
-	if linkExists(gatewayBridge) {
-		if err := undoGateway(iface); err != nil {
-			return err
-		}
-	}
-	if err := ovsCommand("--may-exist", "add-br", gatewayBridge); err != nil {
+	// No waiting on the bridge itself: on the first worker the kernel
+	// module still has to load, and the wait below is the one that
+	// proves the device appeared.
+	if err := ovsCommand("--no-wait", "--may-exist", "add-br", gatewayBridge); err != nil {
 		return err
 	}
 	// The bridge's kernel device appears only once the openvswitch
@@ -203,6 +235,17 @@ func configureGateway(ctx context.Context) error {
 		return fmt.Errorf("wait for the %s bridge's device: the openvswitch kernel module could not be loaded", gatewayBridge)
 	}
 	if err := ovsCommand("--may-exist", "add-port", gatewayBridge, iface); err != nil {
+		return err
+	}
+	// The uplink is recorded the way a real node's network configuration
+	// does: the interface's type set to system — what NetworkManager
+	// sets on the ports of its bridges — and the bridge's uplink
+	// external-id naming it. OVN reads either to find the port the
+	// gateway bridge fronts.
+	if err := ovsCommand("set", "interface", iface, "type=system"); err != nil {
+		return err
+	}
+	if err := ovsCommand("set", "bridge", gatewayBridge, "external-ids:bridge-uplink="+iface); err != nil {
 		return err
 	}
 	mtu, err := linkMTU(iface)
@@ -222,19 +265,22 @@ func configureGateway(ctx context.Context) error {
 }
 
 // undoGateway reverses a previous worker's takeover, so the fresh one
-// below starts from a plain network: the addresses move off the
-// leftover bridge, the bridge goes, and the addresses land back on the
-// uplink with the default route following.
-func undoGateway(uplink string) error {
-	addresses, err := interfaceAddresses(gatewayBridge)
-	if err != nil {
+// below starts from a plain network. The leftover bridge is not in this
+// worker's own OVS database, so it is adopted into it first and then
+// deleted through the daemon — the only clean way to remove an OVS
+// device — with the addresses and route restored to the uplink the
+// moment the bridge lets them go.
+func undoGateway() error {
+	addresses, _ := interfaceAddresses(gatewayBridge)
+	_, gateway, metric, _ := defaultRoute()
+	if err := ovsCommand("--may-exist", "add-br", gatewayBridge); err != nil {
 		return err
 	}
-	_, gateway, metric, err := defaultRoute()
-	if err != nil {
+	if err := ovsCommand("--if-exists", "del-br", gatewayBridge); err != nil {
 		return err
 	}
-	if err := ipCommand("link", "del", gatewayBridge); err != nil {
+	uplink, err := uplinkInterface()
+	if err != nil {
 		return err
 	}
 	for _, address := range addresses {
@@ -242,7 +288,27 @@ func undoGateway(uplink string) error {
 			return err
 		}
 	}
+	if gateway == "" {
+		return nil
+	}
 	return replaceDefaultRoute(gateway, uplink, metric)
+}
+
+// uplinkInterface returns the namespace's virtual ethernet link, the
+// interface the gateway bridge takes over: a container's namespace
+// carries exactly one, the pair end the container runtime made for it.
+func uplinkInterface() (string, error) {
+	out, err := exec.Command(ipTool, "-o", "link", "show").Output()
+	if err != nil {
+		return "", fmt.Errorf("read the namespace's links: %w", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && strings.Contains(fields[1], "@") {
+			return strings.Split(fields[1], "@")[0], nil
+		}
+	}
+	return "", fmt.Errorf("the namespace carries no virtual ethernet link to take over")
 }
 
 // defaultRoute returns the interface, gateway, and metric of the node's

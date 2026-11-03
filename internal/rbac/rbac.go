@@ -103,7 +103,10 @@ func seed(ctx context.Context, client kubernetes.Interface) error {
 	if err := ensurePrivilegedSyncer(ctx, client); err != nil {
 		return err
 	}
-	return ensureNodeBootstrapper(ctx, client)
+	if err := ensureNodeBootstrapper(ctx, client); err != nil {
+		return err
+	}
+	return ensureNodeSelfApproval(ctx, client)
 }
 
 // ensureClusterRole grants what the namespace-security-allocation
@@ -291,6 +294,36 @@ func ensureNodeBootstrapper(ctx context.Context, client kubernetes.Interface) er
 	_, err := client.RbacV1().ClusterRoleBindings().Create(ctx, binding, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("register %s cluster role binding: %w", nodeBootstrapperBinding, err)
+	}
+	return nil
+}
+
+// ensureNodeSelfApproval grants nodes the standard permission to approve
+// their own client certificate requests, the binding a real cluster's
+// control plane operators deliver: the node-side certificate managers,
+// above all the OVN node pod's, request their short-lived certificates
+// as the node identity, and the controller manager's own approver
+// issues them once the requestor may self-approve. The role is the
+// API server's built-in; only the binding to the nodes group is
+// missing here.
+func ensureNodeSelfApproval(ctx context.Context, client kubernetes.Interface) error {
+	const role = "system:certificates.k8s.io:certificatesigningrequests:selfnodeclient"
+	binding := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: role},
+		Subjects: []rbacv1.Subject{{
+			Kind:     rbacv1.GroupKind,
+			Name:     "system:nodes",
+			APIGroup: rbacv1.GroupName,
+		}},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     role,
+		},
+	}
+	_, err := client.RbacV1().ClusterRoleBindings().Create(ctx, binding, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("register %s cluster role binding: %w", role, err)
 	}
 	return nil
 }

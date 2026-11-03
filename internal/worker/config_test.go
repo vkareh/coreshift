@@ -30,30 +30,37 @@ func TestWriteCRIConfig(t *testing.T) {
 		}
 	}
 	if strings.Contains(config, "global_auth_file") {
-		t.Fatalf("CRI-O config passes a pull secret that was not mounted:\n%s", config)
+		t.Fatalf("CRI-O config passes a pull secret that was not stored:\n%s", config)
 	}
 }
 
-// TestWriteCRIConfigWithPullSecret checks that a mounted pull secret
+// TestStorePullSecretChecksDelivery checks that the stored secret
 // reaches CRI-O the way the payload's rendered configuration passes it,
 // so the worker's runtime pulls the payload's images authenticated.
-func TestWriteCRIConfigWithPullSecret(t *testing.T) {
+func TestStorePullSecretChecksDelivery(t *testing.T) {
 	dir := t.TempDir()
-	secret := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(secret, []byte("{}"), 0o600); err != nil {
+	mounted := filepath.Join(dir, "mounted")
+	node := filepath.Join(dir, "node", "config.json")
+	if err := os.WriteFile(mounted, []byte(`{"auths":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	original := pullSecretPath
-	pullSecretPath = secret
-	defer func() { pullSecretPath = original }()
+	originalMount, originalNode := PullSecretMountPath, PullSecretPath
+	PullSecretMountPath, PullSecretPath = mounted, node
+	defer func() { PullSecretMountPath, PullSecretPath = originalMount, originalNode }()
+	if err := storePullSecret(); err != nil {
+		t.Fatal(err)
+	}
+	if string(readFile(t, node)) != `{"auths":{}}` {
+		t.Fatalf("stored pull secret = %q", readFile(t, node))
+	}
 	path := filepath.Join(dir, "crio.conf")
 	if err := writeCRIConfig(path); err != nil {
 		t.Fatal(err)
 	}
 	config := string(readFile(t, path))
 	for _, want := range []string{
-		`global_auth_file = "` + secret + `"`,
-		`pause_image_auth_file = "` + secret + `"`,
+		`global_auth_file = "` + node + `"`,
+		`pause_image_auth_file = "` + node + `"`,
 	} {
 		if !strings.Contains(config, want) {
 			t.Fatalf("CRI-O config missing %q:\n%s", want, config)
