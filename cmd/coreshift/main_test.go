@@ -2212,6 +2212,52 @@ func TestRunGetKubeconfigMissingCluster(t *testing.T) {
 	}
 }
 
+// TestPrintReadySummary checks the ready summary: five information lines
+// — the cluster's name, its release, the API endpoint, the admin
+// kubeconfig, and the context it selects — and no command suggestion;
+// the login flow is the documentation's to teach.
+func TestPrintReadySummary(t *testing.T) {
+	out := captureStdout(t, func() {
+		printReadySummary("/state/dev", "dev", "reg.example/ocp-release:4.22.8-x86_64", 6443)
+	})
+	want := "\nControl plane ready\n" +
+		"  Name:         dev\n" +
+		"  Release:      reg.example/ocp-release:4.22.8-x86_64\n" +
+		"  API endpoint: https://127.0.0.1:6443\n" +
+		"  Kubeconfig:   /state/dev/admin.kubeconfig\n" +
+		"  Context:      admin@dev\n"
+	if out != want {
+		t.Fatalf("output =\n%s\nwant\n%s", out, want)
+	}
+}
+
+// TestPrintWorkerSummary checks the joined worker's summary: it reports
+// the node and its state, and a rootless worker states its limit as the
+// fact alone, without coaching the remedy.
+func TestPrintWorkerSummary(t *testing.T) {
+	out := captureStdout(t, func() {
+		printWorkerSummary("coreshift-worker-worker1", "/state/dev", "worker1", "container:coreshift-dev", true)
+	})
+	for _, want := range []string{
+		"Worker joined\n",
+		"  Node:       worker1, with the OVN-Kubernetes pods running on it\n",
+		"  Kubeconfig: /state/dev/admin.kubeconfig\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output =\n%s\nwant it to contain %q", out, want)
+		}
+	}
+	if strings.Contains(out, "sudo") || strings.Contains(out, "oc ") {
+		t.Fatalf("output =\n%s\nwant no command suggestion", out)
+	}
+	if os.Geteuid() != 0 {
+		limit := "  Limit:      workloads whose user IDs the worker's user namespace cannot express will not start\n"
+		if !strings.Contains(out, limit) {
+			t.Fatalf("output =\n%s\nwant it to contain %q", out, limit)
+		}
+	}
+}
+
 // TestGetCommandsRequirePodman checks that get clusters fails naming
 // podman when it is missing.
 func TestGetCommandsRequirePodman(t *testing.T) {
