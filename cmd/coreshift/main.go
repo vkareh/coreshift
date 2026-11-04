@@ -501,49 +501,7 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 		{
 			Name: "kube-apiserver",
 			Path: kubeBinaries["kube-apiserver"],
-			Args: []string{
-				"--etcd-servers=" + etcdClientURL,
-				"--secure-port=" + strconv.Itoa(port),
-				"--bind-address=" + apiBindAddress(),
-				"--tls-cert-file=" + filepath.Join(stateDir, certgen.APIServerCertFilename),
-				"--tls-private-key-file=" + filepath.Join(stateDir, certgen.APIServerKeyFilename),
-				"--client-ca-file=" + filepath.Join(stateDir, certgen.CACertFilename),
-				"--service-account-issuer=https://kubernetes.default.svc.cluster.local",
-				"--service-account-signing-key-file=" + filepath.Join(stateDir, certgen.SAKeyFilename),
-				"--service-account-key-file=" + filepath.Join(stateDir, certgen.SAPubFilename),
-				// OpenShift's service CIDR.
-				"--service-cluster-ip-range=172.30.0.0/16",
-				// OpenShift mode stops kube-apiserver from implicitly
-				// trusting the system:masters group; the authorizers real
-				// clusters run restore that trust explicitly.
-				"--authorization-mode=Scope,SystemMasters,RBAC,Node",
-				// Delegated authentication for the aggregation layer: the
-				// requestheader flags publish how proxied requests carry user
-				// identity, and the proxy client flags identify kube-apiserver
-				// when forwarding to aggregated servers. Aggregator routing
-				// sends proxied traffic to endpoints instead of cluster IPs.
-				"--requestheader-client-ca-file=" + filepath.Join(stateDir, certgen.FrontProxyCACertFilename),
-				"--requestheader-allowed-names=kube-apiserver-proxy,system:kube-apiserver-proxy,system:openshift-aggregator",
-				"--requestheader-username-headers=X-Remote-User",
-				"--requestheader-group-headers=X-Remote-Group",
-				"--requestheader-extra-headers-prefix=X-Remote-Extra-",
-				"--proxy-client-cert-file=" + filepath.Join(stateDir, certgen.FrontProxyClientCertFilename),
-				"--proxy-client-key-file=" + filepath.Join(stateDir, certgen.FrontProxyClientKeyFilename),
-				"--enable-aggregator-routing=true",
-				// The OpenShift config switches the forked kube-apiserver
-				// into OpenShift mode, which among other things serves the
-				// OAuth discovery document clients like oc need to log in.
-				// The flag is hidden and marked deprecated upstream, but it
-				// is how every real deployment, including Hypershift's,
-				// runs the server.
-				"--openshift-config=" + kubeAPIServerConfig,
-				// Access tokens issued by the OAuth server are only
-				// validated by the aggregated OAuth API server; this webhook
-				// is how kube-apiserver asks it to review them. Real
-				// clusters carry the same wiring from their operators.
-				"--authentication-token-webhook-config-file=" + tokenReviewKubeconfig,
-				"--authentication-token-webhook-version=v1",
-			},
+			Args: kubeAPIServerArgs(stateDir, etcdClientURL, port, kubeAPIServerConfig, tokenReviewKubeconfig),
 			AfterStart: func(ctx context.Context) error {
 				// The aggregated servers need kube-apiserver up for delegated
 				// auth, the aggregation wiring needs it to accept writes, and
@@ -876,6 +834,62 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 		},
 	}
 	return sup.Run(ctx, processes)
+}
+
+// kubeAPIServerArgs assembles the kube-apiserver command line from the
+// generated material under the state directory and the etcd client URL
+// the etcd process listens on.
+func kubeAPIServerArgs(stateDir, etcdClientURL string, port int, openshiftConfigPath, tokenReviewKubeconfig string) []string {
+	return []string{
+		"--etcd-servers=" + etcdClientURL,
+		"--secure-port=" + strconv.Itoa(port),
+		"--bind-address=" + apiBindAddress(),
+		"--tls-cert-file=" + filepath.Join(stateDir, certgen.APIServerCertFilename),
+		"--tls-private-key-file=" + filepath.Join(stateDir, certgen.APIServerKeyFilename),
+		"--client-ca-file=" + filepath.Join(stateDir, certgen.CACertFilename),
+		"--service-account-issuer=https://kubernetes.default.svc.cluster.local",
+		"--service-account-signing-key-file=" + filepath.Join(stateDir, certgen.SAKeyFilename),
+		"--service-account-key-file=" + filepath.Join(stateDir, certgen.SAPubFilename),
+		// OpenShift's service CIDR.
+		"--service-cluster-ip-range=172.30.0.0/16",
+		// OpenShift mode stops kube-apiserver from implicitly
+		// trusting the system:masters group; the authorizers real
+		// clusters run restore that trust explicitly.
+		"--authorization-mode=Scope,SystemMasters,RBAC,Node",
+		// Delegated authentication for the aggregation layer: the
+		// requestheader flags publish how proxied requests carry user
+		// identity, and the proxy client flags identify kube-apiserver
+		// when forwarding to aggregated servers. Aggregator routing
+		// sends proxied traffic to endpoints instead of cluster IPs.
+		"--requestheader-client-ca-file=" + filepath.Join(stateDir, certgen.FrontProxyCACertFilename),
+		"--requestheader-allowed-names=kube-apiserver-proxy,system:kube-apiserver-proxy,system:openshift-aggregator",
+		"--requestheader-username-headers=X-Remote-User",
+		"--requestheader-group-headers=X-Remote-Group",
+		"--requestheader-extra-headers-prefix=X-Remote-Extra-",
+		"--proxy-client-cert-file=" + filepath.Join(stateDir, certgen.FrontProxyClientCertFilename),
+		"--proxy-client-key-file=" + filepath.Join(stateDir, certgen.FrontProxyClientKeyFilename),
+		"--enable-aggregator-routing=true",
+		// The OpenShift config switches the forked kube-apiserver
+		// into OpenShift mode, which among other things serves the
+		// OAuth discovery document clients like oc need to log in.
+		// The flag is hidden and marked deprecated upstream, but it
+		// is how every real deployment, including Hypershift's,
+		// runs the server.
+		"--openshift-config=" + openshiftConfigPath,
+		// Access tokens issued by the OAuth server are only
+		// validated by the aggregated OAuth API server; this webhook
+		// is how kube-apiserver asks it to review them. Real
+		// clusters carry the same wiring from their operators.
+		"--authentication-token-webhook-config-file=" + tokenReviewKubeconfig,
+		"--authentication-token-webhook-version=v1",
+		// Nothing in this cluster resolves a node's bare name, so
+		// kubelet connections prefer the node's internal IP, the
+		// address every node carries; the hostname-first default
+		// leaves logs, exec, and port-forwarding failing on name
+		// resolution. Real clusters keep hostname first because
+		// their DNS resolves node names.
+		"--kubelet-preferred-address-types=InternalIP,Hostname,InternalDNS,ExternalDNS,ExternalIP",
+	}
 }
 
 // networkOperatorImages lists the image variables the network

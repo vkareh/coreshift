@@ -478,6 +478,25 @@ func TestKubeAPIServerConfigBindsLoopbackOnHost(t *testing.T) {
 	}
 }
 
+// TestKubeAPIServerArgsPreferInternalIP checks that kube-apiserver dials
+// kubelets by their internal IP first: nothing in this cluster resolves
+// a node's bare name, so the hostname-first default leaves logs, exec,
+// and port-forwarding failing on name resolution.
+func TestKubeAPIServerArgsPreferInternalIP(t *testing.T) {
+	args := kubeAPIServerArgs("/state", "http://127.0.0.1:2379", defaultAPIPort,
+		"/state/kube-apiserver-config.json", "/state/token-review.kubeconfig")
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "--kubelet-preferred-address-types=") {
+			continue
+		}
+		if value := strings.TrimPrefix(arg, "--kubelet-preferred-address-types="); value != "InternalIP,Hostname,InternalDNS,ExternalDNS,ExternalIP" {
+			t.Fatalf("kubelet preferred address types = %q, want the node's internal IP first", value)
+		}
+		return
+	}
+	t.Fatalf("kube-apiserver args carry no kubelet preferred address types:\n%q", args)
+}
+
 // TestClusterDirByName checks that a cluster's state directory comes from
 // its name, so every command resolves the same directory for it whatever
 // port its API server binds.
