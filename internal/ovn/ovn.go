@@ -137,6 +137,18 @@ const prepareTimeout = 5 * time.Minute
 var renderSettleDelay = time.Minute
 
 func prepare(ctx context.Context, client kubernetes.Interface, dynamicClient dynamic.Interface) error {
+	// The render pass must deliver the ConfigMap placement patches before
+	// the operator goes unmanaged, because an unmanaged operator renders
+	// nothing: a switch landing mid-render conflicts the pass's own
+	// configuration write, the retry sees unmanaged and skips, and the
+	// workloads never appear. The ConfigMap is written after that
+	// configuration write, so waiting for it puts the switch past the
+	// conflict and lets the pass in flight finish what it started; until
+	// then the caller's retry simply waits with the operator still
+	// managing.
+	if _, err := client.CoreV1().ConfigMaps(namespace).Get(ctx, configMapName, metav1.GetOptions{}); err != nil {
+		return fmt.Errorf("read the %s ConfigMap: %w", configMapName, err)
+	}
 	// The operator goes unmanaged first, so it cannot revert the patches
 	// that follow between them.
 	unmanaged := []byte(`{"spec":{"managementState":"Unmanaged"}}`)
