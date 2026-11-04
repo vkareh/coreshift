@@ -2705,7 +2705,7 @@ func TestDeleteWorkerFlagDefaults(t *testing.T) {
 // where the entrypoint and runtime read them, and the host's kernel
 // modules read-only.
 func TestWorkerRunArgs(t *testing.T) {
-	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", "")
+	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", "", false)
 	want := []string{
 		"run", "--detach",
 		"--name", "coreshift-worker-w1",
@@ -2730,7 +2730,7 @@ func TestWorkerRunArgs(t *testing.T) {
 // cannot see each other's containers — and carries the marker that
 // tells the worker its network is the tool's own to configure.
 func TestWorkerRunArgsContainerMode(t *testing.T) {
-	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", "ns:/proc/4242/ns/net")
+	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", "ns:/proc/4242/ns/net", true)
 	for i, arg := range got {
 		switch arg {
 		case "--network":
@@ -2751,7 +2751,7 @@ func TestWorkerRunArgsContainerMode(t *testing.T) {
 // containers live in the user's one store, so the join is by the
 // cluster container's name, with no path gymnastics.
 func TestWorkerRunArgsRootlessContainerMode(t *testing.T) {
-	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", "container:coreshift-dev")
+	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", "container:coreshift-dev", true)
 	for i, arg := range got {
 		switch arg {
 		case "--network":
@@ -3027,93 +3027,137 @@ func TestRunCreateWorkerRefusesMissingFlagFile(t *testing.T) {
 }
 
 // TestNextWorkerName checks the counting rule a bare worker creation
-// names by: the number is one past the cluster's worker count — not the
-// first free slot — and skips upward past any name already in use, so
-// gaps left by deletions never cause a collision.
+// names by: the number is one past the cluster's node count — not the
+// first free slot — and skips upward past any name already in use, as a
+// node or as a container, so gaps left by deletions never cause a
+// collision. The nodes are the truth across both worker kinds, since a
+// cluster may hold either.
 func TestNextWorkerName(t *testing.T) {
 	for name, tc := range map[string]struct {
-		cluster string
-		workers map[string]string // worker container → its cluster label
-		want    string
+		nodes      []string
+		containers []string
+		want       string
 	}{
 		"fresh cluster": {
-			cluster: "dev",
-			want:    "worker1",
+			want: "worker1",
 		},
 		"one worker named foo": {
-			cluster: "dev",
-			workers: map[string]string{"coreshift-worker-foo": "dev"},
-			want:    "worker2",
+			nodes: []string{"foo"},
+			want:  "worker2",
 		},
-		"three workers count to the fourth": {
-			cluster: "dev",
-			workers: map[string]string{
-				"coreshift-worker-worker1": "dev",
-				"coreshift-worker-worker2": "dev",
-				"coreshift-worker-worker3": "dev",
-			},
-			want: "worker4",
+		"three nodes count to the fourth": {
+			nodes: []string{"worker1", "worker2", "worker3"},
+			want:  "worker4",
 		},
 		"deleted middle leaves the number skipped": {
-			cluster: "dev",
-			workers: map[string]string{
-				"coreshift-worker-worker1": "dev",
-				"coreshift-worker-worker3": "dev",
-			},
-			want: "worker4",
+			nodes: []string{"worker1", "worker3"},
+			want:  "worker4",
 		},
-		"another cluster's workers do not count": {
-			cluster: "dev",
-			workers: map[string]string{
-				"coreshift-worker-foo":     "dev",
-				"coreshift-worker-worker1": "other",
-			},
-			want: "worker2",
-		},
-		"a name taken by another cluster's worker is skipped": {
-			cluster: "dev",
-			workers: map[string]string{
-				"coreshift-worker-foo":     "dev",
-				"coreshift-worker-worker2": "other",
-			},
-			want: "worker3",
+		"a name taken by a container is skipped": {
+			nodes:      []string{"worker1"},
+			containers: []string{"coreshift-worker-worker2"},
+			want:       "worker3",
 		},
 	} {
 		writeFakePodman(t)
-		names := make([]string, 0, len(tc.workers))
-		for container, label := range tc.workers {
-			names = append(names, container)
-			setContainerLabel(t, container, label)
-		}
-		setContainers(t, names...)
+		setContainers(t, tc.containers...)
 
-		got, err := nextWorkerName(tc.cluster)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != tc.want {
+		if got := nextWorkerName(tc.nodes); got != tc.want {
 			t.Fatalf("%s: name = %q, want %q", name, got, tc.want)
 		}
 	}
 }
 
+// writeClusterNodes stands up a TLS stand-in for a cluster's API serving
+// the node list — the given names — and its health endpoint, and writes
+// an admin kubeconfig pointing at it into the state directory, the way a
+// real cluster's state directory holds one. The stand-in's own
+// certificate is the kubeconfig's authority, so the readiness probe and
+// the API clients trust it alike, and the fake cluster container
+// publishes the stand-in's port.
+func writeClusterNodes(t *testing.T, stateDir, cluster string, names ...string) {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/v1/nodes", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		items := make([]corev1.Node, 0, len(names))
+		for _, name := range names {
+			items = append(items, corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}})
+		}
+		_ = json.NewEncoder(w).Encode(corev1.NodeList{Items: items})
+	})
+	server := httptest.NewTLSServer(mux)
+	t.Cleanup(server.Close)
+	config := clientcmdapi.NewConfig()
+	config.Clusters["coreshift"] = &clientcmdapi.Cluster{
+		Server:                   server.URL,
+		CertificateAuthorityData: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}),
+	}
+	config.AuthInfos["admin"] = &clientcmdapi.AuthInfo{}
+	config.Contexts["admin@coreshift"] = &clientcmdapi.Context{Cluster: "coreshift", AuthInfo: "admin"}
+	config.CurrentContext = "admin@coreshift"
+	if err := clientcmd.WriteToFile(*config, filepath.Join(stateDir, certgen.AdminKubeconfigFilename)); err != nil {
+		t.Fatal(err)
+	}
+	address, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(address.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setContainerPort(t, clusterContainerPrefix+cluster, port)
+}
+
 // TestRunCreateWorkerBarePrintsCountedName checks that a bare creation
-// picks the counted name and prints it, so the command is never
-// mysterious about what it is creating.
+// picks the counted name from the cluster's nodes and prints it, so the
+// command is never mysterious about what it is creating.
 func TestRunCreateWorkerBarePrintsCountedName(t *testing.T) {
 	writeFakePodman(t)
-	setContainers(t, "coreshift-worker-foo")
-	setContainerLabel(t, "coreshift-worker-foo", "nope")
+	setContainers(t, "coreshift-nope")
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	stateDir, err := clusterDir("nope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeClusterNodes(t, stateDir, "nope", "worker1")
 
-	var err error
+	var runErr error
 	out := captureStdout(t, func() {
-		err = runCreateWorker(context.Background(), "", false, "nope", "", false, false)
+		runErr = runCreateWorker(context.Background(), "", false, "nope", "", false, false)
 	})
-	if err == nil || !strings.Contains(err.Error(), "no cluster named nope") {
-		t.Fatalf("err = %v, want the unknown-cluster refusal after the pick", err)
+	// The stand-in cluster serves no join endpoints, so the mint that
+	// follows the pick fails; the pick itself is what is tested.
+	if runErr == nil {
+		t.Fatal("want the join to fail against the stand-in cluster")
 	}
 	if !strings.Contains(out, "Worker name: worker2") {
 		t.Fatalf("output = %q, want the counted name printed prominently", out)
+	}
+}
+
+// TestWorkerRunArgsSecondWorkerBesideNetwork checks the podman command
+// line that starts a worker joining beside the one that runs the
+// cluster's network: it still joins the cluster container's namespace,
+// but carries no marker, so it reconfigures no interfaces.
+func TestWorkerRunArgsSecondWorkerBesideNetwork(t *testing.T) {
+	got := workerRunArgs("coreshift-worker-w2", "dev", "/state/api/workers/w2", "localhost/coreshift-worker:v1", "container:coreshift-dev", false)
+	for i, arg := range got {
+		switch arg {
+		case "--network":
+			if got[i+1] != "container:coreshift-dev" {
+				t.Fatalf("worker network = %q, want the cluster container by name", got[i+1])
+			}
+		case "--volume":
+			if got[i+1] == "/state/api/workers/w2/network-isolated:/etc/coreshift/network-isolated:ro,z" {
+				t.Fatalf("podman args = %q, want no network marker beside the first worker", got)
+			}
+		}
 	}
 }
 
