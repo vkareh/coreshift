@@ -2662,7 +2662,8 @@ func TestDeleteClusterFlagDefaults(t *testing.T) {
 // TestCreateWorkerFlagDefaults checks that the worker creation flags are
 // accepted and come with the documented defaults — the name has none,
 // because a bare creation counts it — and that the pull secret is
-// optional: the cluster's stored one is the default.
+// optional: the cluster's stored one is the default. The rootless mode
+// is an opt-in: the rootful default is the general path.
 func TestCreateWorkerFlagDefaults(t *testing.T) {
 	cmd := newCreateWorkerCommand()
 	for name, want := range map[string]string{
@@ -2670,6 +2671,7 @@ func TestCreateWorkerFlagDefaults(t *testing.T) {
 		"cluster":     "coreshift",
 		"verbose":     "false",
 		"pull-secret": "",
+		"rootless":    "false",
 	} {
 		if flag := cmd.Flags().Lookup(name); flag == nil {
 			t.Fatalf("flag --%s is not defined", name)
@@ -2722,19 +2724,39 @@ func TestWorkerRunArgs(t *testing.T) {
 }
 
 // TestWorkerRunArgsContainerMode checks the podman command line that
-// starts a worker joining a cluster in a container: it joins the cluster
-// container's network namespace by its path — the worker runs rootful,
-// the cluster container rootless, and the two podman stores cannot see
-// each other's containers — and carries the marker that tells the
-// worker its network is the tool's own to configure.
+// starts a rootful worker joining a cluster in a container: it joins the
+// cluster container's network namespace by its path — the worker runs
+// rootful, the cluster container rootless, and the two podman stores
+// cannot see each other's containers — and carries the marker that
+// tells the worker its network is the tool's own to configure.
 func TestWorkerRunArgsContainerMode(t *testing.T) {
-	netns := "/proc/4242/ns/net"
-	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", netns)
+	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", "ns:/proc/4242/ns/net")
 	for i, arg := range got {
 		switch arg {
 		case "--network":
-			if got[i+1] != "ns:"+netns {
+			if got[i+1] != "ns:/proc/4242/ns/net" {
 				t.Fatalf("worker network = %q, want the cluster container's namespace by path", got[i+1])
+			}
+		case "--volume":
+			if got[i+1] == "/state/api/workers/w1/network-isolated:/etc/coreshift/network-isolated:ro,z" {
+				return
+			}
+		}
+	}
+	t.Fatalf("podman args = %q, want the network marker mounted", got)
+}
+
+// TestWorkerRunArgsRootlessContainerMode checks the podman command line
+// that starts a rootless worker joining a cluster in a container: both
+// containers live in the user's one store, so the join is by the
+// cluster container's name, with no path gymnastics.
+func TestWorkerRunArgsRootlessContainerMode(t *testing.T) {
+	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", "container:coreshift-dev")
+	for i, arg := range got {
+		switch arg {
+		case "--network":
+			if got[i+1] != "container:coreshift-dev" {
+				t.Fatalf("worker network = %q, want the cluster container by name", got[i+1])
 			}
 		case "--volume":
 			if got[i+1] == "/state/api/workers/w1/network-isolated:/etc/coreshift/network-isolated:ro,z" {
@@ -2915,6 +2937,31 @@ func TestWorkerCommandsElevateBeforePodman(t *testing.T) {
 	}
 }
 
+// TestCreateWorkerRootlessStaysUnelevated checks the opt-in's promise:
+// a rootless worker creation asks for no elevation at all, running in
+// the user's own podman, so with every way to elevate refused it still
+// proceeds past the elevation machinery to the cluster resolution.
+func TestCreateWorkerRootlessStaysUnelevated(t *testing.T) {
+	writeFakePodman(t)
+	writeFakeSudo(t)
+	noTerminal(t)
+	refusal := filepath.Join(t.TempDir(), "no-passwordless")
+	if err := os.WriteFile(refusal, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SUDO_REFUSE", refusal)
+
+	root := newRootCommand()
+	root.SetArgs([]string{"create", "worker", "--rootless"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "no cluster named coreshift") {
+		t.Fatalf("err = %v, want the cluster resolution past the elevation", err)
+	}
+	if sudo := sudoCalls(t); len(sudo) != 0 {
+		t.Fatalf("sudo calls = %q, want none: the rootless worker needs no elevation", sudo)
+	}
+}
+
 // TestClusterNetworkNamespace checks the namespace path a worker joins:
 // the cluster container's main process, whose namespace root joins by
 // path because the two podman stores cannot see each other's
@@ -2958,7 +3005,7 @@ func TestRunCreateWorkerRefusals(t *testing.T) {
 		setContainers(t, "coreshift-worker-w1", "coreshift-dev")
 		setContainerPort(t, "coreshift-dev", 17443)
 
-		err := runCreateWorker(context.Background(), tc.worker, true, tc.cluster, "", false)
+		err := runCreateWorker(context.Background(), tc.worker, true, tc.cluster, "", false, false)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: err = %v, want a refusal containing %q", name, err, tc.want)
 		}
@@ -2973,7 +3020,7 @@ func TestRunCreateWorkerRefusals(t *testing.T) {
 // flag pointing at no file is refused before anything is minted.
 func TestRunCreateWorkerRefusesMissingFlagFile(t *testing.T) {
 	writeFakePodman(t)
-	err := runCreateWorker(context.Background(), "fresh", true, "coreshift", "/nonexistent/pull-secret", false)
+	err := runCreateWorker(context.Background(), "fresh", true, "coreshift", "/nonexistent/pull-secret", false, false)
 	if err == nil || !strings.Contains(err.Error(), "read pull secret") {
 		t.Fatalf("err = %v, want a refusal naming the pull secret", err)
 	}
@@ -3060,7 +3107,7 @@ func TestRunCreateWorkerBarePrintsCountedName(t *testing.T) {
 
 	var err error
 	out := captureStdout(t, func() {
-		err = runCreateWorker(context.Background(), "", false, "nope", "", false)
+		err = runCreateWorker(context.Background(), "", false, "nope", "", false, false)
 	})
 	if err == nil || !strings.Contains(err.Error(), "no cluster named nope") {
 		t.Fatalf("err = %v, want the unknown-cluster refusal after the pick", err)
@@ -3456,11 +3503,13 @@ func TestRunDeleteWorkerMissing(t *testing.T) {
 }
 
 // TestWorkerFailureQuotesLogAndRemoves checks the failure contract: the
-// error carries the container's log tail and the container is removed.
+// error carries the container's log tail, a join that failed on the
+// cgroup hierarchy gains the rootful remedy, and the container is
+// removed.
 func TestWorkerFailureQuotesLogAndRemoves(t *testing.T) {
 	writeFakePodman(t)
 	setContainerLog(t, "coreshift-worker-w1",
-		"enabling the cgroup controllers failed\n")
+		"enabling the cgroup controllers failed\nthe worker container's cgroup hierarchy must be delegated to it\n")
 
 	err := workerFailure("coreshift-worker-w1", "/state/api", "w1", fmt.Errorf("the worker did not join"))
 	if err == nil {
@@ -3469,6 +3518,8 @@ func TestWorkerFailureQuotesLogAndRemoves(t *testing.T) {
 	for _, want := range []string{
 		"the worker did not join",
 		"recent log output:",
+		"must be delegated to it",
+		"rootful default",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("failure missing %q:\n%v", want, err)

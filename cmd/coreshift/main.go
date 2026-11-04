@@ -1820,25 +1820,30 @@ func refuseInvalidClusterName(name string) error {
 // running cluster: it mints the worker's container image and join
 // material, starts one privileged worker container, and waits for the
 // worker's node to register. Without --name the worker is named by
-// counting the cluster's workers. The whole launch runs under
-// elevation, because workers are rootful.
+// counting the cluster's workers. The worker runs rootful by default,
+// inside one elevated run; --rootless opts into the user's own podman
+// instead, asking for no elevation at all.
 func newCreateWorkerCommand() *cobra.Command {
 	var pullSecretPath, name, cluster string
-	var verbose bool
+	var rootless, verbose bool
 	cmd := &cobra.Command{
 		Use:          "worker",
 		Short:        "Join a worker to a cluster in a podman container",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if os.Geteuid() != 0 {
+			if os.Geteuid() == 0 && rootless {
+				return fmt.Errorf("--rootless runs the worker in the invoking user's own podman; run it without elevation")
+			}
+			if os.Geteuid() != 0 && !rootless {
 				return elevatedExit(elevate())
 			}
-			return runCreateWorker(cmd.Context(), name, cmd.Flags().Changed("name"), cluster, pullSecretPath, verbose)
+			return runCreateWorker(cmd.Context(), name, cmd.Flags().Changed("name"), cluster, pullSecretPath, rootless, verbose)
 		},
 	}
 	cmd.Flags().StringVar(&pullSecretPath, "pull-secret", "", "path to a Red Hat pull secret, as a fallback for clusters created before the cluster stored one")
 	cmd.Flags().StringVar(&name, "name", "", "name of the worker; defaults to worker<number>, one past the cluster's worker count, skipping names in use; its container is called coreshift-worker-<name> and its node carries the name")
 	cmd.Flags().StringVar(&cluster, "cluster", defaultClusterName, "name of the cluster the worker joins")
+	cmd.Flags().BoolVar(&rootless, "rootless", false, "run the worker in the user's own rootless podman under a delegated cgroup scope, with no elevation; pods whose user IDs the worker's user namespace cannot express stay in ContainerCreating")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "stream the image build's output to the terminal")
 	return cmd
 }
@@ -1851,7 +1856,12 @@ func newCreateWorkerCommand() *cobra.Command {
 // detached, streams its boot output, and waits for the worker's node to
 // register. On success the container keeps running; on any failure it is
 // removed, with the join material, while the cluster's state is preserved.
-func runCreateWorker(ctx context.Context, name string, explicit bool, cluster, pullSecretPath string, verbose bool) error {
+// A rootless worker — the --rootless choice — runs in the user's own
+// podman, joining the cluster container's network namespace by its
+// name, since both containers live in that one store; the rootful
+// default joins the same namespace by its path, the two stores being
+// blind to each other.
+func runCreateWorker(ctx context.Context, name string, explicit bool, cluster, pullSecretPath string, rootless, verbose bool) error {
 	// A counted name is worker<number> and always fits; only a typed
 	// name can carry a shape the objects cannot.
 	if explicit && (!dnsLabelPattern.MatchString(name) || len(name) > 63) {
@@ -1912,12 +1922,24 @@ func runCreateWorker(ctx context.Context, name string, explicit bool, cluster, p
 	if err := join.Mint(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), materialDir, name); err != nil {
 		return err
 	}
-	// The worker joins the cluster container's network namespace by its
-	// path: the worker runs rootful, the cluster container rootless, and
-	// root's podman cannot see the container by name — but root can join
-	// any namespace by path.
-	netns := ""
+	// The worker joins the cluster container's network namespace: the
+	// join dials the control plane at the loopback they share, and the
+	// OVN node pod's host networking configures the interfaces of that
+	// namespace, never the host's own. A rootless worker joins by the
+	// cluster container's name, both containers living in the user's one
+	// store; the rootful worker's store cannot see that container, so it
+	// joins by the namespace's path, which root can join anyway.
+	joinNetwork := ""
 	if containerMode {
+		if rootless {
+			joinNetwork = "container:" + clusterContainerPrefix + cluster
+		} else {
+			netns, err := clusterNetworkNamespace(cluster)
+			if err != nil {
+				return err
+			}
+			joinNetwork = "ns:" + netns
+		}
 		// The placement happens before the worker starts, so the OVN
 		// pods the worker's node draws in read the placed objects from
 		// their first start on. The marker tells the worker its
@@ -1928,12 +1950,8 @@ func runCreateWorker(ctx context.Context, name string, explicit bool, cluster, p
 		if err := os.WriteFile(filepath.Join(materialDir, workerNetworkIsolatedFilename), nil, 0o644); err != nil {
 			return fmt.Errorf("write the worker's network marker: %w", err)
 		}
-		netns, err = clusterNetworkNamespace(cluster)
-		if err != nil {
-			return err
-		}
 	}
-	if err := launchWorker(ctx, container, cluster, name, stateDir, materialDir, pullSecretPath, netns, verbose); err != nil {
+	if err := launchWorker(ctx, container, cluster, name, stateDir, materialDir, pullSecretPath, joinNetwork, verbose); err != nil {
 		// The failure path removed the container, when one started; the
 		// join material is the worker's own ephemera and goes with it,
 		// while the cluster's state stays.
@@ -2035,7 +2053,7 @@ func refuseSecondWorker(cluster string) error {
 // build resolved lands in the join material, mounted into the worker
 // where its container runtime reads it, the way a real node's
 // configuration delivers the cluster's secret.
-func launchWorker(ctx context.Context, container, cluster, name, stateDir, materialDir, pullSecretPath, netns string, verbose bool) error {
+func launchWorker(ctx context.Context, container, cluster, name, stateDir, materialDir, pullSecretPath, joinNetwork string, verbose bool) error {
 	pullSecret, authfile, cleanup, err := workerPullSecret(ctx, cluster, stateDir, pullSecretPath)
 	if err != nil {
 		return err
@@ -2070,13 +2088,10 @@ func launchWorker(ctx context.Context, container, cluster, name, stateDir, mater
 	}
 
 	fmt.Printf("Starting container %s\n", container)
-	run := exec.CommandContext(ctx, "podman", workerRunArgs(container, cluster, materialDir, imageRef, netns)...)
-	run.Stdout = io.Discard // the detached run only prints the container ID
-	run.Stderr = os.Stderr
-	if err := run.Run(); err != nil {
-		return fmt.Errorf("start worker container: %w", err)
+	if err := runWorkerPodman(ctx, workerRunArgs(container, cluster, materialDir, imageRef, joinNetwork)); err != nil {
+		return err
 	}
-	return streamUntilWorkerReady(ctx, container, stateDir, name, netns != "")
+	return streamUntilWorkerReady(ctx, container, stateDir, name, joinNetwork != "")
 }
 
 // workerPullSecret resolves the pull secret a worker image build pulls
@@ -2130,26 +2145,26 @@ func writeAuthFile(pullSecret []byte) (string, error) {
 // container: detached and named, labeled with the cluster it joins, and
 // privileged, which hands it the writable cgroup hierarchy the node side
 // needs. A worker joining a cluster in a container joins that cluster
-// container's network namespace by its path — the two podman stores
-// cannot see each other's containers, but the namespace of the cluster
-// container's process is joinable by path — so its join dials the
-// control plane at the loopback they share and the OVN node pod's host
-// networking configures the interfaces of that namespace, never the
-// host's own; a worker joining a host-mode cluster runs on the host
-// network, and its node stays NotReady, because isolating it there
+// container's network namespace — a rootless worker by the container's
+// name, both living in the user's one store; a rootful one by the
+// namespace's path, the two stores blind to each other — so its join
+// dials the control plane at the loopback they share and the OVN node
+// pod's host networking configures the interfaces of that namespace,
+// never the host's own; a worker joining a host-mode cluster runs on the
+// host network, and its node stays NotReady, because isolating it there
 // would cut the join. The join material is mounted read-only at the
 // paths the entrypoint reads, with the pull secret at the path the node
 // runtime reads it, and the host's kernel modules read-only for kubelet.
 // The kubelet state directory stays inside the container: workers are
 // ephemeral, recreated rather than restarted.
-func workerRunArgs(container, cluster, materialDir, imageRef, netns string) []string {
+func workerRunArgs(container, cluster, materialDir, imageRef, joinNetwork string) []string {
 	args := []string{
 		"run", "--detach",
 		"--name", container,
 		"--label", workerClusterLabel + "=" + cluster,
 	}
-	if netns != "" {
-		args = append(args, "--network", "ns:"+netns)
+	if joinNetwork != "" {
+		args = append(args, "--network", joinNetwork)
 	} else {
 		args = append(args, "--network", "host")
 	}
@@ -2160,10 +2175,37 @@ func workerRunArgs(container, cluster, materialDir, imageRef, netns string) []st
 		"--volume", filepath.Join(materialDir, workerPullSecretFilename)+":"+worker.PullSecretMountPath+":ro,z",
 		"--volume", "/lib/modules:/lib/modules:ro",
 	)
-	if netns != "" {
+	if joinNetwork != "" {
 		args = append(args, "--volume", filepath.Join(materialDir, workerNetworkIsolatedFilename)+":"+worker.NetworkIsolatedPath+":ro,z")
 	}
 	return append(args, imageRef)
+}
+
+// rootlessCgroupRemedy names the requirement a rootless launch that
+// could not delegate cgroups leaves the user with: the rootful default
+// is the worker-only fallback.
+const rootlessCgroupRemedy = "Rootless podman cannot give kubelet the cgroup hierarchy it needs here.\n" +
+	"The rootful default is the worker-only fallback: run the same command without --rootless."
+
+// runWorkerPodman starts the worker container, under a delegated cgroup
+// scope when rootless: kubelet creates cgroups inside the container,
+// which rootless podman only permits from a subtree systemd delegated to
+// the user, so the launch asks the user's systemd for one.
+func runWorkerPodman(ctx context.Context, args []string) error {
+	command := append([]string{"podman"}, args...)
+	if os.Geteuid() != 0 {
+		if _, err := exec.LookPath("systemd-run"); err != nil {
+			return fmt.Errorf("systemd-run is required to delegate cgroups to a rootless worker container: %w\n%s", err, rootlessCgroupRemedy)
+		}
+		command = append([]string{"systemd-run", "--user", "--scope", "--quiet", "--property=Delegate=yes"}, command...)
+	}
+	run := exec.CommandContext(ctx, command[0], command[1:]...)
+	run.Stdout = io.Discard // the detached run only prints the container ID
+	run.Stderr = os.Stderr
+	if err := run.Run(); err != nil {
+		return fmt.Errorf("start worker container: %w", err)
+	}
+	return nil
 }
 
 // streamUntilWorkerReady follows the worker container's boot output
@@ -2231,10 +2273,14 @@ func printWorkerSummary(container, stateDir, name string, containerMode bool) {
 }
 
 // workerFailure reports a worker container that did not join: the error
-// carries the tail of the container's log, and the container is removed
-// while the cluster's state is preserved.
+// carries the tail of the container's log, a join that failed on the
+// cgroup hierarchy gains the rootful remedy, and the container is
+// removed while the cluster's state is preserved.
 func workerFailure(container, stateDir, name string, err error) error {
 	tail := containerLogTail(container)
+	if strings.Contains(tail, worker.CgroupDelegationMark) {
+		err = fmt.Errorf("%w\n%s", err, rootlessCgroupRemedy)
+	}
 	if tail != "" {
 		err = fmt.Errorf("%w\n\nrecent log output:\n%s", err, tail)
 	}
