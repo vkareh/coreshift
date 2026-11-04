@@ -871,7 +871,7 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 			if err := aggregation.WaitReady(ctx, kubeconfig, aggregatedServers); err != nil {
 				return fmt.Errorf("control plane not ready: %w", err)
 			}
-			printReadySummary(stateDir, port)
+			printReadySummary(stateDir, name, releaseRef, port)
 			return nil
 		},
 	}
@@ -1095,16 +1095,17 @@ func renameEntry[T any](entries map[string]*T, from, to string) bool {
 	return true
 }
 
-// printReadySummary prints what a client needs to use the running control
-// plane: the endpoint, the admin kubeconfig, and the login command.
-func printReadySummary(stateDir string, port int) {
-	endpoint := apiServerURL(port)
+// printReadySummary prints what a client needs to know about the ready
+// control plane: the cluster's name, the release it runs, the API
+// endpoint, the admin kubeconfig, and the context it selects.
+func printReadySummary(stateDir, name, release string, port int) {
 	fmt.Println()
 	fmt.Println("Control plane ready")
-	fmt.Printf("  API endpoint: %s\n", endpoint)
+	fmt.Printf("  Name:         %s\n", name)
+	fmt.Printf("  Release:      %s\n", release)
+	fmt.Printf("  API endpoint: %s\n", apiServerURL(port))
 	fmt.Printf("  Kubeconfig:   %s\n", filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
-	fmt.Printf("  Log in with:  oc login %s --certificate-authority=%s -u <username> -p <password>\n",
-		endpoint, filepath.Join(stateDir, certgen.CACertFilename))
+	fmt.Printf("  Context:      admin@%s\n", name)
 }
 
 // invokingUserHomes resolves the state and cache homes of the user the
@@ -1344,7 +1345,7 @@ func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, 
 	if err := run.Run(); err != nil {
 		return fmt.Errorf("start container: %w", err)
 	}
-	return streamUntilReady(ctx, container, stateDir, port)
+	return streamUntilReady(ctx, container, stateDir, name, port)
 }
 
 // clusterNetworkName is the podman network cluster containers run on.
@@ -1490,12 +1491,14 @@ func refuseOAuthPort(port int) error {
 }
 
 // streamUntilReady follows the cluster container's boot output while
-// waiting for the control plane's readiness from the host.
-func streamUntilReady(ctx context.Context, container, stateDir string, port int) error {
+// waiting for the control plane's readiness from the host. The release
+// in the summary is the one the run inside resolved, read from the
+// marker it wrote into the shared state directory.
+func streamUntilReady(ctx context.Context, container, stateDir, name string, port int) error {
 	return streamUntil(ctx, container, "the control plane became ready",
 		func(ctx context.Context) error { return waitContainerReady(ctx, stateDir, port) },
 		func() {
-			printReadySummary(stateDir, port)
+			printReadySummary(stateDir, name, stateRelease(stateDir), port)
 			fmt.Printf("Container %s is running in the background\n", container)
 		},
 		func(err error) error { return containerFailure(container, stateDir, err) },
@@ -2172,7 +2175,7 @@ func printWorkerSummary(container, stateDir, name, joinNetwork string, network b
 		fmt.Printf("  Node:       %s, reporting NotReady until a CNI exists\n", name)
 	}
 	if os.Geteuid() != 0 {
-		fmt.Println("  Limit:      workloads whose user IDs the worker's user namespace cannot express will not start; create workers under sudo for those")
+		fmt.Println("  Limit:      workloads whose user IDs the worker's user namespace cannot express will not start")
 	}
 	fmt.Printf("  Kubeconfig: %s\n", filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
 	fmt.Printf("Container %s is running in the background\n", container)
