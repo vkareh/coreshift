@@ -87,8 +87,7 @@ func seed(ctx context.Context, client kubernetes.Interface, pullSecret []byte) e
 }
 
 // Fetch returns the pull secret the cluster the admin kubeconfig points
-// at stores, or nil when it stores none, the shape a cluster created
-// before the Secret existed has.
+// at stores.
 func Fetch(ctx context.Context, kubeconfigPath string) ([]byte, error) {
 	config, err := warnings.Config(kubeconfigPath)
 	if err != nil {
@@ -103,9 +102,6 @@ func Fetch(ctx context.Context, kubeconfigPath string) ([]byte, error) {
 
 func fetch(ctx context.Context, client kubernetes.Interface) ([]byte, error) {
 	secret, err := client.CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil, nil
-	}
 	if err != nil {
 		return nil, fmt.Errorf("read the cluster's pull secret: %w", err)
 	}

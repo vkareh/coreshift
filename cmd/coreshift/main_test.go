@@ -28,7 +28,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -2697,16 +2696,14 @@ func TestDeleteClusterFlagDefaults(t *testing.T) {
 
 // TestCreateWorkerFlagDefaults checks that the worker creation flags are
 // accepted and come with the documented defaults — the name has none,
-// because a bare creation counts it — and that the pull secret is
-// optional: the cluster's stored one is the default. The rootless
-// launch is the bare default; the retired flag is gone.
+// because a bare creation counts it. The rootless launch is the bare
+// default; the retired flag is gone.
 func TestCreateWorkerFlagDefaults(t *testing.T) {
 	cmd := newCreateWorkerCommand()
 	for name, want := range map[string]string{
-		"name":        "",
-		"cluster":     "coreshift",
-		"verbose":     "false",
-		"pull-secret": "",
+		"name":    "",
+		"cluster": "coreshift",
+		"verbose": "false",
 	} {
 		if flag := cmd.Flags().Lookup(name); flag == nil {
 			t.Fatalf("flag --%s is not defined", name)
@@ -2720,8 +2717,8 @@ func TestCreateWorkerFlagDefaults(t *testing.T) {
 	if usage := cmd.Flags().Lookup("name").Usage; !strings.Contains(usage, "count") {
 		t.Fatalf("--name usage = %q, want the counting default described", usage)
 	}
-	if _, required := cmd.Flags().Lookup("pull-secret").Annotations[cobra.BashCompOneRequiredFlag]; required {
-		t.Fatal("pull secret must not be required: the cluster's stored one is the default")
+	if flag := cmd.Flags().Lookup("pull-secret"); flag != nil {
+		t.Fatal("flag --pull-secret is gone: the cluster's stored secret is the only source")
 	}
 }
 
@@ -2913,7 +2910,7 @@ func TestRunCreateWorkerRefusals(t *testing.T) {
 		setContainers(t, "coreshift-worker-w1", "coreshift-dev")
 		setContainerPort(t, "coreshift-dev", 17443)
 
-		err := runCreateWorker(context.Background(), tc.worker, true, tc.cluster, "", false)
+		err := runCreateWorker(context.Background(), tc.worker, true, tc.cluster, false)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: err = %v, want a refusal containing %q", name, err, tc.want)
 		}
@@ -2921,16 +2918,6 @@ func TestRunCreateWorkerRefusals(t *testing.T) {
 		if calls, err := os.ReadFile(os.Getenv("PODMAN_LOG")); err == nil && strings.Contains(string(calls), "build") {
 			t.Fatalf("%s: an image was minted despite the refusal", name)
 		}
-	}
-}
-
-// TestRunCreateWorkerRefusesMissingFlagFile checks that a pull secret
-// flag pointing at no file is refused before anything is minted.
-func TestRunCreateWorkerRefusesMissingFlagFile(t *testing.T) {
-	writeFakePodman(t)
-	err := runCreateWorker(context.Background(), "fresh", true, "coreshift", "/nonexistent/pull-secret", false)
-	if err == nil || !strings.Contains(err.Error(), "read pull secret") {
-		t.Fatalf("err = %v, want a refusal naming the pull secret", err)
 	}
 }
 
@@ -3037,7 +3024,7 @@ func TestRunCreateWorkerBarePrintsCountedName(t *testing.T) {
 
 	var runErr error
 	out := captureStdout(t, func() {
-		runErr = runCreateWorker(context.Background(), "", false, "nope", "", false)
+		runErr = runCreateWorker(context.Background(), "", false, "nope", false)
 	})
 	// The stand-in cluster serves no join endpoints, so the mint that
 	// follows the pick fails; the pick itself is what is tested.
@@ -3106,15 +3093,15 @@ func writeClusterPullSecret(t *testing.T, stateDir string, pullSecret []byte) {
 	}
 }
 
-// TestWorkerPullSecretReadsClusterSecret checks the default path: with
-// no flag, the Secret the cluster stores becomes both the build's
-// credentials and its throwaway auth file, which the cleanup removes.
+// TestWorkerPullSecretReadsClusterSecret checks that the Secret the
+// cluster stores becomes both the build's credentials and its throwaway
+// auth file, which the cleanup removes.
 func TestWorkerPullSecretReadsClusterSecret(t *testing.T) {
 	secret := []byte(`{"auths":{"quay.io":{"auth":"dXNlcjpwYXNz"}}}`)
 	stateDir := t.TempDir()
 	writeClusterPullSecret(t, stateDir, secret)
 
-	pullSecret, authfile, cleanup, err := workerPullSecret(context.Background(), "dev", stateDir, "")
+	pullSecret, authfile, cleanup, err := workerPullSecret(context.Background(), stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3131,47 +3118,6 @@ func TestWorkerPullSecretReadsClusterSecret(t *testing.T) {
 	cleanup()
 	if _, err := os.Stat(authfile); !os.IsNotExist(err) {
 		t.Fatal("cleanup left the throwaway auth file behind")
-	}
-}
-
-// TestWorkerPullSecretFlagWins checks that a given flag file is used as
-// the build's authfile itself, whatever the cluster stores.
-func TestWorkerPullSecretFlagWins(t *testing.T) {
-	stateDir := t.TempDir()
-	writeClusterPullSecret(t, stateDir, []byte(`{"auths":{"other.example":{"auth":"other"}}}`))
-	flagPath := writePullSecret(t)
-
-	pullSecret, authfile, cleanup, err := workerPullSecret(context.Background(), "dev", stateDir, flagPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cleanup != nil {
-		t.Fatal("the flag's own file needs no cleanup")
-	}
-	if authfile != flagPath {
-		t.Fatalf("authfile = %q, want the flag's file", authfile)
-	}
-	if want := readFile(t, filepath.Dir(flagPath), filepath.Base(flagPath)); !bytes.Equal(pullSecret, want) {
-		t.Fatalf("pull secret = %q, want the flag's file content", pullSecret)
-	}
-}
-
-// TestWorkerPullSecretRefusesClusterWithoutSecret checks the fallback's
-// refusal: a cluster storing no pull secret, the shape one created
-// before the Secret existed has, is refused naming the flag and the
-// re-creation.
-func TestWorkerPullSecretRefusesClusterWithoutSecret(t *testing.T) {
-	stateDir := t.TempDir()
-	writeClusterPullSecret(t, stateDir, nil)
-
-	_, _, _, err := workerPullSecret(context.Background(), "dev", stateDir, "")
-	if err == nil {
-		t.Fatal("expected a refusal for a cluster storing no pull secret")
-	}
-	for _, want := range []string{"stores no pull secret", "--pull-secret", "re-create"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("refusal missing %q:\n%v", want, err)
-		}
 	}
 }
 

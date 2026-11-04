@@ -131,19 +131,6 @@ func TestFetchReturnsStoredPullSecret(t *testing.T) {
 	}
 }
 
-// TestFetchWithoutStoredPullSecret checks that a cluster storing no
-// Secret, the shape one created before the Secret existed has, answers
-// nil rather than an error, leaving the caller to name the fallback.
-func TestFetchWithoutStoredPullSecret(t *testing.T) {
-	data, err := fetch(context.Background(), fake.NewSimpleClientset())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if data != nil {
-		t.Fatalf("fetched %q, want none", data)
-	}
-}
-
 // TestFetchRefusesSecretWithoutKey checks that a Secret missing the
 // standard key is refused as broken rather than read as empty.
 func TestFetchRefusesSecretWithoutKey(t *testing.T) {

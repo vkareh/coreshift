@@ -1719,17 +1719,16 @@ func refuseInvalidClusterName(name string) error {
 // rootless, in the invoking user's own podman; the same command under
 // sudo runs it rootful.
 func newCreateWorkerCommand() *cobra.Command {
-	var pullSecretPath, name, cluster string
+	var name, cluster string
 	var verbose bool
 	cmd := &cobra.Command{
 		Use:          "worker",
 		Short:        "Join a worker to a cluster in a podman container",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runCreateWorker(cmd.Context(), name, cmd.Flags().Changed("name"), cluster, pullSecretPath, verbose)
+			return runCreateWorker(cmd.Context(), name, cmd.Flags().Changed("name"), cluster, verbose)
 		},
 	}
-	cmd.Flags().StringVar(&pullSecretPath, "pull-secret", "", "path to a Red Hat pull secret, as a fallback for clusters created before the cluster stored one")
 	cmd.Flags().StringVar(&name, "name", "", "name of the worker; defaults to worker<number>, one past the cluster's worker count, skipping names in use; its container is called coreshift-worker-<name> and its node carries the name")
 	cmd.Flags().StringVar(&cluster, "cluster", defaultClusterName, "name of the cluster the worker joins")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "stream the image build's output to the terminal")
@@ -1751,7 +1750,7 @@ func newCreateWorkerCommand() *cobra.Command {
 // path, the two stores being blind to each other. The cluster's network
 // is brought up by its first worker, whichever kind that is; the later
 // ones join with it running.
-func runCreateWorker(ctx context.Context, name string, explicit bool, cluster, pullSecretPath string, verbose bool) error {
+func runCreateWorker(ctx context.Context, name string, explicit bool, cluster string, verbose bool) error {
 	rootless := os.Geteuid() != 0
 	// A counted name is worker<number> and always fits; only a typed
 	// name can carry a shape the objects cannot.
@@ -1769,16 +1768,6 @@ func runCreateWorker(ctx context.Context, name string, explicit bool, cluster, p
 	}
 	if explicit && exec.Command("podman", "container", "exists", workerContainerPrefix+name).Run() == nil {
 		return fmt.Errorf("worker %s already exists; use --name to create another worker, or delete it first", name)
-	}
-	if pullSecretPath != "" {
-		abs, err := filepath.Abs(pullSecretPath)
-		if err != nil {
-			return err
-		}
-		if _, err := os.Stat(abs); err != nil {
-			return fmt.Errorf("read pull secret: %w", err)
-		}
-		pullSecretPath = abs
 	}
 	port, stateDir, err := workerClusterTarget(cluster)
 	if err != nil {
@@ -1851,7 +1840,7 @@ func runCreateWorker(ctx context.Context, name string, explicit bool, cluster, p
 			return fmt.Errorf("write the worker's network marker: %w", err)
 		}
 	}
-	if err := launchWorker(ctx, container, cluster, name, stateDir, materialDir, pullSecretPath, joinNetwork, network, verbose); err != nil {
+	if err := launchWorker(ctx, container, cluster, name, stateDir, materialDir, joinNetwork, network, verbose); err != nil {
 		// The failure path removed the container, when one started; the
 		// join material is the worker's own ephemera and goes with it,
 		// while the cluster's state stays.
@@ -1953,16 +1942,14 @@ func refusePastaNetwork(cluster string) error {
 // build resolved lands in the join material, mounted into the worker
 // where its container runtime reads it, the way a real node's
 // configuration delivers the cluster's secret.
-func launchWorker(ctx context.Context, container, cluster, name, stateDir, materialDir, pullSecretPath, joinNetwork string, network, verbose bool) error {
-	pullSecret, authfile, cleanup, err := workerPullSecret(ctx, cluster, stateDir, pullSecretPath)
+func launchWorker(ctx context.Context, container, cluster, name, stateDir, materialDir, joinNetwork string, network, verbose bool) error {
+	pullSecret, authfile, cleanup, err := workerPullSecret(ctx, stateDir)
 	if err != nil {
 		return err
 	}
-	if cleanup != nil {
-		// The cluster's stored secret was written to a throwaway file;
-		// the image build is its only reader.
-		defer cleanup()
-	}
+	// The cluster's stored secret was written to a throwaway file; the
+	// image build is its only reader.
+	defer cleanup()
 	if err := os.WriteFile(filepath.Join(materialDir, workerPullSecretFilename), pullSecret, 0o600); err != nil {
 		return fmt.Errorf("write the worker's pull secret: %w", err)
 	}
@@ -1995,25 +1982,13 @@ func launchWorker(ctx context.Context, container, cluster, name, stateDir, mater
 }
 
 // workerPullSecret resolves the pull secret a worker image build pulls
-// its base with, as podman's authfile: the flag's file when one was
-// given, otherwise the Secret the cluster stores, written to a
-// throwaway file whose removal the returned cleanup carries out. A
-// cluster created before the Secret existed stores none; the flag is
-// the fallback for it.
-func workerPullSecret(ctx context.Context, cluster, stateDir, pullSecretPath string) (pullSecret []byte, authfile string, cleanup func(), err error) {
-	if pullSecretPath != "" {
-		pullSecret, err := os.ReadFile(pullSecretPath)
-		if err != nil {
-			return nil, "", nil, fmt.Errorf("read pull secret: %w", err)
-		}
-		return pullSecret, pullSecretPath, nil, nil
-	}
+// its base with, as podman's authfile: the Secret the cluster stores,
+// written to a throwaway file whose removal the returned cleanup
+// carries out.
+func workerPullSecret(ctx context.Context, stateDir string) (pullSecret []byte, authfile string, cleanup func(), err error) {
 	pullSecret, err = pullsecret.Fetch(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
 	if err != nil {
 		return nil, "", nil, err
-	}
-	if pullSecret == nil {
-		return nil, "", nil, fmt.Errorf("cluster %s stores no pull secret; pass --pull-secret for this build, or re-create the cluster to store one", cluster)
 	}
 	authfile, err = writeAuthFile(pullSecret)
 	if err != nil {
