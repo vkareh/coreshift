@@ -3099,6 +3099,42 @@ func TestRunCreateWorkerBarePrintsCountedName(t *testing.T) {
 	}
 }
 
+// TestCreateWorkerHandsBackWorkersTree checks the ownership promise of
+// an elevated creation: the hand-back covers the cluster's whole
+// workers tree, the directory holding the material included, so the
+// user's state tree stays user-owned however the run ends. The run
+// fails at the mint against the stand-in cluster, so the hand-back is
+// observed on a failure exit; the seam stands in for the chown because
+// an unelevated test cannot observe one.
+func TestCreateWorkerHandsBackWorkersTree(t *testing.T) {
+	writeFakePodman(t)
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	setContainers(t, "coreshift-dev")
+	stateDir, err := clusterDir("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeClusterNodes(t, stateDir, "dev")
+
+	var handed []string
+	orig := chownToUser
+	chownToUser = func(path string) error {
+		handed = append(handed, path)
+		return nil
+	}
+	t.Cleanup(func() { chownToUser = orig })
+
+	err = runCreateWorker(context.Background(), "w1", true, "dev", false)
+	if err == nil {
+		t.Fatal("want the mint to fail against the stand-in cluster")
+	}
+	workersDir := filepath.Join(stateDir, workersDirName)
+	if len(handed) != 1 || handed[0] != workersDir {
+		t.Fatalf("handed back = %q, want the workers tree %q alone", handed, workersDir)
+	}
+}
+
 // TestWorkerRunArgsSecondWorkerBesideNetwork checks the podman command
 // line that starts a worker joining beside the one that runs the
 // cluster's network: it still joins the cluster container's namespace,

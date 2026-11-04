@@ -1165,8 +1165,9 @@ func followInvokingUserHomes() error {
 // chownToUser hands path and everything below it back to the invoking
 // user, so state written by a command under sudo stays the user's own
 // and every unelevated command keeps working on it. Unelevated nothing
-// was written as root, so it is a no-op.
-func chownToUser(path string) error {
+// was written as root, so it is a no-op. A variable, so tests can
+// observe what a run hands back.
+var chownToUser = func(path string) error {
 	uid, uidErr := strconv.Atoi(os.Getenv("SUDO_UID"))
 	if os.Getenv("SUDO_USER") == "" || os.Geteuid() != 0 || uidErr != nil {
 		return nil
@@ -1825,7 +1826,13 @@ func runCreateWorker(ctx context.Context, name string, explicit bool, cluster st
 		}
 	}
 
-	materialDir := filepath.Join(stateDir, workersDirName, name)
+	workersDir := filepath.Join(stateDir, workersDirName)
+	materialDir := filepath.Join(workersDir, name)
+	// Whatever this run writes into the user's state tree — the join
+	// material, and the workers directory holding it — belongs to the
+	// invoking user, whichever way the run ends, so the hand-back
+	// covers the whole workers tree, not the material alone.
+	defer func() { _ = chownToUser(workersDir) }()
 	if err := join.Mint(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), materialDir, name); err != nil {
 		return err
 	}
@@ -1867,9 +1874,7 @@ func runCreateWorker(ctx context.Context, name string, explicit bool, cluster st
 		_ = os.RemoveAll(materialDir)
 		return err
 	}
-	// The join material was written under elevation; it stays for the
-	// worker's lifetime, so it belongs to the user it belongs to.
-	return chownToUser(materialDir)
+	return nil
 }
 
 // clusterNodes lists the names of the nodes a cluster's API reports: its
