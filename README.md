@@ -48,8 +48,8 @@ workers, and its state; cleanup clears leftover state and cached images.
   managed container and wait for its node to register.
 - `coreshift delete worker [--name]`: stop a worker's container and
   remove it, along with its node.
-- `coreshift get workers`: list the workers with their cluster and live
-  readiness.
+- `coreshift get workers`: list the workers with their cluster, kind,
+  and live readiness.
 - `coreshift cleanup [--name | --all]`: remove cluster state and, with
   `--cache`, everything derived and rebuildable: the image cache and the
   minted container images.
@@ -600,24 +600,40 @@ a real node's do. Everything else, above all the kubelet state, stays
 inside the container: workers are ephemeral, re-created rather than
 restarted, and a re-created worker joins fresh.
 
-Workers are a rootful, worker-only requirement, and the control plane
-stays rootless. kubelet chowns its pods' volumes to user IDs a rootless
-worker's user namespace cannot express, so workload pods would sit in
-ContainerCreating forever — the recorded design decision for exactly
-that wall. The whole worker launch therefore happens inside one
-elevated invocation: the command re-runs itself through sudo, asking
-for a password the way any other privileged Linux tool does —
-passwordless or cached sudo access runs it with no prompt at all, a
-terminal gets the plain password prompt, and an askpass helper covers
-terminal-less contexts — and every podman call the command makes — the
-image build included, so the worker image lands in root's store where
-the rootful run can use it — runs as root, with no elevation nested
-inside. State the elevated run writes is handed back to the invoking
-user, so every unelevated command keeps working on it. When no way to
-ask exists — no passwordless access, no terminal, no helper — the
-command fails naming what to configure instead of hanging; running the
-command under `sudo` yourself works too. `delete worker` elevates the
-same way, one prompt.
+Workers run rootful by default, the general path, and the control
+plane stays rootless: kubelet chowns its pods' volumes to user IDs a
+rootless worker's user namespace cannot express, so under a rootless
+worker the arbitrary pod would sit in ContainerCreating forever — the
+recorded design decision for exactly that wall. The default launch
+therefore happens inside one elevated invocation: the command re-runs
+itself through sudo, asking for a password the way any other privileged
+Linux tool does — passwordless or cached sudo access runs it with no
+prompt at all, a terminal gets the plain password prompt, and an askpass
+helper covers terminal-less contexts — and every podman call the
+command makes — the image build included, so the worker image lands in
+root's store where the rootful run can use it — runs as root, with no
+elevation nested inside. State the elevated run writes is handed back
+to the invoking user, so every unelevated command keeps working on it.
+When no way to ask exists — no passwordless access, no terminal, no
+helper — the command fails naming what to configure instead of hanging;
+running the command under `sudo` yourself works too. `delete worker`
+elevates the same way, one prompt.
+
+`--rootless` opts into the other way: the worker runs in the user's
+own rootless podman, inside a cgroup scope systemd delegates to the
+user — the mechanism kubelet's cgroup creation needs under rootless
+podman — and joins the cluster container's network namespace by its
+name, both containers living in the user's one store, so the whole
+launch, image build and OVN bring-up included, asks for no elevation
+anywhere: the entire tool runs rootless, control plane to node. The
+worker is proven capable of everything infra — the join, CRI-O and
+kubelet, OVN eight-for-eight, a Ready node, the host untouched. The
+honest limit stays: a pod whose user IDs the worker's user namespace
+cannot express cannot be created on it, so the mode is for node and
+network use and for cooperative workloads — a pod that opts into its
+own user namespace with `hostUsers: false` asks for exactly the
+isolation the rootless node can provide. Deleting a rootless worker
+needs no elevation either.
 
 Which network the worker runs on is decided by the cluster it joins.
 A cluster in a container has a network namespace of its own, and the
@@ -626,22 +642,24 @@ share, and the worker brings up the node's OVS and the br-ex gateway
 bridge inside that namespace — the job a real node's openvswitch and
 ovs-configuration services do — so the OVN node pod, host-networked
 itself, reconfigures the interfaces of the cluster container and never
-the host's. The worker runs rootful and the cluster container rootless,
-two podman stores that cannot see each other's containers, so the join
-is by path, not by name: the create command resolves the cluster
-container's main process network namespace from the user's podman and
-hands the elevated podman the namespace's path, which root can join.
-A marker file mounted by the create command gates that bring-up, and a
-host-mode worker, which runs on the host's own network, brings up
-neither: the cluster must not reconfigure the developer's machine.
-Because both worker and control plane live in one namespace, a
-container cluster carries one worker only, the create command refuses
-the pasta network a rootless cluster container may run on — its proxy
-would not survive the gateway takeover — and clusters created now run
-on the project's own podman network instead. Whether a host-mode
-cluster can have a network of its own behind its worker is an open
-question: isolating the worker there would cut the loopback the join
-dials.
+the host's. A rootless worker joins the namespace by the cluster
+container's name, both containers living in the user's one podman
+store; the rootful worker's store cannot see that container, so it
+joins by the namespace's path, which root can join anyway. A marker
+file mounted by the create command gates that bring-up, and a host-mode
+worker, which runs on the host's own network, brings up neither: the
+cluster must not reconfigure the developer's machine. Because worker
+and control plane live in one namespace, the bring-up belongs to the
+cluster's first worker, whichever kind it is: a later worker repeating
+it would fight the first over the namespace's interfaces rather than
+share them, so later workers — a cluster may hold both kinds at once —
+join beside it with the network running and their nodes report
+NotReady. The create command refuses the pasta network a rootless
+cluster container may run on — its proxy would not survive the gateway
+takeover — and clusters created now run on the project's own podman
+network instead. Whether a host-mode cluster can have a network of its
+own behind its worker is an open question: isolating the worker there
+would cut the loopback the join dials.
 
 In that shared namespace the cluster's network comes up for real: the
 create command places the OVN workloads as above, waits for the OVN
@@ -658,12 +676,19 @@ namespaces land under `/var/run/netns` while the network pods mount
 spelling than it is created with — and no workload pod's network can
 come up.
 
-Workload pods beyond the network's own run for real: under the rootful
-worker, kubelet's volume chowns to pod user IDs succeed — the wall that
+Workload pods beyond the network's own run for real under the rootful
+worker: kubelet's volume chowns to pod user IDs succeed — the wall that
 kept pods in ContainerCreating — so a plain pod schedules onto the
-worker, gets a cluster-network address from the CNI, and runs. The
-proof, captured below: pods answer each other through the overlay, and
-the API server answers from inside the pod network.
+worker, gets a cluster-network address from the CNI, and runs. Under
+the rootless worker the same chowns are the wall, and the two sides of
+the cooperative contract show it: the arbitrary pod, whose user IDs the
+worker's user namespace cannot express, stays stuck in
+ContainerCreating; the pod that opts into its own user namespace with
+`hostUsers: false` asks the container runtime to idmap its volumes
+instead of chowning them, and the recorded experiment below shows where
+that path lands on a rootless worker. The proof for the rootful side,
+captured below: pods answer each other through the overlay, and the
+API server answers from inside the pod network.
 
 When a worker fails — its container exits, its node never registers,
 or the OVN workloads never come up — the error quotes the tail of the
@@ -682,9 +707,15 @@ access is passwordless:
 ./coreshift create worker
 ```
 
+With `--rootless` the same command joins the worker through the user's
+own podman instead, asking for no elevation anywhere — see
+[the rootless worker mode](#the-rootless-worker-mode) for what that
+gives and what it honestly does not.
+
 The worker's name is picked by counting: with no `--name`, the number is
-one past the count of the cluster's workers — the first worker is
-`worker1`, the next `worker2` — and any name already in use is skipped
+one past the count of the cluster's nodes — every joined worker is one,
+whichever kind holds its container — so the first worker is
+`worker1`, the next `worker2`, and any name already in use is skipped
 past, so repeated bare commands scale out without flags and never
 collide with each other. The chosen name prints before anything is
 minted.
@@ -808,8 +839,8 @@ Check what is running, and remove the worker again:
 
 ```
 ./coreshift get workers
-NAME      CLUSTER     READY
-worker1   coreshift   ready
+NAME      CLUSTER     MODE      READY
+worker1   coreshift   rootful   ready
 ```
 
 ```
@@ -839,14 +870,47 @@ starts from nothing.
   flag and the re-creation as the ways through.
 - `--name`: the worker's name, used exactly as typed. Without it the name
   is `worker<number>`, where the number is one past the count of the
-  cluster's existing workers — a cluster holding one worker named `foo`
+  cluster's nodes — every joined worker is one, whichever kind holds
+  its container — so a cluster holding one worker named `foo`
   gets `worker2` — and skips upward past any name already in use, so a
   bare command after deletions never collides with a survivor. The
   container is called `coreshift-worker-<name>` and the node carries
   the name.
 - `--cluster`: the cluster the worker joins, `coreshift` by default. A
   name no cluster exists under is refused, listing the clusters that do.
+- `--rootless`: run the worker in the user's own rootless podman under
+  a delegated cgroup scope, with no elevation anywhere. The mode's
+  honest limit applies: pods whose user IDs the worker's user namespace
+  cannot express stay in ContainerCreating, so it serves node, network,
+  and cooperative workloads — pods that opt into their own user
+  namespace.
 - `--verbose`: stream the image build's output to the terminal.
+
+## The rootless worker mode
+
+`coreshift create worker --rootless` joins a worker without a single
+elevation prompt: the launch, image build, join material, OVN placement,
+and network bring-up all run unprivileged in the user's own podman, the
+worker container sits inside a cgroup scope systemd delegates to the
+user, and it joins the cluster container's network namespace by name,
+both containers living in the one store. With the control plane already
+rootless, the entire tool now runs rootless, control plane to node.
+
+What the mode gives: a Ready node with the full network — the join,
+CRI-O and kubelet, the OVN pods, the host untouched — and the
+cooperative contract for workload pods. What it does not: a pod whose
+user IDs the worker's user namespace cannot express cannot be created on
+the node — kubelet's volume chown to those IDs fails, and the pod stays
+in ContainerCreating. The mode is for node-and-network use and for
+cooperative workloads.
+
+The cooperative contract is the standard per-pod field that opts a pod
+into its own user namespace: `hostUsers: false`. A pod carrying it asks
+the container runtime to idmap its volumes instead of chowning them —
+exactly the isolation a rootless node can provide — while a pod without
+it asks for user IDs only the rootful worker can express. Both sides of
+that contract were run against a live rootless worker; the evidence is
+recorded below.
 
 ## `run cluster` or `create cluster`
 
@@ -858,10 +922,10 @@ should outlive the terminal, or when several clusters have to run side by
 side, each with its own name. Both answer the question "does it
 behave like OpenShift at the API level" equally well; `create worker`
 adds the node side to either, a real kubelet and CRI-O joining from a
-container. A worker joining a cluster in a container runs the cluster's
-whole network stack as the real OVN pods on it; a worker joining a
-host-mode cluster joins and stops there, its node NotReady, because
-the cluster must not reconfigure the host's own network.
+container. The first worker joining a cluster in a container runs the
+cluster's whole network stack as the real OVN pods on it; a worker
+joining a host-mode cluster joins and stops there, its node NotReady,
+because the cluster must not reconfigure the host's own network.
 
 ## The `delete cluster` command
 
@@ -873,10 +937,10 @@ plane down in reverse startup order, like a host-mode shutdown, and the
 workers go first, each deleted the same way `delete worker` deletes it,
 while the cluster's API still answers. A cluster that has workers
 deletes under elevation — the whole command re-run as root through one
-`sudo -A` prompt, because the rootful worker containers live in root's
-podman store — while the cluster's own rootless container is still
-managed through the invoking user's podman from inside the elevated
-run. The command says what was removed
+prompt — because its rootful workers live in root's podman store,
+beyond the unprivileged side's reach; from inside the elevated run the
+rootless workers are still managed through the invoking user's own
+podman. The command says what was removed
 and where the state was, and leaves nothing behind: no containers, no
 state directory, not even an empty clusters tree. Keeping any of it is
 the explicit act.
@@ -918,13 +982,14 @@ deletes.
 
 `coreshift delete worker` stops the named worker's container and removes
 it, then removes the node and the machine record its join created, so
-the cluster's node list is clean again. The worker container is rootful,
-so the deletion runs under elevation like the creation did: the command
-re-runs itself through one `sudo -A` prompt. The cluster must be running
-to remove the pair; when it is not, the container still goes, and the
-node stays until the cluster's state does. When the cluster's state is
-already gone, the container still goes too, with a note that the node
-went with the cluster's state.
+the cluster's node list is clean again. A rootless worker lives in the
+user's own podman and deletes with no elevation at all; a rootful one
+lives in root's store, so the deletion elevates for it, like its
+creation did, re-running through one prompt. The cluster must be
+running to remove the pair; when it is not, the container still goes,
+and the node stays until the cluster's state does. When the cluster's
+state is already gone, the container still goes too, with a note that
+the node went with the cluster's state.
 
 Deleting a cluster without `--preserve-workers` deletes its workers the
 same way, one by one before the cluster's own container goes; see
@@ -957,16 +1022,18 @@ exists for the name, listing the clusters that do:
 /home/you/.local/state/coreshift/clusters/coreshift/admin.kubeconfig
 ```
 
-`coreshift get workers` lists the workers: name, cluster, and readiness.
-Worker containers are rootful, in root's podman store, which an
-unprivileged listing cannot see, so the listing reads that side too,
-without ever prompting — `sudo -n` refuses where it would need a
-password — and when the read is refused it reports only what the
-unprivileged side can see, with a plain note that seeing rootful
-workers needs elevation. Readiness requires the worker's container
-running and its node's own condition, read live from the cluster's
-API, ready: a stopped container is not ready without probing. With no
-workers it prints `No workers`.
+`coreshift get workers` lists the workers: name, cluster, kind, and
+readiness. A rootless worker's container lives in the user's own
+podman, the same store as the cluster's, so the unprivileged listing
+sees it; a rootful one lives in root's store, which that listing cannot
+see, so it reads that side too, without ever prompting — `sudo -n`
+refuses where it would need a password — and when the read is refused
+it reports only what the unprivileged side can see, with a plain note
+that seeing rootful workers needs elevation. A cluster may hold workers
+of both kinds; each row carries its label. Readiness requires the
+worker's container running and its node's own condition, read live from
+the cluster's API, ready: a stopped container is not ready without
+probing. With no workers it prints `No workers`.
 
 ## The `version` command
 
