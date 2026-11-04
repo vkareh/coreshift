@@ -912,6 +912,66 @@ it asks for user IDs only the rootful worker can express. Both sides of
 that contract were run against a live rootless worker; the evidence is
 recorded below.
 
+### The user-namespace experiment
+
+The question: a pod that opts into its own user namespace with
+`hostUsers: false`, carrying volumes and a user ID the rootless
+worker's user namespace cannot express by chown — does it run on the
+rootless worker, its volumes idmapped by the container runtime? The
+worker under test mapped user IDs 0-65536 only (`0 1002 1` and
+`1 589824 65536`); the pods carried 1000430000, the user ID range the
+`default` namespace's security allocation assigns, and an emptyDir
+volume plus a config map. The answer is no, and the boundary sits
+before the runtime's idmap machinery is ever reached:
+
+```
+NAME          READY   STATUS              RESTARTS   AGE
+cooperative   0/1     ContainerCreating   0          67s
+stuck         0/1     ContainerCreating   0          67s
+```
+
+The opt-in pod and its counter-example — the same pod without the
+field — stick in ContainerCreating for the same reason, in the
+kubelet's own volume setup: the projected service-account token is
+chowned to the pod's user ID before anything else exists, and that
+chown cannot express the ID:
+
+```
+E atomic_writer.go:449] pod default/cooperative volume kube-api-access-pwrbh:
+  unable to change file .../token with owner 1000430000:
+  chown .../token: invalid argument
+```
+
+The counter-example fails at the identical line — the contract's two
+sides, one boundary. The container runtime never sees either pod: its
+log carries no sandbox for them and not one idmap line, so there are no
+idmapped mounts to capture. The failure is the kubelet's, not the
+runtime's.
+
+A pod with the opt-in and a mapped user ID (1000) passes the kubelet's
+volume setup and reaches the runtime, which fails one layer deeper:
+the kubelet allocates the pod its own user namespace — a 65536-ID block
+at 2036531200 — and CRI-O creates the sandbox, then fails chowning the
+sandbox's own resolv.conf to that allocated ID, which the rootless
+worker's namespace cannot express either:
+
+```
+Warning  FailedCreatePodSandBox  kubelet  Failed to create pod sandbox:
+  create resolv conf: cannot chown .../resolv.conf to 2036531200:2036531200:
+  chown .../resolv.conf: invalid argument
+```
+
+So the per-pod user namespace field does not carry a pod past the
+rootless worker's boundary: every layer that chowns by raw user ID —
+the kubelet's projected token, the runtime's sandbox resolv.conf —
+demands IDs the rootless namespace cannot express, and the idmapped
+mounts that would finally express them are never reached. The
+cooperative contract on a rootless worker is therefore the one the
+network's own workloads already follow: run with user IDs the worker's
+namespace maps — the OVN placement re-annotates the network namespaces'
+allocated ranges for exactly that reason, and those pods run
+eight-for-eight.
+
 ## `run cluster` or `create cluster`
 
 Use `run cluster` on machines without a container runtime — it needs
