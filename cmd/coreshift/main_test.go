@@ -2449,6 +2449,9 @@ func TestRunDeletePreserveStateKeepsState(t *testing.T) {
 // refused plainly, with nothing stopped or removed, with and without the
 // preserve-state flag.
 func TestRunDeleteMissingCluster(t *testing.T) {
+	// The state home is the test's own, so the refusal names none of
+	// the machine's real clusters.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	for _, preserveState := range []bool{false, true} {
 		writeFakePodman(t)
 		err := runDelete(context.Background(), "nope", preserveState, false)
@@ -2840,10 +2843,12 @@ func TestInvokingUserHomes(t *testing.T) {
 // TestCreateWorkerBareStaysUnelevated checks the default's promise: a
 // bare worker creation asks for no elevation at all, running in the
 // user's own podman, so with every way to elevate refused it still
-// proceeds to the cluster resolution.
+// proceeds to the cluster resolution. The state home is the test's
+// own, so that resolution cannot reach a live default-named cluster.
 func TestCreateWorkerBareStaysUnelevated(t *testing.T) {
 	writeFakePodman(t)
 	writeFakeSudo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	noTerminal(t)
 	refusal := filepath.Join(t.TempDir(), "no-passwordless")
 	if err := os.WriteFile(refusal, nil, 0o644); err != nil {
@@ -2889,7 +2894,10 @@ func TestClusterNetworkNamespace(t *testing.T) {
 // anything is minted: a name the objects cannot carry, a taken worker
 // name, an unknown cluster, and a cluster whose API is not answering.
 // None needs a pull secret flag, since the refusals precede its use.
+// The state home is the test's own, so the refusals read no real
+// cluster state.
 func TestRunCreateWorkerRefusals(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	for name, tc := range map[string]struct {
 		worker  string
 		cluster string
@@ -3442,10 +3450,13 @@ func TestRunGetWorkersStoppedContainerNotReady(t *testing.T) {
 // TestRunDeleteWorkerStopsAndRemoves checks the delete contract: the
 // container is stopped with the same teardown time the cluster's gets
 // and then removed, its cluster read from its label — all through the
-// user's own store, with no elevation anywhere.
+// user's own store, with no elevation anywhere. The state home is the
+// test's own: the label names the default cluster, whose real state
+// the node removal must never reach.
 func TestRunDeleteWorkerStopsAndRemoves(t *testing.T) {
 	writeFakePodman(t)
 	writeFakeSudo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	setContainers(t, "coreshift-worker-w1")
 	setContainerLabel(t, "coreshift-worker-w1", "coreshift")
 
