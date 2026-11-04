@@ -9,7 +9,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -18,6 +17,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -1833,19 +1833,9 @@ exit 0
 // root's store (-n) is answered by running the call against the
 // container set SUDO_CONTAINERS names, so the root side is a world of
 // its own, unless SUDO_REFUSE names a file: then it is refused, the way
-// a real sudo refuses without a cached password — and so is the
-// passwordless elevation attempt, which would otherwise succeed. An
-// elevation with no password flags (the terminal prompt) is answered
-// with success without running anything — the real re-run cannot
-// happen inside a test — unless SUDO_PROMPT_REFUSE names a file: then
-// it fails the way sudo does after wrong passwords. An askpass
-// elevation (-A) is answered with success too, unless SUDO_NO_ASKPASS
-// names a file: then it fails the way sudo does with no askpass helper
-// configured.
+// a real sudo refuses without a cached password.
 func writeFakeSudo(t *testing.T) {
 	t.Helper()
-	// The askpass link must not depend on the invoking environment.
-	t.Setenv("SUDO_ASKPASS", "")
 	dir := t.TempDir()
 	script := `#!/bin/sh
 echo "sudo $@" >> "$SUDO_LOG"
@@ -1855,24 +1845,7 @@ if [ "$1" = "-n" ]; then
 		exit 1
 	fi
 	shift
-	if [ "$1" = "env" ]; then
-		exit 0
-	fi
 	exec env PODMAN_CONTAINERS="$SUDO_CONTAINERS" "$@"
-fi
-if [ "$1" = "env" ]; then
-	if [ -e "$SUDO_PROMPT_REFUSE" ]; then
-		echo "sudo: 3 incorrect password attempts" >&2
-		exit 1
-	fi
-	exit 0
-fi
-if [ "$1" = "-A" ]; then
-	if [ -e "$SUDO_NO_ASKPASS" ]; then
-		echo "sudo: no askpass program specified, try setting SUDO_ASKPASS" >&2
-		exit 1
-	fi
-	exit 0
 fi
 exec "$@"
 `
@@ -2452,12 +2425,12 @@ func writeWorkerMaterial(t *testing.T, stateDir, worker string) {
 	}
 }
 
-// TestRunDeleteElevatesForWorkers checks that deleting a cluster with
-// workers re-runs under elevation, before anything is touched: the
-// worker containers are rootful, beyond the unprivileged listing, and
-// the join material records them. The same holds when the workers are
-// preserved, because the report of what stays behind reads them too.
-func TestRunDeleteElevatesForWorkers(t *testing.T) {
+// TestRunDeleteNamesSudoForWorkers checks the invoker's-act rule on the
+// cluster side: a cluster whose state records workers is not deleted
+// unprivileged, because a rootful worker's container lives in root's
+// store; the command refuses naming sudo before touching anything, with
+// the workers preserved or not.
+func TestRunDeleteNamesSudoForWorkers(t *testing.T) {
 	for _, preserveWorkers := range []bool{false, true} {
 		writeFakePodman(t)
 		writeFakeSudo(t)
@@ -2471,12 +2444,11 @@ func TestRunDeleteElevatesForWorkers(t *testing.T) {
 		writeWorkerMaterial(t, stateDir, "worker1")
 
 		err = runDelete(context.Background(), "dev", false, preserveWorkers)
-		var done *elevated
-		if !errors.As(err, &done) {
-			t.Fatalf("preserveWorkers=%v: err = %v, want the elevated re-run", preserveWorkers, err)
+		if err == nil || !strings.Contains(err.Error(), "sudo") {
+			t.Fatalf("preserveWorkers=%v: err = %v, want a refusal naming sudo", preserveWorkers, err)
 		}
 		if calls := podmanCalls(t); len(calls) != 0 {
-			t.Fatalf("preserveWorkers=%v: podman calls = %q, want the deletion left to the elevated run", preserveWorkers, calls)
+			t.Fatalf("preserveWorkers=%v: podman calls = %q, want nothing touched", preserveWorkers, calls)
 		}
 		if _, err := os.Stat(stateDir); err != nil {
 			t.Fatalf("preserveWorkers=%v: the refusal path removed the state", preserveWorkers)
@@ -2504,11 +2476,11 @@ func TestRunDeleteWithoutWorkersStaysUnelevated(t *testing.T) {
 		t.Fatal(delErr)
 	}
 	// The non-prompting read of root's store may happen — that is how
-	// the deletion looks for rootful workers — but no elevation re-run
-	// does: nothing was elevated.
+	// the deletion looks for rootful workers — but every sudo call
+	// stays a read: the tool never escalates itself.
 	for _, call := range sudoCalls(t) {
-		if strings.Contains(call, " env ") {
-			t.Fatalf("sudo calls = %q, want no elevation: the cluster has no workers", sudoCalls(t))
+		if !strings.HasPrefix(call, "sudo -n ") {
+			t.Fatalf("sudo calls = %q, want only non-prompting reads", sudoCalls(t))
 		}
 	}
 }
@@ -2677,8 +2649,8 @@ func TestDeleteClusterFlagDefaults(t *testing.T) {
 // TestCreateWorkerFlagDefaults checks that the worker creation flags are
 // accepted and come with the documented defaults — the name has none,
 // because a bare creation counts it — and that the pull secret is
-// optional: the cluster's stored one is the default. The rootless mode
-// is an opt-in: the rootful default is the general path.
+// optional: the cluster's stored one is the default. The rootless
+// launch is the bare default; the retired flag is gone.
 func TestCreateWorkerFlagDefaults(t *testing.T) {
 	cmd := newCreateWorkerCommand()
 	for name, want := range map[string]string{
@@ -2686,13 +2658,15 @@ func TestCreateWorkerFlagDefaults(t *testing.T) {
 		"cluster":     "coreshift",
 		"verbose":     "false",
 		"pull-secret": "",
-		"rootless":    "false",
 	} {
 		if flag := cmd.Flags().Lookup(name); flag == nil {
 			t.Fatalf("flag --%s is not defined", name)
 		} else if flag.DefValue != want {
 			t.Fatalf("--%s default = %q, want %q", name, flag.DefValue, want)
 		}
+	}
+	if flag := cmd.Flags().Lookup("rootless"); flag != nil {
+		t.Fatal("flag --rootless is gone: the rootless launch is the default")
 	}
 	if usage := cmd.Flags().Lookup("name").Usage; !strings.Contains(usage, "count") {
 		t.Fatalf("--name usage = %q, want the counting default described", usage)
@@ -2782,61 +2756,9 @@ func TestWorkerRunArgsRootlessContainerMode(t *testing.T) {
 	t.Fatalf("podman args = %q, want the network marker mounted", got)
 }
 
-// TestElevateReRunsUnderSudo checks the elevation contract: the whole
-// command is re-run as root through exactly one sudo call, with the
-// invoking user's state and cache homes passed through, because sudo
-// resets the environment, and the finished run reported as done. With
-// passwordless access the call asks for no password at all.
-func TestElevateReRunsUnderSudo(t *testing.T) {
-	writeFakeSudo(t)
-	noTerminal(t)
-
-	err := elevate()
-	var done *elevated
-	if !errors.As(err, &done) || done.code != 0 {
-		t.Fatalf("err = %v, want the finished elevated run", err)
-	}
-	calls := sudoCalls(t)
-	if len(calls) != 1 {
-		t.Fatalf("sudo calls = %q, want exactly one elevation", calls)
-	}
-	for _, want := range []string{"-n", "env", "XDG_STATE_HOME=", "XDG_CACHE_HOME="} {
-		if !strings.Contains(calls[0], want) {
-			t.Fatalf("elevation call %q missing %q", calls[0], want)
-		}
-	}
-}
-
-// TestElevationAttempts checks the chain's selection: the passwordless
-// attempt always comes first, the plain terminal prompt only with a
-// terminal, askpass only with a helper that exists, and nothing else
-// when none of that is available.
-func TestElevationAttempts(t *testing.T) {
-	for _, tc := range []struct {
-		terminal bool
-		askpass  string
-		want     []string
-	}{
-		{false, "", []string{"-n"}},
-		{true, "", []string{"-n", ""}},
-		{false, "/bin/true", []string{"-n", "-A"}},
-		{true, "/bin/true", []string{"-n", "", "-A"}},
-		{false, "/no/such/helper", []string{"-n"}},
-	} {
-		t.Setenv("SUDO_ASKPASS", tc.askpass)
-		var got []string
-		for _, flags := range elevationAttempts(tc.terminal) {
-			got = append(got, strings.Join(flags, " "))
-		}
-		if !slices.Equal(got, tc.want) {
-			t.Errorf("terminal=%v askpass=%q: attempts = %q, want %q", tc.terminal, tc.askpass, got, tc.want)
-		}
-	}
-}
-
-// TestStdinIsTerminalOnPipe checks the terminal detection the elevation
-// chain and the fresh-start question share: a pipe on standard input is
-// not a terminal, so no password prompt is ever asked on one.
+// TestStdinIsTerminalOnPipe checks the fresh-start question's terminal
+// detection: a pipe on standard input is not a terminal, so no question
+// is ever asked on one.
 func TestStdinIsTerminalOnPipe(t *testing.T) {
 	noTerminal(t)
 	if stdinIsTerminal() {
@@ -2844,122 +2766,36 @@ func TestStdinIsTerminalOnPipe(t *testing.T) {
 	}
 }
 
-// TestElevatePromptsThroughAskpass checks the chain falling through:
-// with passwordless access refused and no terminal, the askpass helper
-// is what elevates, after the passwordless attempt probed and failed.
-func TestElevatePromptsThroughAskpass(t *testing.T) {
-	writeFakeSudo(t)
-	noTerminal(t)
-	refusal := filepath.Join(t.TempDir(), "no-passwordless")
-	if err := os.WriteFile(refusal, nil, 0o644); err != nil {
+// TestInvokingUserHomes checks the sudo-side home resolution: the homes
+// come from the invoking user's own entry, so a run under sudo reads
+// the same state and cache the bare one does, and an unknown user is
+// refused.
+func TestInvokingUserHomes(t *testing.T) {
+	uid := strconv.Itoa(os.Getuid())
+	stateHome, cacheHome, err := invokingUserHomes(uid)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("SUDO_REFUSE", refusal)
-	t.Setenv("SUDO_ASKPASS", "/bin/true")
-
-	err := elevate()
-	var done *elevated
-	if !errors.As(err, &done) || done.code != 0 {
-		t.Fatalf("err = %v, want the finished elevated run", err)
-	}
-	calls := sudoCalls(t)
-	if len(calls) != 2 || !strings.HasPrefix(calls[0], "sudo -n ") || !strings.HasPrefix(calls[1], "sudo -A ") {
-		t.Fatalf("sudo calls = %q, want the passwordless probe then askpass", calls)
-	}
-}
-
-// TestSudoElevationRecognizesRefusals checks that every way sudo
-// refuses to produce a password — nothing cached for the passwordless
-// probe, wrong answers at the terminal prompt, a missing helper — is
-// recognized as the chain probing, not an error.
-func TestSudoElevationRecognizesRefusals(t *testing.T) {
-	writeFakeSudo(t)
-	for _, tc := range []struct {
-		flags  []string
-		refuse string
-	}{
-		{[]string{"-n"}, "SUDO_REFUSE"},
-		{nil, "SUDO_PROMPT_REFUSE"},
-		{[]string{"-A"}, "SUDO_NO_ASKPASS"},
-	} {
-		refusal := filepath.Join(t.TempDir(), "refusal")
-		if err := os.WriteFile(refusal, nil, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv(tc.refuse, refusal)
-		if err := sudoElevation(tc.flags, []string{"env"}); err != nil {
-			t.Errorf("%v: err = %v, want a clean fall-through", tc.flags, err)
-		}
-	}
-}
-
-// TestElevateNamesMissingAskpass checks the failure elevation must
-// refuse clearly: with no passwordless access, no terminal, and no
-// askpass helper, sudo has no way to ask, and the error names what to
-// configure.
-func TestElevateNamesMissingAskpass(t *testing.T) {
-	writeFakeSudo(t)
-	noTerminal(t)
-	refusal := filepath.Join(t.TempDir(), "no-passwordless")
-	if err := os.WriteFile(refusal, nil, 0o644); err != nil {
+	invoking, err := user.LookupId(uid)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("SUDO_REFUSE", refusal)
-
-	err := elevate()
-	if err == nil {
-		t.Fatal("expected a refusal naming the remedies")
+	if want := filepath.Join(invoking.HomeDir, ".local", "state"); stateHome != want {
+		t.Fatalf("state home = %q, want %q", stateHome, want)
 	}
-	if !strings.Contains(err.Error(), "SUDO_ASKPASS") {
-		t.Fatalf("refusal = %v, want the askpass helper named", err)
+	if want := filepath.Join(invoking.HomeDir, ".cache"); cacheHome != want {
+		t.Fatalf("cache home = %q, want %q", cacheHome, want)
 	}
-	var done *elevated
-	if errors.As(err, &done) {
-		t.Fatal("a failed elevation must not report a finished run")
-	}
-	if calls := sudoCalls(t); len(calls) != 1 || !strings.HasPrefix(calls[0], "sudo -n ") {
-		t.Fatalf("sudo calls = %q, want the passwordless probe alone", calls)
+	if _, _, err := invokingUserHomes("no-such-uid"); err == nil {
+		t.Fatal("expected an error for an unknown user")
 	}
 }
 
-// TestWorkerCommandsElevateBeforePodman checks that an unelevated
-// worker command elevates before touching anything: with elevation
-// impossible the command refuses naming the remedies, and nothing was
-// stopped or removed. The delete may look the worker up first — that is
-// how it knows whether to elevate at all.
-func TestWorkerCommandsElevateBeforePodman(t *testing.T) {
-	for _, args := range [][]string{
-		{"create", "worker"},
-		{"delete", "worker"},
-	} {
-		writeFakePodman(t)
-		writeFakeSudo(t)
-		noTerminal(t)
-		refusal := filepath.Join(t.TempDir(), "no-passwordless")
-		if err := os.WriteFile(refusal, nil, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("SUDO_REFUSE", refusal)
-
-		root := newRootCommand()
-		root.SetArgs(args)
-		err := root.Execute()
-		if err == nil || !strings.Contains(err.Error(), "SUDO_ASKPASS") {
-			t.Fatalf("%v: err = %v, want the elevation refusal", args, err)
-		}
-		for _, call := range podmanCalls(t) {
-			if strings.HasPrefix(call, "stop") || strings.HasPrefix(call, "rm") {
-				t.Fatalf("%v: podman calls = %q, want nothing stopped or removed", args, call)
-			}
-		}
-	}
-}
-
-// TestCreateWorkerRootlessStaysUnelevated checks the opt-in's promise:
-// a rootless worker creation asks for no elevation at all, running in
-// the user's own podman, so with every way to elevate refused it still
-// proceeds past the elevation machinery to the cluster resolution.
-func TestCreateWorkerRootlessStaysUnelevated(t *testing.T) {
+// TestCreateWorkerBareStaysUnelevated checks the default's promise: a
+// bare worker creation asks for no elevation at all, running in the
+// user's own podman, so with every way to elevate refused it still
+// proceeds to the cluster resolution.
+func TestCreateWorkerBareStaysUnelevated(t *testing.T) {
 	writeFakePodman(t)
 	writeFakeSudo(t)
 	noTerminal(t)
@@ -2970,10 +2806,10 @@ func TestCreateWorkerRootlessStaysUnelevated(t *testing.T) {
 	t.Setenv("SUDO_REFUSE", refusal)
 
 	root := newRootCommand()
-	root.SetArgs([]string{"create", "worker", "--rootless"})
+	root.SetArgs([]string{"create", "worker"})
 	err := root.Execute()
 	if err == nil || !strings.Contains(err.Error(), "no cluster named coreshift") {
-		t.Fatalf("err = %v, want the cluster resolution past the elevation", err)
+		t.Fatalf("err = %v, want the cluster resolution", err)
 	}
 	if sudo := sudoCalls(t); len(sudo) != 0 {
 		t.Fatalf("sudo calls = %q, want none: the rootless worker needs no elevation", sudo)
@@ -3023,7 +2859,7 @@ func TestRunCreateWorkerRefusals(t *testing.T) {
 		setContainers(t, "coreshift-worker-w1", "coreshift-dev")
 		setContainerPort(t, "coreshift-dev", 17443)
 
-		err := runCreateWorker(context.Background(), tc.worker, true, tc.cluster, "", false, false)
+		err := runCreateWorker(context.Background(), tc.worker, true, tc.cluster, "", false)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: err = %v, want a refusal containing %q", name, err, tc.want)
 		}
@@ -3038,7 +2874,7 @@ func TestRunCreateWorkerRefusals(t *testing.T) {
 // flag pointing at no file is refused before anything is minted.
 func TestRunCreateWorkerRefusesMissingFlagFile(t *testing.T) {
 	writeFakePodman(t)
-	err := runCreateWorker(context.Background(), "fresh", true, "coreshift", "/nonexistent/pull-secret", false, false)
+	err := runCreateWorker(context.Background(), "fresh", true, "coreshift", "/nonexistent/pull-secret", false)
 	if err == nil || !strings.Contains(err.Error(), "read pull secret") {
 		t.Fatalf("err = %v, want a refusal naming the pull secret", err)
 	}
@@ -3147,7 +2983,7 @@ func TestRunCreateWorkerBarePrintsCountedName(t *testing.T) {
 
 	var runErr error
 	out := captureStdout(t, func() {
-		runErr = runCreateWorker(context.Background(), "", false, "nope", "", false, false)
+		runErr = runCreateWorker(context.Background(), "", false, "nope", "", false)
 	})
 	// The stand-in cluster serves no join endpoints, so the mint that
 	// follows the pick fails; the pick itself is what is tested.
@@ -3590,21 +3426,20 @@ func TestRunDeleteWorkerStopsAndRemoves(t *testing.T) {
 	}
 }
 
-// TestRunDeleteWorkerMissing checks that deleting a worker missing
-// from the user's store is left to the elevated run to judge: it may be
-// a rootful worker, invisible to the unprivileged side, so the command
-// elevates rather than claim it does not exist.
-func TestRunDeleteWorkerMissing(t *testing.T) {
+// TestRunDeleteWorkerRootfulNeedsSudo checks the invoker's-act rule: a
+// worker the invoking user's podman cannot see — rootful, or not there
+// at all — is not deleted unprivileged; the command refuses naming sudo
+// and touches nothing beyond the user-store existence check.
+func TestRunDeleteWorkerRootfulNeedsSudo(t *testing.T) {
 	writeFakePodman(t)
 	writeFakeSudo(t)
-	noTerminal(t)
 
-	err := runDeleteWorker(context.Background(), "nope")
-	var done *elevated
-	if !errors.As(err, &done) {
-		t.Fatalf("err = %v, want the elevated re-run to judge the name", err)
+	var err error
+	captureStdout(t, func() { err = runDeleteWorker(context.Background(), "w1") })
+	if err == nil || !strings.Contains(err.Error(), "sudo") {
+		t.Fatalf("err = %v, want a refusal naming sudo", err)
 	}
-	if calls := podmanCalls(t); len(calls) != 1 || calls[0] != "container exists coreshift-worker-nope" {
+	if calls := podmanCalls(t); len(calls) != 1 || calls[0] != "container exists coreshift-worker-w1" {
 		t.Fatalf("podman calls = %q, want only the user-store existence check", calls)
 	}
 }
@@ -3626,7 +3461,7 @@ func TestWorkerFailureQuotesLogAndRemoves(t *testing.T) {
 		"the worker did not join",
 		"recent log output:",
 		"must be delegated to it",
-		"rootful default",
+		"under sudo",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("failure missing %q:\n%v", want, err)

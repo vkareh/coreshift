@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -18,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -1107,150 +1107,42 @@ func printReadySummary(stateDir string, port int) {
 		endpoint, filepath.Join(stateDir, certgen.CACertFilename))
 }
 
-// elevated marks a finished re-run under elevation: the elevated run
-// already reported whatever happened, so nothing more is printed and
-// the process exits with its code.
-type elevated struct{ code int }
-
-func (e *elevated) Error() string {
-	return fmt.Sprintf("the elevated run exited with code %d", e.code)
+// invokingUserHomes resolves the state and cache homes of the user the
+// given ID names: sudo resets the environment, so a run under it would
+// otherwise resolve root's homes, while the cluster state and the image
+// cache belong to the invoking user.
+func invokingUserHomes(uid string) (stateHome, cacheHome string, err error) {
+	invoking, err := user.LookupId(uid)
+	if err != nil {
+		return "", "", fmt.Errorf("look up the invoking user: %w", err)
+	}
+	return filepath.Join(invoking.HomeDir, ".local", "state"),
+		filepath.Join(invoking.HomeDir, ".cache"), nil
 }
 
-// elevate re-runs the running command as root, once, trying each way
-// sudo can obtain a password in turn: passwordless or cached access
-// needs no prompt at all, a terminal on standard input gets the plain
-// password prompt, and an askpass helper covers terminal-less
-// contexts. Only when none of them worked does the elevation fail,
-// naming the remedies. The invoking user's state and cache homes are
-// passed through, because sudo resets the environment and the elevated
-// run must keep reading the same directories. It returns the elevated
-// run's exit code as an *elevated, and a plain error only when
-// elevation itself failed.
-func elevate() error {
-	if _, err := exec.LookPath("sudo"); err != nil {
-		return fmt.Errorf("sudo is required to elevate this command: %w", err)
+// followInvokingUserHomes points the state and cache homes at the
+// invoking user's when the command runs under sudo, so the rootful
+// worker path reads and writes the same directories the bare rootless
+// one does. Homes the invocation preserved explicitly are kept.
+func followInvokingUserHomes() error {
+	uid := os.Getenv("SUDO_UID")
+	if uid == "" || os.Getenv("SUDO_USER") == "" || os.Geteuid() != 0 {
+		return nil
 	}
-	self, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("locate this command: %w", err)
+	if os.Getenv("XDG_STATE_HOME") != "" && os.Getenv("XDG_CACHE_HOME") != "" {
+		return nil
 	}
-	stateHome, cacheHome, err := userHomes()
+	stateHome, cacheHome, err := invokingUserHomes(uid)
 	if err != nil {
 		return err
 	}
-	args := append([]string{"env",
-		"XDG_STATE_HOME=" + stateHome,
-		"XDG_CACHE_HOME=" + cacheHome,
-		self}, os.Args[1:]...)
-	for _, flags := range elevationAttempts(stdinIsTerminal()) {
-		if err := sudoElevation(flags, args); err != nil {
-			return err
-		}
-	}
-	return fmt.Errorf("elevating this command needs a password, but there is no terminal to ask on, no passwordless sudo access, and no askpass helper: run it under sudo yourself, or set SUDO_ASKPASS to a helper, for example /usr/libexec/gcr-ssh-askpass")
-}
-
-// elevationAttempts lists the password flags sudo is tried with, in
-// order: none, for passwordless or cached access; the plain terminal
-// prompt; then askpass, for contexts without a terminal.
-func elevationAttempts(terminal bool) [][]string {
-	attempts := [][]string{{"-n"}}
-	if terminal {
-		attempts = append(attempts, nil)
-	}
-	if helper := os.Getenv("SUDO_ASKPASS"); helper != "" {
-		if _, err := exec.LookPath(helper); err == nil {
-			attempts = append(attempts, []string{"-A"})
-		}
-	}
-	return attempts
-}
-
-// sudoElevation makes one attempt at re-running the command as root
-// through sudo, with the given password flags. A nil return means sudo
-// refused to produce a password — the chain probing its options, not
-// an error. A run that happened returns its exit code as an *elevated;
-// anything else is a plain error.
-func sudoElevation(flags, args []string) error {
-	run := exec.Command("sudo", append(slices.Clone(flags), args...)...)
-	run.Stdin = os.Stdin
-	run.Stdout = os.Stdout
-	// Standard error is streamed and kept: sudo's own refusals are
-	// recognized from it.
-	var stderr bytes.Buffer
-	run.Stderr = io.MultiWriter(os.Stderr, &stderr)
-	// The elevated run owns shutdown; this process only waits for it.
-	signal.Ignore(syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Reset(syscall.SIGINT, syscall.SIGTERM)
-	err := run.Run()
-	var exit *exec.ExitError
-	if err == nil {
-		return &elevated{0}
-	}
-	if errors.As(err, &exit) {
-		if sudoRefused(stderr.String()) {
-			return nil
-		}
-		// sudo exits with the elevated command's code; its own report
-		// already said everything.
-		return &elevated{exit.ExitCode()}
-	}
-	return fmt.Errorf("elevate this command: %w", err)
-}
-
-// sudoRefused reports whether stderr shows sudo refusing to produce a
-// password, the failure each chain link falls through on.
-func sudoRefused(stderr string) bool {
-	for _, refusal := range []string{
-		"a password is required",
-		"no password was provided",
-		"incorrect password attempts",
-		"askpass",
-	} {
-		if strings.Contains(stderr, refusal) {
-			return true
-		}
-	}
-	return false
-}
-
-// elevatedExit finishes an elevation: the elevated run already reported
-// everything, so nothing is printed and the process exits with its
-// code. A plain error, for an elevation that could not happen, is
-// returned for reporting.
-func elevatedExit(err error) error {
-	var done *elevated
-	if errors.As(err, &done) {
-		os.Exit(done.code)
-	}
-	return err
-}
-
-// userHomes resolves the state and cache homes of the invoking user.
-// sudo resets the environment, so the elevated run gets the values
-// passed through explicitly, with unset variables resolved against the
-// invoking user's home rather than root's.
-func userHomes() (stateHome, cacheHome string, err error) {
-	stateHome = os.Getenv("XDG_STATE_HOME")
-	cacheHome = os.Getenv("XDG_CACHE_HOME")
-	if stateHome != "" && cacheHome != "" {
-		return stateHome, cacheHome, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", "", fmt.Errorf("determine home directory: %w", err)
-	}
-	if stateHome == "" {
-		stateHome = filepath.Join(home, ".local", "state")
-	}
-	if cacheHome == "" {
-		cacheHome = filepath.Join(home, ".cache")
-	}
-	return stateHome, cacheHome, nil
+	os.Setenv("XDG_STATE_HOME", stateHome)
+	os.Setenv("XDG_CACHE_HOME", cacheHome)
+	return nil
 }
 
 // chownToUser hands path and everything below it back to the invoking
-// user, so state written by an elevated command stays the user's own
+// user, so state written by a command under sudo stays the user's own
 // and every unelevated command keeps working on it. Unelevated nothing
 // was written as root, so it is a no-op.
 func chownToUser(path string) error {
@@ -1268,7 +1160,7 @@ func chownToUser(path string) error {
 }
 
 // podmanPlain builds a podman call against the store of whoever is
-// running: root's under elevation, the invoking user's rootless store
+// running: root's under sudo, the invoking user's rootless store
 // otherwise.
 func podmanPlain(args ...string) *exec.Cmd {
 	return exec.Command("podman", args...)
@@ -1820,30 +1712,23 @@ func refuseInvalidClusterName(name string) error {
 // running cluster: it mints the worker's container image and join
 // material, starts one privileged worker container, and waits for the
 // worker's node to register. Without --name the worker is named by
-// counting the cluster's workers. The worker runs rootful by default,
-// inside one elevated run; --rootless opts into the user's own podman
-// instead, asking for no elevation at all.
+// counting the cluster's workers. The bare command runs the worker
+// rootless, in the invoking user's own podman; the same command under
+// sudo runs it rootful.
 func newCreateWorkerCommand() *cobra.Command {
 	var pullSecretPath, name, cluster string
-	var rootless, verbose bool
+	var verbose bool
 	cmd := &cobra.Command{
 		Use:          "worker",
 		Short:        "Join a worker to a cluster in a podman container",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if os.Geteuid() == 0 && rootless {
-				return fmt.Errorf("--rootless runs the worker in the invoking user's own podman; run it without elevation")
-			}
-			if os.Geteuid() != 0 && !rootless {
-				return elevatedExit(elevate())
-			}
-			return runCreateWorker(cmd.Context(), name, cmd.Flags().Changed("name"), cluster, pullSecretPath, rootless, verbose)
+			return runCreateWorker(cmd.Context(), name, cmd.Flags().Changed("name"), cluster, pullSecretPath, verbose)
 		},
 	}
 	cmd.Flags().StringVar(&pullSecretPath, "pull-secret", "", "path to a Red Hat pull secret, as a fallback for clusters created before the cluster stored one")
 	cmd.Flags().StringVar(&name, "name", "", "name of the worker; defaults to worker<number>, one past the cluster's worker count, skipping names in use; its container is called coreshift-worker-<name> and its node carries the name")
 	cmd.Flags().StringVar(&cluster, "cluster", defaultClusterName, "name of the cluster the worker joins")
-	cmd.Flags().BoolVar(&rootless, "rootless", false, "run the worker in the user's own rootless podman under a delegated cgroup scope, with no elevation; pods whose user IDs the worker's user namespace cannot express stay in ContainerCreating")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "stream the image build's output to the terminal")
 	return cmd
 }
@@ -1856,13 +1741,15 @@ func newCreateWorkerCommand() *cobra.Command {
 // detached, streams its boot output, and waits for the worker's node to
 // register. On success the container keeps running; on any failure it is
 // removed, with the join material, while the cluster's state is preserved.
-// A rootless worker — the --rootless choice — runs in the user's own
+// The worker runs rootless under a bare invocation, in the user's own
 // podman, joining the cluster container's network namespace by its
-// name, since both containers live in that one store; the rootful
-// default joins the same namespace by its path, the two stores being
-// blind to each other. The cluster's network is brought up by its first
-// worker, whichever kind that is; the later ones join with it running.
-func runCreateWorker(ctx context.Context, name string, explicit bool, cluster, pullSecretPath string, rootless, verbose bool) error {
+// name, since both containers live in that one store; under sudo it
+// runs rootful, in root's podman, joining the same namespace by its
+// path, the two stores being blind to each other. The cluster's network
+// is brought up by its first worker, whichever kind that is; the later
+// ones join with it running.
+func runCreateWorker(ctx context.Context, name string, explicit bool, cluster, pullSecretPath string, verbose bool) error {
+	rootless := os.Geteuid() != 0
 	// A counted name is worker<number> and always fits; only a typed
 	// name can carry a shape the objects cannot.
 	if explicit && (!dnsLabelPattern.MatchString(name) || len(name) > 63) {
@@ -2014,7 +1901,7 @@ func nextWorkerName(nodes []string) string {
 // workerJoinsContainer reports whether the cluster the worker joins
 // runs as a container in the invoking user's podman, the cluster whose
 // network namespace the worker then joins. Root's podman cannot see
-// that rootless container, so the elevated command drops to the user's
+// that rootless container, so a command under sudo drops to the user's
 // podman for the check; what it cannot see is a host-mode cluster.
 func workerJoinsContainer(cluster string) (bool, error) {
 	container := clusterContainerPrefix + cluster
@@ -2193,10 +2080,10 @@ func workerRunArgs(container, cluster, materialDir, imageRef, joinNetwork string
 }
 
 // rootlessCgroupRemedy names the requirement a rootless launch that
-// could not delegate cgroups leaves the user with: the rootful default
-// is the worker-only fallback.
+// could not delegate cgroups leaves the user with: the rootful launch
+// under sudo is the worker-only fallback.
 const rootlessCgroupRemedy = "Rootless podman cannot give kubelet the cgroup hierarchy it needs here.\n" +
-	"The rootful default is the worker-only fallback: run the same command without --rootless."
+	"The rootful launch is the worker-only fallback: run the same command under sudo."
 
 // runWorkerPodman starts the worker container, under a delegated cgroup
 // scope when rootless: kubelet creates cgroups inside the container,
@@ -2271,7 +2158,8 @@ func waitWorkerNode(ctx context.Context, stateDir, name string) error {
 // worker that brought the cluster's network up, the real OVN pods
 // running on it; for a worker joining beside the one that runs the
 // network, or a host-mode cluster that has none, its node reporting not
-// ready. The container keeps running in the background.
+// ready. A rootless worker states its limit plainly. The container
+// keeps running in the background.
 func printWorkerSummary(container, stateDir, name, joinNetwork string, network bool) {
 	fmt.Println()
 	fmt.Println("Worker joined")
@@ -2282,6 +2170,9 @@ func printWorkerSummary(container, stateDir, name, joinNetwork string, network b
 		fmt.Printf("  Node:       %s, reporting NotReady; another worker runs the cluster's network\n", name)
 	default:
 		fmt.Printf("  Node:       %s, reporting NotReady until a CNI exists\n", name)
+	}
+	if os.Geteuid() != 0 {
+		fmt.Println("  Limit:      workloads whose user IDs the worker's user namespace cannot express will not start; create workers under sudo for those")
 	}
 	fmt.Printf("  Kubeconfig: %s\n", filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
 	fmt.Printf("Container %s is running in the background\n", container)
@@ -2332,7 +2223,9 @@ func newDeleteCommand() *cobra.Command {
 // order like a host-mode shutdown, and removed, and its state directory is
 // removed too, leaving nothing behind. The preserve-state flag keeps the
 // state directory, and the preserve-workers flag leaves the cluster's
-// workers running instead.
+// workers running instead. A cluster that has workers deletes under sudo,
+// because its rootful workers live in root's podman store; attempted
+// without it, the command fails naming sudo.
 func newDeleteClusterCommand() *cobra.Command {
 	var name string
 	var preserveState, preserveWorkers bool
@@ -2341,7 +2234,7 @@ func newDeleteClusterCommand() *cobra.Command {
 		Short:        "Delete a cluster, its workers, and its state",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return elevatedExit(runDelete(cmd.Context(), name, preserveState, preserveWorkers))
+			return runDelete(cmd.Context(), name, preserveState, preserveWorkers)
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", defaultClusterName, "name of the cluster to delete")
@@ -2362,10 +2255,10 @@ const containerStopSeconds = 120
 // state directory, and the preserve-workers flag leaves the workers
 // running instead of deleting them, for the control-plane restart; it
 // implies preserve-state, because a worker cannot rejoin a cluster
-// re-created without its state. Worker containers are rootful, beyond an
-// unprivileged listing's reach, and removing or reporting them needs
-// elevation, so a cluster that has workers deletes under elevation: the
-// whole command re-runs as root through one prompt. A cluster whose
+// re-created without its state. Rootful worker containers live in root's
+// podman store, beyond an unprivileged command's reach, so a cluster
+// that has workers deletes under sudo; the unprivileged command refuses
+// naming sudo instead of escalating itself. A cluster whose
 // container is already gone but whose state remains reports that, and the
 // state follows the same rule.
 func runDelete(ctx context.Context, name string, preserveState, preserveWorkers bool) error {
@@ -2380,7 +2273,7 @@ func runDelete(ctx context.Context, name string, preserveState, preserveWorkers 
 		return err
 	}
 	if os.Geteuid() != 0 && workerMaterialExists(stateDir) {
-		return elevate()
+		return fmt.Errorf("cluster %s has workers; a rootful worker is deleted under sudo, so run this command under sudo", name)
 	}
 	container := clusterContainerPrefix + name
 	running := podmanRootless("container", "exists", container).Run() == nil
@@ -2481,7 +2374,7 @@ func podmanOtherStore(args ...string) *exec.Cmd {
 // container is stopped and removed, and the node object and machine
 // stand-in its join created go with it, leaving the cluster's node list
 // clean. A rootless worker deletes with no elevation at all; a rootful
-// one runs under elevation, like creating it.
+// one is deleted under sudo, like creating it.
 func newDeleteWorkerCommand() *cobra.Command {
 	var name string
 	cmd := &cobra.Command{
@@ -2489,7 +2382,7 @@ func newDeleteWorkerCommand() *cobra.Command {
 		Short:        "Delete a worker, stopping its container and its node",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return elevatedExit(runDeleteWorker(cmd.Context(), name))
+			return runDeleteWorker(cmd.Context(), name)
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "worker1", "name of the worker to delete")
@@ -2500,8 +2393,9 @@ func newDeleteWorkerCommand() *cobra.Command {
 // resolved to its cluster through its container's label, then deleted.
 // A rootless worker lives in the user's own podman and needs no
 // elevation; a rootful one lives in root's, beyond an unprivileged
-// command's reach, so the command elevates for it, one prompt like
-// creating one.
+// command's reach, so deleting it runs under sudo, and the
+// unprivileged command refuses naming sudo — never escalating itself —
+// whether the worker is rootful or simply not there to be seen.
 func runDeleteWorker(ctx context.Context, name string) error {
 	if _, err := exec.LookPath("podman"); err != nil {
 		return fmt.Errorf("podman is required to delete workers: %w", err)
@@ -2509,7 +2403,7 @@ func runDeleteWorker(ctx context.Context, name string) error {
 	container := workerContainerPrefix + name
 	rootless := podmanRootless("container", "exists", container).Run() == nil
 	if !rootless && os.Geteuid() != 0 {
-		return elevate()
+		return fmt.Errorf("worker %s is not in the invoking user's podman; a rootful worker is deleted under sudo, so run this command under sudo", name)
 	}
 	if !rootless && podmanRootful("container", "exists", container).Run() != nil {
 		return fmt.Errorf("no worker named %s", name)
@@ -3878,6 +3772,13 @@ func defaultRouteAddress() (string, error) {
 }
 
 func main() {
+	// Under sudo the state and cache homes follow the invoking user, so
+	// the rootful worker path reads the same directories the rootless
+	// one does.
+	if err := followInvokingUserHomes(); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
 	root := newRootCommand()
 	// The error is printed here, not by the command library, so the
 	// warnings the API server sent can be quoted in its tail.
