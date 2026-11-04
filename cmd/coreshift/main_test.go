@@ -2315,6 +2315,7 @@ func TestDeleteUnknownNounPrintsHelp(t *testing.T) {
 // container's port is never asked.
 func TestRunDeleteStopsAndRemovesState(t *testing.T) {
 	writeFakePodman(t)
+	writeFakeSudo(t)
 	setContainers(t, "coreshift-dev")
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
@@ -2332,6 +2333,7 @@ func TestRunDeleteStopsAndRemovesState(t *testing.T) {
 	calls := podmanCalls(t)
 	want := []string{
 		"container exists coreshift-dev",
+		"ps -a --format {{.Names}}",
 		"ps -a --format {{.Names}}",
 		"stop --timeout 120 coreshift-dev",
 		"rm coreshift-dev",
@@ -2355,6 +2357,7 @@ func TestRunDeleteStopsAndRemovesState(t *testing.T) {
 // with the cluster reported not running.
 func TestRunDeleteNotRunningRemovesState(t *testing.T) {
 	writeFakePodman(t)
+	writeFakeSudo(t)
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
 	stateDir, err := clusterDir("dev")
@@ -2371,9 +2374,10 @@ func TestRunDeleteNotRunningRemovesState(t *testing.T) {
 	want := []string{
 		"container exists coreshift-dev",
 		"ps -a --format {{.Names}}",
+		"ps -a --format {{.Names}}",
 	}
 	if calls := podmanCalls(t); !slices.Equal(calls, want) {
-		t.Fatalf("podman calls = %q, want only the existence check and the worker listing", calls)
+		t.Fatalf("podman calls = %q, want only the existence check and the worker listings", calls)
 	}
 	if !strings.Contains(out, "not running") || !strings.Contains(out, "State removed at "+stateDir) {
 		t.Fatalf("output = %q, want the cluster reported not running with its removed state named", out)
@@ -2388,6 +2392,7 @@ func TestRunDeleteNotRunningRemovesState(t *testing.T) {
 // and its marker stay, with the preservation said plainly in the output.
 func TestRunDeletePreserveStateKeepsState(t *testing.T) {
 	writeFakePodman(t)
+	writeFakeSudo(t)
 	setContainers(t, "coreshift-dev")
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
@@ -2405,6 +2410,7 @@ func TestRunDeletePreserveStateKeepsState(t *testing.T) {
 	calls := podmanCalls(t)
 	want := []string{
 		"container exists coreshift-dev",
+		"ps -a --format {{.Names}}",
 		"ps -a --format {{.Names}}",
 		"stop --timeout 120 coreshift-dev",
 		"rm coreshift-dev",
@@ -2497,8 +2503,13 @@ func TestRunDeleteWithoutWorkersStaysUnelevated(t *testing.T) {
 	if delErr != nil {
 		t.Fatal(delErr)
 	}
-	if sudo := sudoCalls(t); len(sudo) != 0 {
-		t.Fatalf("sudo calls = %q, want none: the cluster has no workers", sudo)
+	// The non-prompting read of root's store may happen — that is how
+	// the deletion looks for rootful workers — but no elevation re-run
+	// does: nothing was elevated.
+	for _, call := range sudoCalls(t) {
+		if strings.Contains(call, " env ") {
+			t.Fatalf("sudo calls = %q, want no elevation: the cluster has no workers", sudoCalls(t))
+		}
 	}
 }
 
@@ -2508,6 +2519,7 @@ func TestRunDeleteWithoutWorkersStaysUnelevated(t *testing.T) {
 // cluster's workers are left alone.
 func TestRunDeleteCascadesWorkers(t *testing.T) {
 	writeFakePodman(t)
+	writeFakeSudo(t)
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
 	setContainers(t, "coreshift-dev", "coreshift-worker-worker1", "coreshift-worker-worker2", "coreshift-worker-foreign")
@@ -2575,6 +2587,7 @@ func TestRunDeleteWorkerWithoutClusterState(t *testing.T) {
 	want := []string{
 		"container exists coreshift-worker-w1",
 		`inspect --format {{index .Config.Labels "coreshift-cluster"}} coreshift-worker-w1`,
+		"container exists coreshift-worker-w1",
 		"stop --timeout 120 coreshift-worker-w1",
 		"rm coreshift-worker-w1",
 	}
@@ -2598,6 +2611,7 @@ func TestRunDeleteWorkerWithoutClusterState(t *testing.T) {
 // when the cluster returns.
 func TestRunDeletePreserveWorkersLeavesWorkers(t *testing.T) {
 	writeFakePodman(t)
+	writeFakeSudo(t)
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
 	setContainers(t, "coreshift-dev", "coreshift-worker-worker1", "coreshift-worker-worker2")
@@ -2620,6 +2634,7 @@ func TestRunDeletePreserveWorkersLeavesWorkers(t *testing.T) {
 		"ps -a --format {{.Names}}",
 		`inspect --format {{index .Config.Labels "coreshift-cluster"}} coreshift-worker-worker1`,
 		`inspect --format {{index .Config.Labels "coreshift-cluster"}} coreshift-worker-worker2`,
+		"ps -a --format {{.Names}}",
 		"stop --timeout 120 coreshift-dev",
 		"rm coreshift-dev",
 	}
@@ -2909,8 +2924,9 @@ func TestElevateNamesMissingAskpass(t *testing.T) {
 
 // TestWorkerCommandsElevateBeforePodman checks that an unelevated
 // worker command elevates before touching anything: with elevation
-// impossible the command refuses naming the remedies, and no podman
-// call was made.
+// impossible the command refuses naming the remedies, and nothing was
+// stopped or removed. The delete may look the worker up first — that is
+// how it knows whether to elevate at all.
 func TestWorkerCommandsElevateBeforePodman(t *testing.T) {
 	for _, args := range [][]string{
 		{"create", "worker"},
@@ -2931,8 +2947,10 @@ func TestWorkerCommandsElevateBeforePodman(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "SUDO_ASKPASS") {
 			t.Fatalf("%v: err = %v, want the elevation refusal", args, err)
 		}
-		if calls := podmanCalls(t); len(calls) != 0 {
-			t.Fatalf("%v: podman calls = %q, want none before elevation", args, calls)
+		for _, call := range podmanCalls(t) {
+			if strings.HasPrefix(call, "stop") || strings.HasPrefix(call, "rm") {
+				t.Fatalf("%v: podman calls = %q, want nothing stopped or removed", args, call)
+			}
 		}
 	}
 }
@@ -3331,10 +3349,11 @@ func TestRunGetWorkersEmpty(t *testing.T) {
 }
 
 // TestRunGetWorkersListsWorkers checks the row each worker gets: its
-// name, the cluster its container is labeled with, and readiness from
-// its container running and its node's live condition agreeing, so a
-// running worker without a reachable cluster shows as not ready and
-// one without a label shows no cluster.
+// name, the cluster its container is labeled with, its kind, and
+// readiness from its container running and its node's live condition
+// agreeing, so a running worker without a reachable cluster shows as
+// not ready and one without a label shows no cluster. A worker in the
+// user's own store is the rootless kind.
 func TestRunGetWorkersListsWorkers(t *testing.T) {
 	writeFakePodman(t)
 	writeFakeSudo(t)
@@ -3353,18 +3372,19 @@ func TestRunGetWorkersListsWorkers(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("output has %d lines, want a header and two workers:\n%s", len(lines), out)
 	}
-	if fields := strings.Fields(lines[1]); len(fields) < 4 || fields[0] != "w1" || fields[1] != "dev" || strings.Join(fields[2:], " ") != "not ready" {
-		t.Fatalf("w1 row = %q, want its name, cluster, and not ready", lines[1])
+	if fields := strings.Fields(lines[1]); len(fields) < 4 || fields[0] != "w1" || fields[1] != "dev" || fields[2] != "rootless" || strings.Join(fields[3:], " ") != "not ready" {
+		t.Fatalf("w1 row = %q, want its name, cluster, rootless kind, and not ready", lines[1])
 	}
-	if fields := strings.Fields(lines[2]); len(fields) < 4 || fields[0] != "w2" || fields[1] != "-" || strings.Join(fields[2:], " ") != "not ready" {
-		t.Fatalf("w2 row = %q, want its name, no cluster, and not ready", lines[2])
+	if fields := strings.Fields(lines[2]); len(fields) < 4 || fields[0] != "w2" || fields[1] != "-" || fields[2] != "rootless" || strings.Join(fields[3:], " ") != "not ready" {
+		t.Fatalf("w2 row = %q, want its name, no cluster, rootless kind, and not ready", lines[2])
 	}
 }
 
 // TestRunGetWorkersListsRootfulWorkers checks the split the listing is
-// honest about: worker containers live in root's store, read through
-// the non-interactive elevation, and a worker only that side can see is
-// listed with its row read the same way.
+// honest about: rootful worker containers live in root's store, read
+// through the non-interactive elevation, and a worker only that side
+// can see is listed as the rootful kind, with its row read the same
+// way.
 func TestRunGetWorkersListsRootfulWorkers(t *testing.T) {
 	writeFakePodman(t)
 	writeFakeSudo(t)
@@ -3384,8 +3404,8 @@ func TestRunGetWorkersListsRootfulWorkers(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("output has %d lines, want a header and the rootful worker:\n%s", len(lines), out)
 	}
-	if fields := strings.Fields(lines[1]); len(fields) < 4 || fields[0] != "w1" || fields[1] != "dev" || strings.Join(fields[2:], " ") != "not ready" {
-		t.Fatalf("w1 row = %q, want its name, cluster, and not ready", lines[1])
+	if fields := strings.Fields(lines[1]); len(fields) < 4 || fields[0] != "w1" || fields[1] != "dev" || fields[2] != "rootful" || strings.Join(fields[3:], " ") != "not ready" {
+		t.Fatalf("w1 row = %q, want its name, cluster, rootful kind, and not ready", lines[1])
 	}
 	// The row was read through the root side: the label read went
 	// through elevation, not plain podman. (The fake podman logs both
@@ -3397,6 +3417,37 @@ func TestRunGetWorkersListsRootfulWorkers(t *testing.T) {
 	}
 	if strings.Contains(out, "elevation") {
 		t.Fatalf("output = %q, want no elevation note: the root side was read", out)
+	}
+}
+
+// TestRunGetWorkersListsBothKinds checks the row each kind of one
+// cluster's workers gets: a cluster may hold rootless and rootful
+// workers at once, and the listing shows both, each labeled with its
+// kind.
+func TestRunGetWorkersListsBothKinds(t *testing.T) {
+	writeFakePodman(t)
+	writeFakeSudo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	setContainers(t, "coreshift-dev", "coreshift-worker-worker1")
+	setRootfulContainers(t, "coreshift-worker-worker2")
+	setContainerPort(t, "coreshift-dev", 7443)
+	setContainerLabel(t, "coreshift-worker-worker1", "dev")
+	setContainerLabel(t, "coreshift-worker-worker2", "dev")
+
+	var err error
+	out := captureStdout(t, func() { err = runGetWorkers() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("output has %d lines, want a header and both workers:\n%s", len(lines), out)
+	}
+	if fields := strings.Fields(lines[1]); fields[0] != "worker1" || fields[1] != "dev" || fields[2] != "rootless" {
+		t.Fatalf("worker1 row = %q, want the rootless kind labeled", lines[1])
+	}
+	if fields := strings.Fields(lines[2]); fields[0] != "worker2" || fields[1] != "dev" || fields[2] != "rootful" {
+		t.Fatalf("worker2 row = %q, want the rootful kind labeled", lines[2])
 	}
 }
 
@@ -3490,10 +3541,10 @@ func TestRunGetWorkersStoppedContainerNotReady(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("output has %d lines, want a header and two workers:\n%s", len(lines), out)
 	}
-	if fields := strings.Fields(lines[1]); len(fields) < 3 || fields[0] != "w1" || strings.Join(fields[2:], " ") != "ready" {
+	if fields := strings.Fields(lines[1]); len(fields) < 3 || fields[0] != "w1" || strings.Join(fields[3:], " ") != "ready" {
 		t.Fatalf("w1 row = %q, want ready", lines[1])
 	}
-	if fields := strings.Fields(lines[2]); len(fields) < 4 || fields[0] != "w3" || strings.Join(fields[2:], " ") != "not ready" {
+	if fields := strings.Fields(lines[2]); len(fields) < 4 || fields[0] != "w3" || strings.Join(fields[3:], " ") != "not ready" {
 		t.Fatalf("w3 row = %q, want not ready", lines[2])
 	}
 	mu.Lock()
@@ -3508,9 +3559,11 @@ func TestRunGetWorkersStoppedContainerNotReady(t *testing.T) {
 
 // TestRunDeleteWorkerStopsAndRemoves checks the delete contract: the
 // container is stopped with the same teardown time the cluster's gets
-// and then removed, its cluster read from its label.
+// and then removed, its cluster read from its label — all through the
+// user's own store, with no elevation anywhere.
 func TestRunDeleteWorkerStopsAndRemoves(t *testing.T) {
 	writeFakePodman(t)
+	writeFakeSudo(t)
 	setContainers(t, "coreshift-worker-w1")
 	setContainerLabel(t, "coreshift-worker-w1", "coreshift")
 
@@ -3523,6 +3576,7 @@ func TestRunDeleteWorkerStopsAndRemoves(t *testing.T) {
 	want := []string{
 		"container exists coreshift-worker-w1",
 		`inspect --format {{index .Config.Labels "coreshift-cluster"}} coreshift-worker-w1`,
+		"container exists coreshift-worker-w1",
 		"stop --timeout 120 coreshift-worker-w1",
 		"rm coreshift-worker-w1",
 	}
@@ -3531,18 +3585,27 @@ func TestRunDeleteWorkerStopsAndRemoves(t *testing.T) {
 	if !slices.Equal(calls[:len(want)], want) {
 		t.Fatalf("podman calls = %q\nwant %q at the head", calls, want)
 	}
+	if sudo := sudoCalls(t); len(sudo) != 0 {
+		t.Fatalf("sudo calls = %q, want none: a rootless worker deletes unelevated", sudo)
+	}
 }
 
-// TestRunDeleteWorkerMissing checks that deleting a missing worker is
-// refused plainly, with nothing stopped or removed.
+// TestRunDeleteWorkerMissing checks that deleting a worker missing
+// from the user's store is left to the elevated run to judge: it may be
+// a rootful worker, invisible to the unprivileged side, so the command
+// elevates rather than claim it does not exist.
 func TestRunDeleteWorkerMissing(t *testing.T) {
 	writeFakePodman(t)
+	writeFakeSudo(t)
+	noTerminal(t)
+
 	err := runDeleteWorker(context.Background(), "nope")
-	if err == nil || !strings.Contains(err.Error(), "no worker named nope") {
-		t.Fatalf("err = %v, want a plain refusal", err)
+	var done *elevated
+	if !errors.As(err, &done) {
+		t.Fatalf("err = %v, want the elevated re-run to judge the name", err)
 	}
 	if calls := podmanCalls(t); len(calls) != 1 || calls[0] != "container exists coreshift-worker-nope" {
-		t.Fatalf("podman calls = %q, want only the existence check", calls)
+		t.Fatalf("podman calls = %q, want only the user-store existence check", calls)
 	}
 }
 

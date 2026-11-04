@@ -2443,26 +2443,45 @@ func workerMaterialExists(stateDir string) bool {
 	return err == nil && len(entries) > 0
 }
 
-// clusterWorkers lists the names of a cluster's workers: the worker
-// containers carrying its label.
+// clusterWorkers lists the names of a cluster's workers across both
+// stores: a rootless worker's container lives in the user's own podman,
+// a rootful one's in root's, and a cluster may hold both kinds. The
+// store this side cannot read without prompting is skipped, its read
+// best effort.
 func clusterWorkers(cluster string) ([]string, error) {
-	containers, err := containersNamed(podmanPlain, workerContainerPrefix)
-	if err != nil {
-		return nil, err
-	}
 	var names []string
-	for _, container := range containers {
-		if label, err := containerLabel(podmanPlain, container, workerClusterLabel); err == nil && label == cluster {
-			names = append(names, strings.TrimPrefix(container, workerContainerPrefix))
+	for _, podman := range []func(...string) *exec.Cmd{podmanPlain, podmanOtherStore} {
+		containers, err := containersNamed(podman, workerContainerPrefix)
+		if err != nil {
+			continue
+		}
+		for _, container := range containers {
+			if label, err := containerLabel(podman, container, workerClusterLabel); err == nil && label == cluster {
+				names = append(names, strings.TrimPrefix(container, workerContainerPrefix))
+			}
 		}
 	}
-	return names, nil
+	slices.Sort(names)
+	return slices.Compact(names), nil
+}
+
+// podmanOtherStore builds a podman call against the store the running
+// side is not: root's for the invoking user, read without prompting
+// through sudo -n, which simply refuses without cached access; the
+// invoking user's for root, dropped to without a prompt. A refused or
+// failed read is the caller's best effort.
+func podmanOtherStore(args ...string) *exec.Cmd {
+	if os.Geteuid() == 0 {
+		return podmanRootless(args...)
+	}
+	return podmanRootful(args...)
 }
 
 // newDeleteWorkerCommand builds the command that deletes a worker: its
 // container is stopped and removed, and the node object and machine
 // stand-in its join created go with it, leaving the cluster's node list
-// clean. Deleting a worker runs under elevation, like creating one.
+// clean. A rootless worker deletes with no elevation at all; a rootful
+// one runs under elevation, like creating it.
 func newDeleteWorkerCommand() *cobra.Command {
 	var name string
 	cmd := &cobra.Command{
@@ -2470,27 +2489,36 @@ func newDeleteWorkerCommand() *cobra.Command {
 		Short:        "Delete a worker, stopping its container and its node",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if os.Geteuid() != 0 {
-				return elevatedExit(elevate())
-			}
-			return runDeleteWorker(cmd.Context(), name)
+			return elevatedExit(runDeleteWorker(cmd.Context(), name))
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "worker1", "name of the worker to delete")
 	return cmd
 }
 
-// runDeleteWorker deletes a worker: the worker the name picks is resolved
-// to its cluster through its container's label, then deleted.
+// runDeleteWorker deletes a worker: the worker the name picks is
+// resolved to its cluster through its container's label, then deleted.
+// A rootless worker lives in the user's own podman and needs no
+// elevation; a rootful one lives in root's, beyond an unprivileged
+// command's reach, so the command elevates for it, one prompt like
+// creating one.
 func runDeleteWorker(ctx context.Context, name string) error {
 	if _, err := exec.LookPath("podman"); err != nil {
 		return fmt.Errorf("podman is required to delete workers: %w", err)
 	}
 	container := workerContainerPrefix + name
-	if exec.Command("podman", "container", "exists", container).Run() != nil {
+	rootless := podmanRootless("container", "exists", container).Run() == nil
+	if !rootless && os.Geteuid() != 0 {
+		return elevate()
+	}
+	if !rootless && podmanRootful("container", "exists", container).Run() != nil {
 		return fmt.Errorf("no worker named %s", name)
 	}
-	cluster, err := containerLabel(podmanPlain, container, workerClusterLabel)
+	podman := podmanRootful
+	if rootless {
+		podman = podmanRootless
+	}
+	cluster, err := containerLabel(podman, container, workerClusterLabel)
 	if err != nil {
 		return err
 	}
@@ -2501,21 +2529,27 @@ func runDeleteWorker(ctx context.Context, name string) error {
 }
 
 // deleteWorker deletes one worker of the named cluster: its container is
-// stopped and removed, then the node object and machine stand-in the join
-// minted are deleted through the cluster's admin kubeconfig, and the join
-// material goes with them. The cluster must be running to remove the pair;
-// when it is not, the node stays and the command says so; when the
-// cluster's state is gone, the node went with it and there is nothing to
-// remove.
+// stopped and removed through the podman store that holds it — the
+// user's for a rootless worker, root's for a rootful one, whichever
+// side is asking — then the node object and machine stand-in the join
+// minted are deleted through the cluster's admin kubeconfig, and the
+// join material goes with them. The cluster must be running to remove
+// the pair; when it is not, the node stays and the command says so;
+// when the cluster's state is gone, the node went with it and there is
+// nothing to remove.
 func deleteWorker(ctx context.Context, name, cluster string) error {
 	container := workerContainerPrefix + name
+	podman := podmanRootful
+	if podmanRootless("container", "exists", container).Run() == nil {
+		podman = podmanRootless
+	}
 	fmt.Printf("Stopping container %s\n", container)
-	stop := exec.Command("podman", "stop", "--timeout", strconv.Itoa(containerStopSeconds), container)
+	stop := podman("stop", "--timeout", strconv.Itoa(containerStopSeconds), container)
 	stop.Stderr = os.Stderr
 	if err := stop.Run(); err != nil {
 		return fmt.Errorf("stop container: %w", err)
 	}
-	if err := exec.Command("podman", "rm", container).Run(); err != nil {
+	if err := podman("rm", container).Run(); err != nil {
 		return fmt.Errorf("remove container: %w", err)
 	}
 	fmt.Printf("Deleted worker %s\n", name)
@@ -2663,13 +2697,15 @@ func newGetWorkersCommand() *cobra.Command {
 	}
 }
 
-// runGetWorkers lists the workers. Worker containers are rootful, in
-// root's podman store, which an unprivileged listing cannot see: the
-// listing reads that side too, without ever prompting — sudo -n refuses
-// when it would need a password — and reports only what it could read
-// when the read was refused, saying so plainly. Readiness requires the
-// worker's container running and its node's condition, read live from
-// the cluster's API, ready: a stopped container is not ready without
+// runGetWorkers lists the workers. A rootless worker's container lives
+// in the user's own podman, the same store as the cluster's, so the
+// unprivileged listing sees it; a rootful one lives in root's store,
+// which that listing cannot see, so it reads that side too, without
+// ever prompting — sudo -n refuses where it would need a password — and
+// reports only what it could read when the read was refused, saying so
+// plainly. Each row carries its kind. Readiness requires the worker's
+// container running and its node's condition, read live from the
+// cluster's API, ready: a stopped container is not ready without
 // probing, and a running worker whose node reports not ready is not
 // ready either.
 func runGetWorkers() error {
@@ -2692,14 +2728,16 @@ func runGetWorkers() error {
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "NAME\tCLUSTER\tREADY")
+	fmt.Fprintln(w, "NAME\tCLUSTER\tMODE\tREADY")
 	for _, container := range containers {
 		name := strings.TrimPrefix(container, workerContainerPrefix)
 		// A worker this side cannot see is read through the same
 		// non-prompting elevation the listing used.
 		podman := podmanRootful
+		mode := "rootful"
 		if slices.Contains(mine, container) {
 			podman = podmanPlain
+			mode = "rootless"
 		}
 		cluster := "-"
 		ready := "not ready"
@@ -2711,7 +2749,7 @@ func runGetWorkers() error {
 				}
 			}
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\n", name, cluster, ready)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", name, cluster, mode, ready)
 	}
 	if err := w.Flush(); err != nil {
 		return err
