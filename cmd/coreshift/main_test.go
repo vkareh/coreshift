@@ -2655,6 +2655,38 @@ func TestRunDeleteWorkerWithoutClusterState(t *testing.T) {
 	}
 }
 
+// TestRunDeleteWorkerRemovesMaterial checks the delete contract's state
+// side: the join material directory goes with the worker's container
+// even when the cluster is not running to remove the node, so nothing
+// of the worker stays in the cluster's state tree.
+func TestRunDeleteWorkerRemovesMaterial(t *testing.T) {
+	writeFakePodman(t)
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	setContainers(t, "coreshift-worker-w1")
+	setContainerLabel(t, "coreshift-worker-w1", "dev")
+	stateDir, err := clusterDir("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeStateTree(t, stateDir, "dev")
+	writeWorkerMaterial(t, stateDir, "w1")
+
+	var delErr error
+	out := captureStdout(t, func() { delErr = runDeleteWorker(context.Background(), "w1") })
+	if delErr != nil {
+		t.Fatal(delErr)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, workersDirName, "w1")); !os.IsNotExist(err) {
+		t.Fatal("delete left the worker's join material behind")
+	}
+	for _, want := range []string{"Deleted worker w1", "not running"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output = %q, want %q named", out, want)
+		}
+	}
+}
+
 // TestRunDeletePreserveWorkersLeavesWorkers checks the flag's contract:
 // the cluster's container goes, its workers stay untouched, and the state
 // is preserved with them — the flag implies it, since the workers could

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -147,6 +148,47 @@ func TestMintReplacesLeftovers(t *testing.T) {
 	object := machine(t, dynamicClient, "worker1")
 	if _, found, _ := unstructured.NestedSlice(object.Object, "status", "addresses"); !found {
 		t.Fatal("machine stand-in carries no address; the stale one was kept")
+	}
+}
+
+// TestMintReplacesLeftoverMaterial checks the fresh-join rule's state
+// side: a material directory a deleted worker left behind is removed
+// before the fresh material is written, and one that cannot be removed
+// fails the mint naming the path, where the user's hand is needed.
+func TestMintReplacesLeftoverMaterial(t *testing.T) {
+	client, dynamicClient := newFakeClients(t)
+	dir := filepath.Join(t.TempDir(), "leftover")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, NodeNameFilename), []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := mint(context.Background(), "https://127.0.0.1:6443", nil, client, dynamicClient, dir, "worker1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(readFile(t, dir, NodeNameFilename)); got != "worker1\n" {
+		t.Fatalf("node name = %q, want the fresh material, not the stale one", got)
+	}
+
+	// A directory the remover cannot empty stands in for the root-owned
+	// leftover from before deletions cleaned up.
+	unremovable := filepath.Join(t.TempDir(), "root-owned")
+	if err := os.MkdirAll(unremovable, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unremovable, NodeNameFilename), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unremovable, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unremovable, 0o755) })
+
+	err := mint(context.Background(), "https://127.0.0.1:6443", nil, client, dynamicClient, unremovable, "worker1")
+	if err == nil || !strings.Contains(err.Error(), unremovable) {
+		t.Fatalf("err = %v, want the unremovable leftover named", err)
 	}
 }
 

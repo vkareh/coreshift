@@ -52,9 +52,9 @@ var machines = schema.GroupVersionResource{
 
 // Mint creates the join material for one worker named nodeName against
 // the cluster the admin kubeconfig at kubeconfigPath points at, writing
-// it into dir. Any node, machine, and certificate request a previous
-// worker of the same name left behind go first, so a re-created worker
-// joins fresh.
+// it into dir. Any node, machine, certificate request, and material
+// directory a previous worker of the same name left behind go first, so
+// a re-created worker joins fresh.
 func Mint(ctx context.Context, kubeconfigPath, dir, nodeName string) error {
 	config, err := clientcmd.LoadFromFile(kubeconfigPath)
 	if err != nil {
@@ -98,6 +98,13 @@ func mint(ctx context.Context, server string, caPEM []byte, client kubernetes.In
 		return err
 	}
 
+	// A material directory a deleted worker left behind goes first, so
+	// the fresh material starts clean; one that cannot be removed — a
+	// root-owned leftover from before deletions cleaned up — fails the
+	// creation naming the path, where the user's hand is needed.
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("remove the leftover join material at %s: %w", dir, err)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create join material directory: %w", err)
 	}

@@ -2423,12 +2423,12 @@ func runDeleteWorker(ctx context.Context, name string) error {
 // deleteWorker deletes one worker of the named cluster: its container is
 // stopped and removed through the podman store that holds it — the
 // user's for a rootless worker, root's for a rootful one, whichever
-// side is asking — then the node object and machine stand-in the join
-// minted are deleted through the cluster's admin kubeconfig, and the
-// join material goes with them. The cluster must be running to remove
-// the pair; when it is not, the node stays and the command says so;
-// when the cluster's state is gone, the node went with it and there is
-// nothing to remove.
+// side is asking — then the join material goes, and the node object and
+// machine stand-in the join minted are deleted through the cluster's
+// admin kubeconfig. The cluster must be running to remove the pair;
+// when it is not, the node stays and the command says so; when the
+// cluster's state is gone, the node went with it and there is nothing
+// to remove.
 func deleteWorker(ctx context.Context, name, cluster string) error {
 	container := workerContainerPrefix + name
 	podman := podmanRootful
@@ -2447,7 +2447,10 @@ func deleteWorker(ctx context.Context, name, cluster string) error {
 	fmt.Printf("Deleted worker %s\n", name)
 
 	// The container goes first: a running kubelet recreates its node, so
-	// the pair is removed only once nothing re-registers it.
+	// the pair is removed only once nothing re-registers it. The join
+	// material is the worker's own ephemera, mounted into its container
+	// alone, so it goes with the container whether or not the cluster
+	// answers for the node.
 	stateDir, err := clusterDir(cluster)
 	if err != nil {
 		return err
@@ -2456,11 +2459,13 @@ func deleteWorker(ctx context.Context, name, cluster string) error {
 		fmt.Printf("Cluster %s has no state left; its node went with it\n", cluster)
 		return nil
 	}
+	if err := os.RemoveAll(filepath.Join(stateDir, workersDirName, name)); err != nil {
+		return fmt.Errorf("remove the join material: %w", err)
+	}
 	if port, _, err := workerClusterTarget(cluster); err == nil && clusterReady(port) {
 		if err := join.Remove(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), name); err != nil {
 			return fmt.Errorf("remove the node and machine stand-in: %w", err)
 		}
-		_ = os.RemoveAll(filepath.Join(stateDir, workersDirName, name))
 		fmt.Printf("Node %s removed from cluster %s\n", name, cluster)
 		return nil
 	}
