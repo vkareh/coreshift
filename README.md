@@ -313,9 +313,11 @@ and a summary once the control plane is ready:
 
 ```
 Control plane ready
+  Name:         coreshift
+  Release:      quay.io/openshift-release-dev/ocp-release:4.22.21-x86_64
   API endpoint: https://127.0.0.1:6443
   Kubeconfig:   /home/you/.local/state/coreshift/clusters/coreshift/admin.kubeconfig
-  Log in with:  oc login https://127.0.0.1:6443 --certificate-authority=/home/you/.local/state/coreshift/clusters/coreshift/ca.crt -u <username> -p <password>
+  Context:      admin@coreshift
 ```
 
 When a child fails, the run tears down and the error names the failed
@@ -358,8 +360,7 @@ identity providers are rendered into the OAuth server at startup, so changes
 take effect on the next restart. Once the objects above are in place, restart
 the control plane — `coreshift run cluster` again in host mode, or
 `coreshift delete cluster --preserve-state` followed by `coreshift create
-cluster` in container mode — then log in with the command from the ready
-summary:
+cluster` in container mode — then log in:
 
 ```
 oc login https://127.0.0.1:6443 --certificate-authority=/home/you/.local/state/coreshift/clusters/coreshift/ca.crt -u developer -p password
@@ -475,10 +476,12 @@ plane is ready, the summary matches host mode plus one line:
 
 ```
 Control plane ready
+  Name:         coreshift
+  Release:      quay.io/openshift-release-dev/ocp-release:4.22.21-x86_64
   API endpoint: https://127.0.0.1:6443
   Kubeconfig:   /home/you/.local/state/coreshift/clusters/coreshift/admin.kubeconfig
-  Log in with:  oc login https://127.0.0.1:6443 --certificate-authority=/home/you/.local/state/coreshift/clusters/coreshift/ca.crt -u <username> -p <password>
-Container coreshift is running in the background
+  Context:      admin@coreshift
+Container coreshift-coreshift is running in the background
 ```
 
 Log in with `oc` as described in [Logging in](#logging-in); the restart it
@@ -726,7 +729,7 @@ Worker name: worker1
 Minting the bootstrap identity
 Minting the machine stand-in
 Placing the OVN workloads
-Building container image localhost/coreshift-worker:46637e0-80ad7a553365
+Building container image localhost/coreshift-worker:48ddb94-6ea77c2a70d4
 Starting container coreshift-worker-worker1
 Waiting for the worker to join
 Requesting node certificate
@@ -736,11 +739,13 @@ starting ovs-vswitchd
 starting crio
 starting kubelet
 Waiting for the node to register
+Node registered; it reports NotReady until a CNI exists
 Waiting for the OVN workloads to run
+OVN workloads running: ovnkube-node-8qlv5 on worker1, ovnkube-control-plane-79db54d88-vt69v
 
 Worker joined
   Node:       worker1, with the OVN-Kubernetes pods running on it
-  Limit:      workloads whose user IDs the worker's user namespace cannot express will not start; create workers under sudo for those
+  Limit:      workloads whose user IDs the worker's user namespace cannot express will not start
   Kubeconfig: /home/you/.local/state/coreshift/clusters/coreshift/admin.kubeconfig
   Container coreshift-worker-worker1 is running in the background
 ```
