@@ -17,7 +17,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/vkareh/coreshift/internal/warnings"
 )
 
 // The OAuth object is served through the definition the startup seeds and
@@ -64,7 +65,7 @@ type Provider struct {
 // or secret key is missing, are logged and skipped, following the API's
 // documented behavior for them.
 func Render(ctx context.Context, kubeconfigPath, stateDir string) ([]Provider, error) {
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	config, err := warnings.Config(kubeconfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("load kubeconfig: %w", err)
 	}

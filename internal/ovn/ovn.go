@@ -24,7 +24,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/vkareh/coreshift/internal/warnings"
 )
 
 // The OVN workloads' namespace and names, as the network operator
@@ -418,7 +419,7 @@ func podReport(pod *corev1.Pod) string {
 
 // clients builds the API clients the kubeconfig points at.
 func clients(kubeconfigPath string) (kubernetes.Interface, dynamic.Interface, error) {
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	config, err := warnings.Config(kubeconfigPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read admin kubeconfig: %w", err)
 	}

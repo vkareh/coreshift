@@ -15,7 +15,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/vkareh/coreshift/internal/warnings"
 )
 
 // The global pull secret's place and shape, matching what a real
@@ -37,7 +38,7 @@ var objectRetryInterval = 3 * time.Second
 // coming up. An existing Secret is replaced, so a changed pull secret
 // file reaches the cluster on the next run.
 func Seed(ctx context.Context, kubeconfigPath string, pullSecret []byte) error {
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	config, err := warnings.Config(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("load kubeconfig: %w", err)
 	}
@@ -89,7 +90,7 @@ func seed(ctx context.Context, client kubernetes.Interface, pullSecret []byte) e
 // at stores, or nil when it stores none, the shape a cluster created
 // before the Secret existed has.
 func Fetch(ctx context.Context, kubeconfigPath string) ([]byte, error) {
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	config, err := warnings.Config(kubeconfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("read admin kubeconfig: %w", err)
 	}

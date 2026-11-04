@@ -17,8 +17,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/yaml"
+
+	"github.com/vkareh/coreshift/internal/warnings"
 )
 
 // The client oc logs in with, mirroring the authentication operator's
@@ -46,7 +47,7 @@ var objectRetryInterval = 3 * time.Second
 // redirect URI is derived from apiServerURL, the endpoint clients log in
 // to.
 func Seed(ctx context.Context, kubeconfigPath, apiServerURL string) error {
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	config, err := warnings.Config(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("load kubeconfig: %w", err)
 	}

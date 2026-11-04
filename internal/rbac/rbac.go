@@ -17,7 +17,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/vkareh/coreshift/internal/warnings"
 )
 
 // objectRetryInterval spaces out retries while kube-apiserver warms up or
@@ -62,7 +63,7 @@ const (
 // writes are retried and idempotent, so it is safe to call while the API
 // server is still coming up.
 func Seed(ctx context.Context, kubeconfigPath string) error {
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	config, err := warnings.Config(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("load kubeconfig: %w", err)
 	}

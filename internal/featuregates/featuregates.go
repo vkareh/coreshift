@@ -24,9 +24,9 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/yaml"
 
+	"github.com/vkareh/coreshift/internal/warnings"
 	"github.com/vkareh/coreshift/pkg/image"
 )
 
@@ -67,7 +67,7 @@ func Seed(ctx context.Context, kubeconfigPath, writerPath, payloadDir string) er
 	if err != nil {
 		return err
 	}
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	config, err := warnings.Config(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("load kubeconfig: %w", err)
 	}

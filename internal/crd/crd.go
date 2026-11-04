@@ -18,8 +18,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/yaml"
+
+	"github.com/vkareh/coreshift/internal/warnings"
 )
 
 // The definition manifests, copied verbatim from the openshift/api
@@ -63,7 +64,7 @@ var objectRetryInterval = 3 * time.Second
 // writes are retried and idempotent, so it is safe to call while the API
 // server is still coming up.
 func Seed(ctx context.Context, kubeconfigPath string) error {
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	config, err := warnings.Config(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("load kubeconfig: %w", err)
 	}

@@ -25,6 +25,7 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	"github.com/vkareh/coreshift/internal/rbac"
+	"github.com/vkareh/coreshift/internal/warnings"
 	"github.com/vkareh/coreshift/internal/worker"
 )
 
@@ -63,7 +64,7 @@ func Mint(ctx context.Context, kubeconfigPath, dir, nodeName string) error {
 	if err != nil {
 		return err
 	}
-	restConfig, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	restConfig, err := warnings.Config(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("read admin kubeconfig: %w", err)
 	}
@@ -113,7 +114,7 @@ func mint(ctx context.Context, server string, caPEM []byte, client kubernetes.In
 // certificate request against the cluster the admin kubeconfig points
 // at, so the join material goes when the worker does.
 func Remove(ctx context.Context, kubeconfigPath, nodeName string) error {
-	restConfig, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	restConfig, err := warnings.Config(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("read admin kubeconfig: %w", err)
 	}

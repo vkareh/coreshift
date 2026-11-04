@@ -16,7 +16,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/vkareh/coreshift/internal/warnings"
 )
 
 // Object is one thing a gated child waits to exist.
@@ -78,7 +79,7 @@ var pollInterval = 2 * time.Second
 // them; when they never arrive within the timeout, it fails naming them
 // and the version operator, the deliverer to look at.
 func Wait(ctx context.Context, kubeconfigPath, waitingFor, operatorLog string, objects ...Object) error {
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	config, err := warnings.Config(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("load kubeconfig: %w", err)
 	}

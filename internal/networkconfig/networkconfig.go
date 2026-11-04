@@ -22,7 +22,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/vkareh/coreshift/internal/warnings"
 )
 
 // The network configuration a default install carries: the service
@@ -77,7 +78,7 @@ var objectRetryInterval = 3 * time.Second
 // idempotent, and an object that already carries its record — a warm
 // re-boot's — is left exactly as it is.
 func Seed(ctx context.Context, kubeconfigPath, apiServerURL, clusterName string) error {
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	config, err := warnings.Config(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("load kubeconfig: %w", err)
 	}

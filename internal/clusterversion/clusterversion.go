@@ -22,8 +22,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/yaml"
+
+	"github.com/vkareh/coreshift/internal/warnings"
 )
 
 // The operator's place and object, the defaults it runs with: the
@@ -84,7 +85,7 @@ var objectRetryInterval = 3 * time.Second
 // the operator or an earlier run created are left untouched: the operator
 // owns them from its first boot.
 func Seed(ctx context.Context, kubeconfigPath, payloadDir string) error {
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	config, err := warnings.Config(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("load kubeconfig: %w", err)
 	}

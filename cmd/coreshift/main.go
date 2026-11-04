@@ -53,6 +53,7 @@ import (
 	"github.com/vkareh/coreshift/internal/pullsecret"
 	"github.com/vkareh/coreshift/internal/rbac"
 	"github.com/vkareh/coreshift/internal/supervisor"
+	"github.com/vkareh/coreshift/internal/warnings"
 	"github.com/vkareh/coreshift/internal/worker"
 	"github.com/vkareh/coreshift/pkg/image"
 )
@@ -305,6 +306,9 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 	if err := refuseInvalidClusterName(name); err != nil {
 		return err
 	}
+	// API server warnings follow the run's output discipline: quiet
+	// unless verbose, and quoted in the failure report either way.
+	warnings.SetVerbose(verbose)
 	if verbose {
 		// Image cache messages are quiet by default; verbose runs show
 		// them again, like the live child logs.
@@ -1381,6 +1385,9 @@ func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, 
 	if err := refuseInvalidClusterName(name); err != nil {
 		return err
 	}
+	// API server warnings follow the command's output discipline: quiet
+	// unless verbose, and quoted in the failure report either way.
+	warnings.SetVerbose(verbose)
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -1850,6 +1857,9 @@ func runCreateWorker(ctx context.Context, name string, explicit bool, cluster, p
 	if explicit && (!dnsLabelPattern.MatchString(name) || len(name) > 63) {
 		return fmt.Errorf("worker name %q is not a DNS label of at most 63 characters: lowercase letters, digits, and dashes", name)
 	}
+	// API server warnings follow the command's output discipline: quiet
+	// unless verbose, and quoted in the failure report either way.
+	warnings.SetVerbose(verbose)
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -2183,7 +2193,7 @@ const workerReadyTimeout = 10 * time.Minute
 // waitWorkerNode waits for the worker's node object to appear against
 // the cluster's admin kubeconfig, the moment a join succeeded.
 func waitWorkerNode(ctx context.Context, stateDir, name string) error {
-	config, err := clientcmd.BuildConfigFromFlags("", filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
+	config, err := warnings.Config(filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
 	if err != nil {
 		return fmt.Errorf("read admin kubeconfig: %w", err)
 	}
@@ -2667,7 +2677,7 @@ func rootfulWorkerNames() ([]string, bool) {
 // ready condition, a live read against the cluster's API. Anything in
 // the way — a stopped cluster, a missing node — counts as not ready.
 func workerNodeReady(stateDir, name string) bool {
-	config, err := clientcmd.BuildConfigFromFlags("", filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
+	config, err := warnings.Config(filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
 	if err != nil {
 		return false
 	}
@@ -3766,7 +3776,12 @@ func defaultRouteAddress() (string, error) {
 }
 
 func main() {
-	if err := newRootCommand().Execute(); err != nil {
+	root := newRootCommand()
+	// The error is printed here, not by the command library, so the
+	// warnings the API server sent can be quoted in its tail.
+	root.SilenceErrors = true
+	if err := root.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", warnings.Attach(err))
 		os.Exit(1)
 	}
 }

@@ -16,10 +16,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	aggregatorclient "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
 	"k8s.io/utils/ptr"
+
+	"github.com/vkareh/coreshift/internal/warnings"
 )
 
 // The backing services live in the default namespace and are addressed on
@@ -61,7 +62,7 @@ type Server struct {
 // caBundlePath. The main endpoint must run with aggregator routing enabled
 // for the aggregation layer to prefer endpoints over cluster IPs.
 func Seed(ctx context.Context, kubeconfigPath string, servers []Server, caBundlePath string) error {
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	config, err := warnings.Config(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("load kubeconfig: %w", err)
 	}
@@ -90,7 +91,7 @@ func Seed(ctx context.Context, kubeconfigPath string, servers []Server, caBundle
 // WaitReady polls the main API endpoint's health and each aggregated
 // server's API availability until all answer or the context expires.
 func WaitReady(ctx context.Context, kubeconfigPath string, servers []Server) error {
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	config, err := warnings.Config(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("load kubeconfig: %w", err)
 	}
