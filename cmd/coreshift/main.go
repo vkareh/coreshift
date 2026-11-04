@@ -2703,16 +2703,19 @@ func newGetWorkersCommand() *cobra.Command {
 // which that listing cannot see, so it reads that side too, without
 // ever prompting — sudo -n refuses where it would need a password — and
 // reports only what it could read when the read was refused, saying so
-// plainly. Each row carries its kind. Readiness requires the worker's
-// container running and its node's condition, read live from the
-// cluster's API, ready: a stopped container is not ready without
-// probing, and a running worker whose node reports not ready is not
-// ready either.
+// plainly. Each row carries its kind, and the same split holds under
+// elevation, where it is the rootless side that needs the drop to the
+// user. Readiness requires the worker's container running and its
+// node's condition, read live from the cluster's API, ready: a stopped
+// container is not ready without probing, and a running worker whose
+// node reports not ready is not ready either.
 func runGetWorkers() error {
 	if _, err := exec.LookPath("podman"); err != nil {
 		return fmt.Errorf("podman is required to list workers: %w", err)
 	}
-	mine, err := containersNamed(podmanPlain, workerContainerPrefix)
+	// The user's store, whichever side asks: podmanRootless is plain
+	// podman for the user and drops root to the user without a prompt.
+	mine, err := containersNamed(podmanRootless, workerContainerPrefix)
 	if err != nil {
 		return err
 	}
@@ -2736,7 +2739,7 @@ func runGetWorkers() error {
 		podman := podmanRootful
 		mode := "rootful"
 		if slices.Contains(mine, container) {
-			podman = podmanPlain
+			podman = podmanRootless
 			mode = "rootless"
 		}
 		cluster := "-"
