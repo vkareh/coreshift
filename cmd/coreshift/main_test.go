@@ -478,23 +478,35 @@ func TestKubeAPIServerConfigBindsLoopbackOnHost(t *testing.T) {
 	}
 }
 
-// TestKubeAPIServerArgsPreferInternalIP checks that kube-apiserver dials
-// kubelets by their internal IP first: nothing in this cluster resolves
-// a node's bare name, so the hostname-first default leaves logs, exec,
-// and port-forwarding failing on name resolution.
-func TestKubeAPIServerArgsPreferInternalIP(t *testing.T) {
+// TestKubeAPIServerArgsKubeletConnection checks that kube-apiserver dials
+// kubelets by their internal IP first and presents the client certificate
+// kubelets authenticate: nothing in this cluster resolves a node's bare
+// name, so the hostname-first default leaves logs, exec, and
+// port-forwarding failing on name resolution, and without the client
+// certificate every kubelet-proxied path fails on authentication.
+func TestKubeAPIServerArgsKubeletConnection(t *testing.T) {
 	args := kubeAPIServerArgs("/state", "http://127.0.0.1:2379", defaultAPIPort,
 		"/state/kube-apiserver-config.json", "/state/token-review.kubeconfig")
+	var addressTypes, clientCert, clientKey bool
 	for _, arg := range args {
-		if !strings.HasPrefix(arg, "--kubelet-preferred-address-types=") {
-			continue
+		switch {
+		case strings.HasPrefix(arg, "--kubelet-preferred-address-types="):
+			addressTypes = true
+			if value := strings.TrimPrefix(arg, "--kubelet-preferred-address-types="); value != "InternalIP,Hostname,InternalDNS,ExternalDNS,ExternalIP" {
+				t.Fatalf("kubelet preferred address types = %q, want the node's internal IP first", value)
+			}
+		case arg == "--kubelet-client-certificate=/state/"+certgen.KubeletClientCertFilename:
+			clientCert = true
+		case arg == "--kubelet-client-key=/state/"+certgen.KubeletClientKeyFilename:
+			clientKey = true
 		}
-		if value := strings.TrimPrefix(arg, "--kubelet-preferred-address-types="); value != "InternalIP,Hostname,InternalDNS,ExternalDNS,ExternalIP" {
-			t.Fatalf("kubelet preferred address types = %q, want the node's internal IP first", value)
-		}
-		return
 	}
-	t.Fatalf("kube-apiserver args carry no kubelet preferred address types:\n%q", args)
+	if !addressTypes {
+		t.Fatalf("kube-apiserver args carry no kubelet preferred address types:\n%q", args)
+	}
+	if !clientCert || !clientKey {
+		t.Fatalf("kube-apiserver args carry no kubelet client certificate pair:\n%q", args)
+	}
 }
 
 // TestClusterDirByName checks that a cluster's state directory comes from

@@ -889,6 +889,12 @@ func kubeAPIServerArgs(stateDir, etcdClientURL string, port int, openshiftConfig
 		// resolution. Real clusters keep hostname first because
 		// their DNS resolves node names.
 		"--kubelet-preferred-address-types=InternalIP,Hostname,InternalDNS,ExternalDNS,ExternalIP",
+		// The client certificate kubelets authenticate the API
+		// server's connections by; without one every
+		// kubelet-proxied path — logs, exec, port-forwarding —
+		// fails on authentication.
+		"--kubelet-client-certificate=" + filepath.Join(stateDir, certgen.KubeletClientCertFilename),
+		"--kubelet-client-key=" + filepath.Join(stateDir, certgen.KubeletClientKeyFilename),
 	}
 }
 
