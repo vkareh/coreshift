@@ -867,11 +867,6 @@ starts from nothing.
 
 ### Flags
 
-- `--pull-secret` (optional): path to a pull secret JSON file, as a
-  fallback for clusters created before the cluster stored one. The image
-  build pulls the rhel-coreos base with the stored secret otherwise; a
-  cluster that stores none is refused without this flag, naming the
-  flag and the re-creation as the ways through.
 - `--name`: the worker's name, used exactly as typed. Without it the name
   is `worker<number>`, where the number is one past the count of the
   cluster's nodes — every joined worker is one, whichever kind holds
