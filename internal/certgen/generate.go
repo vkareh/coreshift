@@ -35,6 +35,8 @@ const (
 	FrontProxyClientKeyFilename                  = "front-proxy-client.key"
 	ServiceServingCertFilename                   = "service-serving.crt"
 	ServiceServingKeyFilename                    = "service-serving.key"
+	KubeletClientCertFilename                    = "kubelet-client.crt"
+	KubeletClientKeyFilename                     = "kubelet-client.key"
 	AdminCertFilename                            = "admin.crt"
 	AdminKeyFilename                             = "admin.key"
 	AdminKubeconfigFilename                      = "admin.kubeconfig"
@@ -74,6 +76,7 @@ const networkOperatorIdentity = "system:serviceaccount:openshift-network-operato
 //	front-proxy-ca.crt, front-proxy-ca.key          CA trusted by aggregated API servers
 //	front-proxy-client.crt, front-proxy-client.key  kube-apiserver certificate for aggregated API servers
 //	service-serving.crt, service-serving.key        serving certificate for the OpenShift API server and OAuth API server
+//	kubelet-client.crt, kubelet-client.key          kube-apiserver client certificate for kubelet connections
 //	admin.crt, admin.key                            cluster-admin client certificate
 //	admin.kubeconfig                                kubeconfig for the admin client
 //	kube-controller-manager.kubeconfig              kubeconfig for kube-controller-manager
@@ -115,6 +118,10 @@ func GenerateAll(outputDir string, opts Options) error {
 	serviceServingCertPEM, serviceServingKeyPEM, err := GenerateServiceServingCert(caCertPEM, caKeyPEM)
 	if err != nil {
 		return fmt.Errorf("generate service-serving certificate: %w", err)
+	}
+	kubeletClientCertPEM, kubeletClientKeyPEM, err := GenerateKubeletClientCert(caCertPEM, caKeyPEM)
+	if err != nil {
+		return fmt.Errorf("generate kubelet client certificate: %w", err)
 	}
 	adminCertPEM, adminKeyPEM, err := GenerateClientCert(caCertPEM, caKeyPEM)
 	if err != nil {
@@ -200,6 +207,8 @@ func GenerateAll(outputDir string, opts Options) error {
 		{FrontProxyClientKeyFilename, frontProxyClientKeyPEM, 0o600},
 		{ServiceServingCertFilename, serviceServingCertPEM, 0o644},
 		{ServiceServingKeyFilename, serviceServingKeyPEM, 0o600},
+		{KubeletClientCertFilename, kubeletClientCertPEM, 0o644},
+		{KubeletClientKeyFilename, kubeletClientKeyPEM, 0o600},
 		{AdminCertFilename, adminCertPEM, 0o644},
 		{AdminKeyFilename, adminKeyPEM, 0o600},
 		{AdminKubeconfigFilename, kubeconfig, 0o600},

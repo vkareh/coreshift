@@ -17,8 +17,8 @@ func TestGenerateAll(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	certs := []string{CACertFilename, APIServerCertFilename, FrontProxyCACertFilename, FrontProxyClientCertFilename, ServiceServingCertFilename, AdminCertFilename, SAPubFilename}
-	keys := []string{CAKeyFilename, APIServerKeyFilename, FrontProxyCAKeyFilename, FrontProxyClientKeyFilename, ServiceServingKeyFilename, AdminKeyFilename, SAKeyFilename}
+	certs := []string{CACertFilename, APIServerCertFilename, FrontProxyCACertFilename, FrontProxyClientCertFilename, ServiceServingCertFilename, KubeletClientCertFilename, AdminCertFilename, SAPubFilename}
+	keys := []string{CAKeyFilename, APIServerKeyFilename, FrontProxyCAKeyFilename, FrontProxyClientKeyFilename, ServiceServingKeyFilename, KubeletClientKeyFilename, AdminKeyFilename, SAKeyFilename}
 	kubeconfigs := []string{AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, OAuthServerKubeconfigFilename, OpenShiftControllerManagerKubeconfigFilename, ClusterPolicyControllerKubeconfigFilename, ClusterMachineApproverKubeconfigFilename, ClusterNetworkOperatorKubeconfigFilename}
 	for _, name := range append(append(certs, keys...), kubeconfigs...) {
 		if _, err := os.Stat(filepath.Join(outputDir, name)); err != nil {
@@ -41,6 +41,10 @@ func TestGenerateAll(t *testing.T) {
 	serviceServingCert := parseCertificate(t, readFile(t, outputDir, ServiceServingCertFilename))
 	if err := serviceServingCert.CheckSignatureFrom(caCert); err != nil {
 		t.Fatalf("service-serving certificate is not signed by CA: %v", err)
+	}
+	kubeletClientCert := parseCertificate(t, readFile(t, outputDir, KubeletClientCertFilename))
+	if err := kubeletClientCert.CheckSignatureFrom(caCert); err != nil {
+		t.Fatalf("kubelet client certificate is not signed by CA: %v", err)
 	}
 
 	config, err := clientcmd.Load(readFile(t, outputDir, AdminKubeconfigFilename))
@@ -202,7 +206,7 @@ func TestGenerateAllKeyPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{CAKeyFilename, APIServerKeyFilename, FrontProxyCAKeyFilename, FrontProxyClientKeyFilename, ServiceServingKeyFilename, AdminKeyFilename, AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, OAuthServerKubeconfigFilename, OpenShiftControllerManagerKubeconfigFilename, ClusterPolicyControllerKubeconfigFilename, ClusterMachineApproverKubeconfigFilename, SAKeyFilename} {
+	for _, name := range []string{CAKeyFilename, APIServerKeyFilename, FrontProxyCAKeyFilename, FrontProxyClientKeyFilename, ServiceServingKeyFilename, KubeletClientKeyFilename, AdminKeyFilename, AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, OAuthServerKubeconfigFilename, OpenShiftControllerManagerKubeconfigFilename, ClusterPolicyControllerKubeconfigFilename, ClusterMachineApproverKubeconfigFilename, SAKeyFilename} {
 		info, err := os.Stat(filepath.Join(outputDir, name))
 		if err != nil {
 			t.Fatal(err)
