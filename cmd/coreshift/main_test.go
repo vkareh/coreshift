@@ -69,6 +69,49 @@ func TestEnsureCertificatesRegeneratesSetWithoutLoopbackSAN(t *testing.T) {
 	}
 }
 
+func TestEnsureCertificatesRegeneratesSetWithoutServiceAddressSAN(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := ensureCertificates(stateDir, defaultClusterName, defaultAPIPort); err != nil {
+		t.Fatal(err)
+	}
+	writeStaleAPIServerCert(t, stateDir)
+
+	if err := ensureCertificates(stateDir, defaultClusterName, defaultAPIPort); err != nil {
+		t.Fatal(err)
+	}
+	cert := parseCertificate(t, readFile(t, stateDir, certgen.APIServerCertFilename))
+	if err := cert.VerifyHostname("172.30.0.1"); err != nil {
+		t.Fatalf("regenerated certificate lacks the service address SAN: %v", err)
+	}
+}
+
+// writeStaleAPIServerCert replaces the API server certificate with one
+// covering only the loopback address and the service DNS name, as
+// generated before the in-cluster service address was added.
+func writeStaleAPIServerCert(t *testing.T, stateDir string) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "kube-apiserver"},
+		DNSNames:     []string{"localhost", "kubernetes.default.svc"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if err := os.WriteFile(filepath.Join(stateDir, certgen.APIServerCertFilename), certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // writeStaleServiceServingCert replaces the service-serving certificate with
 // one covering only the service DNS names, as generated before the loopback
 // address was added.

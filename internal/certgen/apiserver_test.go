@@ -3,7 +3,6 @@ package certgen
 import (
 	"crypto/x509"
 	"encoding/pem"
-	"net"
 	"testing"
 )
 
@@ -30,8 +29,19 @@ func TestGenerateAPIServerCert(t *testing.T) {
 	if err := cert.VerifyHostname("kubernetes.default.svc"); err != nil {
 		t.Fatalf("service DNS SAN missing: %v", err)
 	}
-	if len(cert.IPAddresses) != 1 || !cert.IPAddresses[0].Equal(net.ParseIP("127.0.0.1")) {
-		t.Fatal("generated certificate has unexpected IP SANs")
+	if err := cert.VerifyHostname("kubernetes.default.svc.cluster.local"); err != nil {
+		t.Fatalf("cluster-domain service SAN missing: %v", err)
+	}
+	// The in-cluster service address, which in-cluster clients dial.
+	if err := cert.VerifyHostname("172.30.0.1"); err != nil {
+		t.Fatalf("service address SAN missing: %v", err)
+	}
+	ips := map[string]bool{}
+	for _, ip := range cert.IPAddresses {
+		ips[ip.String()] = true
+	}
+	if !ips["127.0.0.1"] || !ips["172.30.0.1"] || len(ips) != 2 {
+		t.Fatalf("generated certificate has unexpected IP SANs: %v", cert.IPAddresses)
 	}
 	if len(cert.ExtKeyUsage) != 1 || cert.ExtKeyUsage[0] != x509.ExtKeyUsageServerAuth {
 		t.Fatal("generated certificate is not for server authentication")

@@ -3520,7 +3520,8 @@ func stdinIsTerminal() bool {
 // CA on every run would invalidate kubeconfigs saved outside the state
 // directory and leave etcd data trusted by a CA nothing signs for anymore.
 // A set whose service-serving certificate lacks the loopback address counts
-// as incomplete, so it is regenerated rather than reused.
+// as incomplete, so it is regenerated rather than reused; so is a set whose
+// API server certificate lacks the in-cluster service address.
 func ensureCertificates(stateDir, name string, port int) error {
 	artifacts := []string{
 		certgen.CACertFilename, certgen.CAKeyFilename,
@@ -3549,7 +3550,7 @@ func ensureCertificates(stateDir, name string, port int) error {
 			break
 		}
 	}
-	if complete && serviceServingCertHasLoopback(stateDir) {
+	if complete && serviceServingCertHasLoopback(stateDir) && apiServerCertHasServiceAddress(stateDir) {
 		return nil
 	}
 	return certgen.GenerateAll(stateDir, certgen.Options{APIServerURL: apiServerURL(port), ClusterName: name})
@@ -3573,6 +3574,28 @@ func serviceServingCertHasLoopback(stateDir string) bool {
 		return false
 	}
 	return cert.VerifyHostname("127.0.0.1") == nil
+}
+
+// apiServerCertHasServiceAddress reports whether the saved API server
+// certificate covers the in-cluster service address. Sets generated
+// before the address was added must be regenerated, or in-cluster
+// clients — pods following the in-cluster configuration, above all the
+// CoreDNS the DNS operator deploys — fail TLS verification against the
+// API they dial by that address.
+func apiServerCertHasServiceAddress(stateDir string) bool {
+	data, err := os.ReadFile(filepath.Join(stateDir, certgen.APIServerCertFilename))
+	if err != nil {
+		return false
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return false
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false
+	}
+	return cert.VerifyHostname("172.30.0.1") == nil
 }
 
 // restoreAdminContext points the admin kubeconfig's current context back

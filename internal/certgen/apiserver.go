@@ -53,9 +53,19 @@ func GenerateAPIServerCert(caCertPEM, caKeyPEM []byte) (certPEM, keyPEM []byte, 
 		NotAfter:     now.Add(1 * 365 * 24 * time.Hour),
 		DNSNames: []string{
 			"localhost",
+			"kubernetes",
+			"kubernetes.default",
 			"kubernetes.default.svc",
+			"kubernetes.default.svc.cluster.local",
 		},
-		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+		IPAddresses: []net.IP{
+			net.ParseIP("127.0.0.1"),
+			// The in-cluster service address, the first address of the
+			// service CIDR the API server runs with. In-cluster clients
+			// dial the service by its address, so the certificate must
+			// name it or their TLS verification fails.
+			net.ParseIP("172.30.0.1"),
+		},
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
