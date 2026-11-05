@@ -448,16 +448,16 @@ func captureStd(t *testing.T, run func()) (string, string) {
 	stderr := make(chan string, 1)
 	go func() {
 		data, _ := io.ReadAll(outR)
-		outR.Close()
+		_ = outR.Close()
 		stdout <- string(data)
 	}()
 	go func() {
 		data, _ := io.ReadAll(errR)
-		errR.Close()
+		_ = errR.Close()
 		stderr <- string(data)
 	}()
 	run()
-	outW.Close()
-	errW.Close()
+	_ = outW.Close()
+	_ = errW.Close()
 	return <-stdout, <-stderr
 }

@@ -56,7 +56,7 @@ func captureStdout(t *testing.T, fn func()) string {
 	}()
 	fn()
 	os.Stdout = old
-	w.Close()
+	_ = w.Close()
 	return <-done
 }
 

@@ -1051,7 +1051,7 @@ func TestRefuseIfPortBusy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { listener.Close() })
+	t.Cleanup(func() { _ = listener.Close() })
 	port := listener.Addr().(*net.TCPAddr).Port
 
 	err = refuseIfPortBusy(port)
@@ -1074,7 +1074,7 @@ func TestRefuseOAuthPort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { listener.Close() })
+	t.Cleanup(func() { _ = listener.Close() })
 	port := listener.Addr().(*net.TCPAddr).Port
 
 	err = refuseOAuthPort(port - 1)
@@ -1600,8 +1600,8 @@ func TestOfferFreshStartWithoutTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		r.Close()
-		w.Close()
+		_ = r.Close()
+		_ = w.Close()
 	})
 	swapStdin(t, r)
 
@@ -1627,7 +1627,7 @@ func TestOfferFreshStartWithoutTerminalOnNullDevice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { devNull.Close() })
+	t.Cleanup(func() { _ = devNull.Close() })
 	swapStdin(t, devNull)
 
 	refusal := fmt.Errorf("state directory cannot be reused")
@@ -1651,7 +1651,7 @@ func noTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	swapStdin(t, r)
-	t.Cleanup(func() { w.Close() })
+	t.Cleanup(func() { _ = w.Close() })
 }
 
 // writePullSecret writes a minimal pull secret and returns its path.
@@ -1799,7 +1799,7 @@ func freePort(t *testing.T) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	return listener.Addr().(*net.TCPAddr).Port
 }
 
@@ -2020,7 +2020,7 @@ func captureStdout(t *testing.T, run func()) string {
 	os.Stdout = w
 	defer func() {
 		os.Stdout = old
-		r.Close()
+		_ = r.Close()
 	}()
 	printed := make(chan string, 1)
 	go func() {
@@ -2028,7 +2028,7 @@ func captureStdout(t *testing.T, run func()) string {
 		printed <- string(data)
 	}()
 	run()
-	w.Close()
+	_ = w.Close()
 	return <-printed
 }
 

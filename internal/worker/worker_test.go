@@ -16,7 +16,7 @@ func swapKubeletPortStarts(t *testing.T) int {
 		t.Fatal(err)
 	}
 	base := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
+	_ = listener.Close()
 
 	oldServer, oldHealthz := kubeletServerPort, kubeletHealthzPort
 	// The same spacing the real defaults have: the health port two
@@ -35,7 +35,7 @@ func holdPorts(t *testing.T, ports ...string) {
 		if err != nil {
 			t.Fatalf("hold %s: %v", address, err)
 		}
-		t.Cleanup(func() { listener.Close() })
+		t.Cleanup(func() { _ = listener.Close() })
 	}
 }
 
