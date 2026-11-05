@@ -119,7 +119,7 @@ func unpackLayer(layer v1.Layer, destination string) error {
 	if err != nil {
 		return err
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	tr := tar.NewReader(r)
 	for {
 		header, err := tr.Next()
