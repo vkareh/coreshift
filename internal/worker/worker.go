@@ -85,7 +85,7 @@ func freePort(address string, start int) (int, error) {
 	for port := start; port < start+attempts; port++ {
 		listener, err := net.Listen("tcp", net.JoinHostPort(address, strconv.Itoa(port)))
 		if err == nil {
-			listener.Close()
+			_ = listener.Close()
 			return port, nil
 		}
 	}

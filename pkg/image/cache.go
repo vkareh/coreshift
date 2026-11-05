@@ -72,7 +72,7 @@ func (c *Client) extractCached(ctx context.Context, kind, imageRef string, extra
 	if err != nil {
 		return "", fmt.Errorf("create image directory: %w", err)
 	}
-	defer os.RemoveAll(filesystem)
+	defer func() { _ = os.RemoveAll(filesystem) }()
 	if err := c.PullAndUnpack(ctx, imageRef, filesystem); err != nil {
 		return "", fmt.Errorf("pull image: %w", err)
 	}
@@ -86,11 +86,11 @@ func (c *Client) extractCached(ctx context.Context, kind, imageRef string, extra
 		return "", fmt.Errorf("create cache directory: %w", err)
 	}
 	if err := extract(filesystem, tmp); err != nil {
-		os.RemoveAll(tmp)
+		_ = os.RemoveAll(tmp)
 		return "", err
 	}
 	if err := os.Rename(tmp, dir); err != nil {
-		os.RemoveAll(tmp)
+		_ = os.RemoveAll(tmp)
 		// Another run populated the same cache entry first; use its result.
 		if _, err := os.Stat(dir); err == nil {
 			return dir, nil

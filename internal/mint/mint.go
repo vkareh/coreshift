@@ -194,7 +194,7 @@ func build(ctx context.Context, repo, version, file, authfile string, verbose bo
 	if err != nil {
 		return "", fmt.Errorf("create build context: %w", err)
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 	if err := writeContext(dir, exe, file); err != nil {
 		return "", err
 	}
@@ -272,7 +272,7 @@ func writeContext(dir, exe, file string) error {
 	if err != nil {
 		return fmt.Errorf("read running binary: %w", err)
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 	dst, err := os.OpenFile(filepath.Join(dir, "coreshift"), os.O_CREATE|os.O_WRONLY, 0o755)
 	if err != nil {
 		return fmt.Errorf("create context binary: %w", err)

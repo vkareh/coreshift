@@ -74,7 +74,7 @@ func (h *Handler) HandleWarningHeader(code int, agent string, text string) {
 	defer h.mu.Unlock()
 	fmt.Fprintf(&h.caught, "Warning: %s\n", text)
 	if h.verbose {
-		fmt.Fprintf(h.out, "Warning: %s\n", text)
+		_, _ = fmt.Fprintf(h.out, "Warning: %s\n", text)
 	}
 }
 

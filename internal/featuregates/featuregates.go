@@ -102,7 +102,7 @@ func renderFeatureSets(ctx context.Context, writerPath, version string) (map[str
 	if err != nil {
 		return nil, fmt.Errorf("create render directory: %w", err)
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	rendered := exec.CommandContext(ctx, writerPath, "--asset-output-dir="+dir, "--payload-version="+version)
 	if out, err := rendered.CombinedOutput(); err != nil {
