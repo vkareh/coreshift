@@ -41,6 +41,7 @@ import (
 	"github.com/vkareh/coreshift/internal/certgen"
 	"github.com/vkareh/coreshift/internal/clusterversion"
 	"github.com/vkareh/coreshift/internal/crd"
+	"github.com/vkareh/coreshift/internal/dnstls"
 	"github.com/vkareh/coreshift/internal/featuregates"
 	"github.com/vkareh/coreshift/internal/gate"
 	"github.com/vkareh/coreshift/internal/gpgme"
@@ -110,6 +111,7 @@ const (
 	clusterPolicyControllerPort    = 10357
 	machineApproverMetricsPort     = 9191
 	networkOperatorMetricsPort     = 9104
+	dnsOperatorMetricsPort         = 60000
 )
 
 // The etcd endpoints built from the ports above, so they cannot drift.
@@ -126,6 +128,7 @@ var reservedPorts = []int{
 	openShiftAPIServerPort, oauthAPIServerPort, oauthServerPort,
 	openShiftControllerManagerPort, clusterPolicyControllerPort,
 	machineApproverMetricsPort, networkOperatorMetricsPort,
+	dnsOperatorMetricsPort,
 }
 
 // refuseReservedPort refuses an API port a control-plane child listens
@@ -287,8 +290,8 @@ func newClusterCommand() *cobra.Command {
 // documents it.
 func newWorkerCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "worker",
-		Short: "Join a control plane and run the node side",
+		Use:    "worker",
+		Short:  "Join a control plane and run the node side",
 		Hidden: true,
 		// Failures carry their own report, and the worker container
 		// surfaces this command's errors as the container's log; a usage
@@ -371,7 +374,7 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 		return fmt.Errorf("extract kube components: %w", err)
 	}
 	openShiftBinaries, err := client.ExtractOpenShiftComponents(ctx, releaseRoot,
-		"openshift-apiserver", "oauth-apiserver", "oauth-server", "openshift-controller-manager", "cluster-policy-controller", "cluster-machine-approver", "cluster-version-operator", "cluster-network-operator", "cluster-config-api")
+		"openshift-apiserver", "oauth-apiserver", "oauth-server", "openshift-controller-manager", "cluster-policy-controller", "cluster-machine-approver", "cluster-version-operator", "cluster-network-operator", "cluster-dns-operator", "cluster-config-api")
 	if err != nil {
 		return fmt.Errorf("extract openshift components: %w", err)
 	}
@@ -478,11 +481,30 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 		gate.ClusterRoleBinding("cluster-network-operator"),
 	}
 
+	// The DNS operator maps the DNS definition its controller watches
+	// and runs under the payload's own binding; the version operator
+	// delivers both. The feature gate record and the ClusterVersion its
+	// feature gate accessor reads are seeded ahead of the version
+	// operator, and the cluster operators definition its status
+	// controller watches arrived with the network operator's own waits.
+	dnsOperatorWaits := []gate.Object{
+		gate.Definition("dnses.operator.openshift.io"),
+		gate.ClusterRoleBinding("openshift-dns-operator"),
+	}
+
 	// The environment the network operator's payload deployment gives
 	// it, with every image resolved from the release the run resolved.
 	networkOperatorEnvironment, err := networkOperatorEnv(releaseRoot, payloadDir)
 	if err != nil {
 		return fmt.Errorf("build the network operator environment: %w", err)
+	}
+
+	// The environment the DNS operator's payload deployment gives it,
+	// with every image resolved from the release the run resolved and
+	// the component kubeconfig in the place its client library looks.
+	dnsOperatorEnvironment, err := dnsOperatorEnv(releaseRoot, payloadDir, filepath.Join(stateDir, certgen.ClusterDNSOperatorKubeconfigFilename))
+	if err != nil {
+		return fmt.Errorf("build the DNS operator environment: %w", err)
 	}
 
 	// Flag sets verified against the 4.22.8 payload: kube-apiserver reaches
@@ -817,6 +839,39 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 				return networkconfig.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), apiServerURL(port), name)
 			},
 		},
+		// The DNS operator deploys the cluster's DNS: it creates its own
+		// configuration object on its first reconcile and renders the
+		// real CoreDNS DaemonSet, the DNS Service, and the node-resolver
+		// DaemonSet that maintains each node's hosts file. The
+		// environment mirrors its payload's deployment — the release
+		// version and the images rendered into its workloads, the cli
+		// image included, which the operator refuses to start without —
+		// with the kubeconfig following the component pattern under the
+		// payload's own service-account identity, whose permissions the
+		// payload's binding grants. The binary reads its kubeconfig the
+		// way its client library does, from the environment, so the
+		// kubeconfig rides the environment instead of a flag. Unlike the
+		// operator Deployments, the DaemonSets it renders select every
+		// linux node, so they reach whatever worker joins.
+		{
+			Name: "cluster-dns-operator",
+			Path: openShiftBinaries["cluster-dns-operator"],
+			Env:  dnsOperatorEnvironment,
+			BeforeStart: func(ctx context.Context) error {
+				return gateOn(ctx, "the DNS operator's APIs", dnsOperatorWaits...)
+			},
+			// The CoreDNS pods mount a metrics certificate no signer on
+			// this control plane issues; the seed stands in for the
+			// signer's output once the operator has created the operand
+			// namespace. Bound the wait so a broken operator fails the
+			// run instead of blocking startup forever.
+			AfterStart: func(ctx context.Context) error {
+				ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				defer cancel()
+				fmt.Println("Seeding the DNS metrics certificate")
+				return dnstls.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), stateDir)
+			},
+		},
 	}
 
 	sup := &supervisor.Supervisor{
@@ -958,6 +1013,42 @@ func networkOperatorEnv(releaseRoot, payloadDir string) ([]string, error) {
 	return append(env, networkOperatorTunings...), nil
 }
 
+// dnsOperatorImages lists the image variables the DNS operator's
+// payload deployment sets, each with the release component its image
+// comes from, so the workloads the operator renders carry the payload's
+// real images. The table is verified against the 4.22 payload's
+// deployment.
+var dnsOperatorImages = []struct{ env, component string }{
+	{"IMAGE", "coredns"},
+	{"OPENSHIFT_CLI_IMAGE", "cli"},
+	{"KUBE_RBAC_PROXY_IMAGE", "kube-rbac-proxy"},
+}
+
+// dnsOperatorEnv builds the environment the DNS operator's payload
+// deployment gives it: the release's version, from the payload's own
+// record so a digest-pinned release still reports what it is, and the
+// images resolved from the release. The operator takes its kubeconfig
+// from the environment the way its client library does, so the
+// component kubeconfig rides along.
+func dnsOperatorEnv(releaseRoot, payloadDir, kubeconfigPath string) ([]string, error) {
+	version, err := image.PayloadVersion(payloadDir)
+	if err != nil {
+		return nil, err
+	}
+	env := append(os.Environ(),
+		"RELEASE_VERSION="+version,
+		"KUBECONFIG="+kubeconfigPath,
+	)
+	for _, entry := range dnsOperatorImages {
+		pullspec, err := image.ResolveComponentImage(releaseRoot, entry.component)
+		if err != nil {
+			return nil, fmt.Errorf("resolve the %s image: %w", entry.component, err)
+		}
+		env = append(env, entry.env+"="+pullspec)
+	}
+	return env, nil
+}
+
 // ensureGpgmeDir writes the embedded gpgme libraries into the image
 // cache and returns their directory, which openshift-controller-manager
 // runs with as its library search path.
@@ -1006,6 +1097,7 @@ var kubeconfigFilenames = []string{
 	certgen.ClusterPolicyControllerKubeconfigFilename,
 	certgen.ClusterMachineApproverKubeconfigFilename,
 	certgen.ClusterNetworkOperatorKubeconfigFilename,
+	certgen.ClusterDNSOperatorKubeconfigFilename,
 }
 
 // followAPIPort points the kubeconfigs at the port in use. The port is

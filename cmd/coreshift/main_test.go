@@ -337,6 +337,74 @@ func TestNetworkOperatorEnvMissingComponent(t *testing.T) {
 	}
 }
 
+// writeDNSOperatorRelease writes the release records the DNS operator's
+// environment is built from: the payload's version record and the
+// release manifest resolving every component the operator's deployment
+// names.
+func writeDNSOperatorRelease(t *testing.T) (releaseRoot, payloadDir string) {
+	t.Helper()
+	components := make([]string, 0, len(dnsOperatorImages))
+	for _, entry := range dnsOperatorImages {
+		components = append(components, fmt.Sprintf(
+			`{"name": %q, "from": {"kind": "DockerImage", "name": "quay.io/example/%s@sha256:%s"}}`,
+			entry.component, entry.component, entry.component))
+	}
+	releaseRoot = t.TempDir()
+	manifest := filepath.Join(releaseRoot, "release-manifests", "image-references")
+	if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, []byte(`{"spec": {"tags": [`+strings.Join(components, ",")+`]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	payloadDir = t.TempDir()
+	metadata := filepath.Join(payloadDir, "release-manifests", "release-metadata")
+	if err := os.MkdirAll(filepath.Dir(metadata), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadata, []byte(`{"version": "4.22.21"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return releaseRoot, payloadDir
+}
+
+func TestDNSOperatorEnv(t *testing.T) {
+	releaseRoot, payloadDir := writeDNSOperatorRelease(t)
+
+	env, err := dnsOperatorEnv(releaseRoot, payloadDir, "/state/cluster-dns-operator.kubeconfig")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	variables := map[string]string{}
+	for _, entry := range env {
+		name, value, _ := strings.Cut(entry, "=")
+		variables[name] = value
+	}
+	if variables["RELEASE_VERSION"] != "4.22.21" {
+		t.Fatalf("RELEASE_VERSION = %q, want 4.22.21", variables["RELEASE_VERSION"])
+	}
+	if variables["KUBECONFIG"] != "/state/cluster-dns-operator.kubeconfig" {
+		t.Fatalf("KUBECONFIG = %q, want the component kubeconfig", variables["KUBECONFIG"])
+	}
+	for _, entry := range dnsOperatorImages {
+		if want := "quay.io/example/" + entry.component + "@sha256:" + entry.component; variables[entry.env] != want {
+			t.Fatalf("%s = %q, want %q", entry.env, variables[entry.env], want)
+		}
+	}
+}
+
+func TestDNSOperatorEnvMissingComponent(t *testing.T) {
+	releaseRoot, payloadDir := writeDNSOperatorRelease(t)
+	if err := os.Remove(filepath.Join(releaseRoot, "release-manifests", "image-references")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := dnsOperatorEnv(releaseRoot, payloadDir, "/state/cluster-dns-operator.kubeconfig"); err == nil {
+		t.Fatal("expected an error naming the unresolvable image")
+	}
+}
+
 func TestRefuseInvalidClusterName(t *testing.T) {
 	for _, name := range []string{"../escape", "a/b", "Bad Name", ""} {
 		if err := refuseInvalidClusterName(name); err == nil {
