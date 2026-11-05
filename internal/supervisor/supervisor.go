@@ -129,7 +129,7 @@ func (s *Supervisor) Run(ctx context.Context, processes []Process) error {
 			// final output, so a failure error read from it sees every
 			// line.
 			c.copiers.Wait()
-			c.logFile.Close()
+			_ = c.logFile.Close()
 			close(c.done)
 			exits <- c
 		}()
@@ -287,7 +287,7 @@ func (s *Supervisor) progress(line string) {
 	if w == nil {
 		w = os.Stdout
 	}
-	fmt.Fprintln(w, line)
+	_, _ = fmt.Fprintln(w, line)
 }
 
 func (s *Supervisor) startChild(proc *Process, stdout, stderr io.Writer, mu *sync.Mutex) (*child, error) {
@@ -303,31 +303,31 @@ func (s *Supervisor) startChild(proc *Process, stdout, stderr io.Writer, mu *syn
 
 	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
-		logFile.Close()
+		_ = logFile.Close()
 		return nil, err
 	}
 	stderrR, stderrW, err := os.Pipe()
 	if err != nil {
-		logFile.Close()
-		stdoutR.Close()
-		stdoutW.Close()
+		_ = logFile.Close()
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
 		return nil, err
 	}
 	cmd.Stdout = stdoutW
 	cmd.Stderr = stderrW
 
 	if err := cmd.Start(); err != nil {
-		logFile.Close()
-		stdoutR.Close()
-		stdoutW.Close()
-		stderrR.Close()
-		stderrW.Close()
+		_ = logFile.Close()
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
+		_ = stderrR.Close()
+		_ = stderrW.Close()
 		return nil, err
 	}
 	// Children inherit the write ends; close this process's copies so the
 	// copy goroutines see EOF once a child exits.
-	stdoutW.Close()
-	stderrW.Close()
+	_ = stdoutW.Close()
+	_ = stderrW.Close()
 
 	// Verbose runs forward each line live with a name prefix, the way
 	// every run did before log files; quiet runs only write the file.
@@ -352,7 +352,7 @@ func (s *Supervisor) startChild(proc *Process, stdout, stderr io.Writer, mu *syn
 // copyLines writes each line read from r to the child's log file and, when
 // live is set, to it with a name prefix.
 func copyLines(r io.ReadCloser, name string, log io.Writer, live io.Writer, mu *sync.Mutex) {
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	reader := bufio.NewReader(r)
 	for {
 		line, err := reader.ReadString('\n')
