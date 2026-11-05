@@ -234,8 +234,9 @@ func newVersionCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
 		Short: "Print the CoreShift version",
-		Run: func(cmd *cobra.Command, _ []string) {
-			fmt.Fprintln(cmd.OutOrStdout(), version)
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_, err := fmt.Fprintln(cmd.OutOrStdout(), version)
+			return err
 		},
 	}
 }
@@ -1157,8 +1158,12 @@ func followInvokingUserHomes() error {
 	if err != nil {
 		return err
 	}
-	os.Setenv("XDG_STATE_HOME", stateHome)
-	os.Setenv("XDG_CACHE_HOME", cacheHome)
+	if err := os.Setenv("XDG_STATE_HOME", stateHome); err != nil {
+		return fmt.Errorf("set state home: %w", err)
+	}
+	if err := os.Setenv("XDG_CACHE_HOME", cacheHome); err != nil {
+		return fmt.Errorf("set cache home: %w", err)
+	}
 	return nil
 }
 
@@ -2019,7 +2024,7 @@ func workerPullSecret(ctx context.Context, stateDir string) (pullSecret []byte, 
 	if err != nil {
 		return nil, "", nil, err
 	}
-	return pullSecret, authfile, func() { os.Remove(authfile) }, nil
+	return pullSecret, authfile, func() { _ = os.Remove(authfile) }, nil
 }
 
 // writeAuthFile writes the cluster's stored pull secret to a throwaway
@@ -2032,7 +2037,7 @@ func writeAuthFile(pullSecret []byte) (string, error) {
 	_, err = file.Write(pullSecret)
 	closeErr := file.Close()
 	if err != nil || closeErr != nil {
-		os.Remove(file.Name())
+		_ = os.Remove(file.Name())
 		if err == nil {
 			err = closeErr
 		}
@@ -2532,7 +2537,9 @@ func runGetClusters() error {
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "NAME\tPORT\tRELEASE\tREADY")
+	if _, err := fmt.Fprintln(w, "NAME\tPORT\tRELEASE\tREADY"); err != nil {
+		return err
+	}
 	for _, container := range containers {
 		name := strings.TrimPrefix(container, clusterContainerPrefix)
 		port, err := containerPort(container)
@@ -2551,7 +2558,9 @@ func runGetClusters() error {
 		if running, err := containerRunning(podmanPlain, container); err == nil && running && clusterReady(port) {
 			ready = "ready"
 		}
-		fmt.Fprintf(w, "%s\t%d\t%s\t%s\n", name, port, release, ready)
+		if _, err := fmt.Fprintf(w, "%s\t%d\t%s\t%s\n", name, port, release, ready); err != nil {
+			return err
+		}
 	}
 	return w.Flush()
 }
@@ -2633,7 +2642,9 @@ func runGetWorkers() error {
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "NAME\tCLUSTER\tMODE\tREADY")
+	if _, err := fmt.Fprintln(w, "NAME\tCLUSTER\tMODE\tREADY"); err != nil {
+		return err
+	}
 	for _, container := range containers {
 		name := strings.TrimPrefix(container, workerContainerPrefix)
 		// A worker this side cannot see is read through the same
@@ -2654,7 +2665,9 @@ func runGetWorkers() error {
 				}
 			}
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", name, cluster, mode, ready)
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", name, cluster, mode, ready); err != nil {
+			return err
+		}
 	}
 	if err := w.Flush(); err != nil {
 		return err
@@ -2904,7 +2917,7 @@ func clusterReady(port int) bool {
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode == http.StatusOK
 }
@@ -3775,7 +3788,7 @@ func defaultRouteAddress() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("determine host address: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	return conn.LocalAddr().(*net.UDPAddr).IP.String(), nil
 }
 
