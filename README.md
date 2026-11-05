@@ -6,8 +6,8 @@ required to actually run it. The control plane (etcd, kube-apiserver,
 kube-controller-manager, kube-scheduler, plus the full OpenShift API layer:
 openshift-apiserver, oauth-apiserver, oauth-server,
 openshift-controller-manager, cluster-policy-controller, the
-cluster-machine-approver, the cluster-version-operator, and the
-cluster-network-operator) is built from
+cluster-machine-approver, the cluster-version-operator, the
+cluster-network-operator, and the cluster-dns-operator) is built from
 real, version-matched upstream OpenShift components, not reimplementations.
 
 CoreShift runs the same real control plane two ways. `coreshift run
@@ -64,8 +64,8 @@ cluster install. etcd,
 kube-apiserver, kube-controller-manager, and kube-scheduler run alongside the
 full OpenShift API layer: openshift-apiserver, oauth-apiserver, oauth-server,
 openshift-controller-manager, cluster-policy-controller,
-cluster-machine-approver, cluster-version-operator, and
-cluster-network-operator. Everything
+cluster-machine-approver, cluster-version-operator,
+cluster-network-operator, and cluster-dns-operator. Everything
 listens on the host, and `oc` talks to the API server like it would to any
 cluster.
 
@@ -706,7 +706,8 @@ bare command asks for no elevation at all:
 
 The same command under `sudo` joins a rootful worker instead, running
 the whole launch as root; see the capability map above for what each
-form runs.
+form runs. Its summary drops the Limit line — the limit is the rootless
+worker's.
 
 The worker's name is picked by counting: with no `--name`, the number is
 one past the count of the cluster's nodes — every joined worker is one,
@@ -828,6 +829,141 @@ reports Ready throughout, and the host's interfaces and routes are
 unchanged: the worker's OVN configures the cluster container's
 namespace and never the host's, proven by before-and-after snapshots of
 the host's address and route state.
+
+The whole story as a user meets it, captured on a freshly created
+container-mode cluster with one rootful worker — the form workload pods
+need — on the default verified release. The DNS Service exists as soon
+as the control plane has booted: the DNS operator runs as a supervised
+child like the network operator, and reconciles it. The CoreDNS
+DaemonSet it renders selects every Linux node, so the worker that joins
+runs it with no placement help, the node-resolver DaemonSet beside it:
+
+```
+$ oc -n openshift-dns get svc dns-default
+NAME          TYPE        CLUSTER-IP    EXTERNAL-IP   PORT(S)                  AGE   SELECTOR
+dns-default   ClusterIP   172.30.0.10   <none>        53/UDP,53/TCP,9154/TCP   60s   dns.operator.openshift.io/daemonset-dns=default
+```
+
+```
+$ oc -n openshift-dns get pods -o wide
+NAME                  READY   STATUS    RESTARTS   AGE     IP           NODE      NOMINATED NODE   READINESS GATES
+dns-default-j5ngs     2/2     Running   0          73s     10.128.0.5   worker1   <none>           <none>
+node-resolver-mwggw   1/1     Running   0          2m28s   10.89.2.6    worker1   <none>           <none>
+```
+
+The kubelet's configuration carries what the join wrote, read from
+inside the worker's container:
+
+```
+$ sudo podman exec coreshift-worker-worker1 cat /etc/kubernetes/kubelet.conf
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+...
+clusterDNS:
+  - 172.30.0.10
+clusterDomain: cluster.local
+...
+```
+
+Two pods in the `default` namespace — one serving a line of text over
+HTTP with a Service in front of it, the other fetching — show the proof
+a user meets first. The Service's full cluster-domain name resolves from
+the fetching pod and the fetch answers through it; the Kubernetes
+service resolves; and the pod's resolver points at the DNS Service's
+address, the search list carrying the cluster domain so the bare names
+workloads use resolve too:
+
+```
+$ oc exec client -- nslookup web.default.svc.cluster.local
+Server:		172.30.0.10
+Address:	172.30.0.10#53
+
+Name:	web.default.svc.cluster.local
+Address: 172.30.161.82
+
+$ oc exec client -- wget -q -O - http://web.default.svc.cluster.local:8080/
+hello from the webserver pod
+
+$ oc exec client -- nslookup kubernetes.default.svc.cluster.local
+Server:		172.30.0.10
+Address:	172.30.0.10#53
+
+Name:	kubernetes.default.svc.cluster.local
+Address: 172.30.0.1
+
+$ oc exec client -- cat /etc/resolv.conf
+search default.svc.cluster.local svc.cluster.local cluster.local lan
+nameserver 172.30.0.10
+options ndots:5
+```
+
+The API server answers its own service name from inside the pod network
+with TLS the pod's projected certificate verifies — the serving
+certificate carries the service names:
+
+```
+$ oc exec client -- curl -s --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt https://kubernetes.default.svc/version
+{
+  "major": "1",
+  "minor": "35",
+  ...
+  "gitVersion": "v1.35.9",
+  "platform": "linux/amd64"
+}
+```
+
+Then the application the phase was for: a public two-tier web
+application — a web front end with its own database server behind a
+Service — deployed into a fresh namespace, whose front end reaches its
+database only by the database's service name. That shape is the
+crash-loop that motivated this phase: pointed at a database name nothing
+resolves, the same front end exits on the failed lookup and the kubelet
+restarts it,
+
+```
+$ oc -n blog get pods
+NAME                          READY   STATUS    RESTARTS      AGE
+blog-broken-b778478df-f6g62   0/1     Error     3 (58s ago)   75s
+
+$ oc -n blog logs deployment/blog-broken
+...
+Error Code: ENOTFOUND
+Error: getaddrinfo ENOTFOUND blog-missing
+```
+
+while with the name resolving, both tiers schedule onto the worker and
+run, and the front end answers HTTP through the cluster DNS by its own
+full name, from a pod in another namespace:
+
+```
+$ oc -n blog get pods -o wide
+NAME                       READY   STATUS    RESTARTS   AGE   IP            NODE      NOMINATED NODE   READINESS GATES
+blog-7d45588bb-98rcv       1/1     Running   0          68s   10.128.0.12   worker1   <none>           <none>
+blog-db-7df64fdbd9-5sqtr   1/1     Running   0          68s   10.128.0.11   worker1   <none>           <none>
+
+$ oc exec client -- curl -sI http://blog.blog.svc.cluster.local:2368/
+HTTP/1.1 200 OK
+```
+
+and both tiers' container logs read through the API — the kubelet path
+the client-certificate and node-address fixes repaired — the front
+end's log showing the database it found by name and the schema it built
+there:
+
+```
+$ oc -n blog logs deployment/blog
+[2026-11-05 22:24:25] INFO Your site is now available on http://blog.blog.svc.cluster.local:2368/
+[2026-11-05 22:24:25] WARN Database state requires initialisation.
+[2026-11-05 22:24:26] INFO Creating table: posts
+...
+[2026-11-05 22:24:31] INFO Database is in a ready state.
+```
+
+```
+$ oc -n blog logs deployment/blog-db
+2026-11-05 22:24:10 0 [Note] Server socket created on IP: '0.0.0.0', port: '3306'.
+2026-11-05 22:24:10 0 [Note] Server socket created on IP: '::', port: '3306'.
+```
 
 The join is real all the way through: the node's certificate request was
 approved by the machine approver the control plane runs, and issued:
