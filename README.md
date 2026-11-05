@@ -818,12 +818,16 @@ $ wget --no-check-certificate -q -O - https://172.30.0.1/version
 }
 ```
 
-In-cluster DNS does not exist yet — that is the next phase — so the
-proof runs on addresses, not names. The node reports Ready throughout,
-and the host's interfaces and routes are unchanged: the worker's OVN
-configures the cluster container's namespace and never the host's,
-proven by before-and-after snapshots of the host's address and route
-state.
+Cluster DNS comes with the worker's join: the join resolves the DNS
+Service the DNS operator reconciles — waiting for it when the cluster's
+DNS has not been reconciled yet — and writes its cluster address and the
+cluster domain into the kubelet's configuration, so a plain pod resolves
+cluster names. The kubelet's DNS fields are set at join, so a worker
+created before the DNS phase re-creates to pick them up. The node
+reports Ready throughout, and the host's interfaces and routes are
+unchanged: the worker's OVN configures the cluster container's
+namespace and never the host's, proven by before-and-after snapshots of
+the host's address and route state.
 
 The join is real all the way through: the node's certificate request was
 approved by the machine approver the control plane runs, and issued:

@@ -310,3 +310,66 @@ func TestWriteNodeKubeconfig(t *testing.T) {
 		t.Fatalf("current context = %q, want the node's", config.CurrentContext)
 	}
 }
+
+// dnsService builds the DNS Service the DNS operator reconciles, with
+// the cluster IP the kubelet needs.
+func dnsService(ip string) *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: dnsServiceName, Namespace: dnsServiceNamespace},
+		Spec:       corev1.ServiceSpec{ClusterIP: ip},
+	}
+}
+
+// TestWaitClusterDNS checks that the cluster DNS address is the DNS
+// Service's cluster IP, read from the service the DNS operator
+// reconciles.
+func TestWaitClusterDNS(t *testing.T) {
+	client := fake.NewSimpleClientset(dnsService("172.30.0.10"))
+	ip, err := waitClusterDNS(context.Background(), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ip != "172.30.0.10" {
+		t.Fatalf("cluster DNS = %q, want the DNS Service's cluster IP", ip)
+	}
+}
+
+// TestWaitClusterDNSWaitsForService checks the not-yet-reconciled case:
+// a DNS Service the operator has not created yet is kept waiting for
+// until it arrives.
+func TestWaitClusterDNSWaitsForService(t *testing.T) {
+	apiPollInterval = time.Millisecond
+	t.Cleanup(func() { apiPollInterval = time.Second })
+	client := fake.NewSimpleClientset(dnsService("172.30.0.10"))
+	var misses int
+	client.PrependReactor("get", "services", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		misses++
+		if misses > 2 {
+			return false, nil, nil
+		}
+		return true, nil, apierrors.NewNotFound(corev1.Resource("services"), dnsServiceName)
+	})
+	ip, err := waitClusterDNS(context.Background(), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ip != "172.30.0.10" {
+		t.Fatalf("cluster DNS = %q, want the DNS Service's cluster IP", ip)
+	}
+	if misses != 3 {
+		t.Fatalf("polls = %d, want the wait to keep polling until the service arrived", misses)
+	}
+}
+
+// TestWaitClusterDNSTimesOut checks that a DNS Service that never
+// arrives fails the join naming it, rather than waiting forever.
+func TestWaitClusterDNSTimesOut(t *testing.T) {
+	apiPollInterval = time.Millisecond
+	t.Cleanup(func() { apiPollInterval = time.Second })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, err := waitClusterDNS(ctx, fake.NewSimpleClientset())
+	if err == nil || !strings.Contains(err.Error(), dnsServiceName) {
+		t.Fatalf("err = %v, want the wait to fail naming the DNS Service", err)
+	}
+}

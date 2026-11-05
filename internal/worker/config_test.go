@@ -73,13 +73,15 @@ func TestStorePullSecretChecksDelivery(t *testing.T) {
 // verified ones.
 func TestWriteKubeletConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "kubelet.conf")
-	if err := writeKubeletConfig(path); err != nil {
+	if err := writeKubeletConfig(path, "172.30.0.10"); err != nil {
 		t.Fatal(err)
 	}
 	config := string(readFile(t, path))
 	for _, want := range []string{
 		"clientCAFile: " + caPath,
 		"cgroupDriver: cgroupfs",
+		"clusterDNS:\n  - 172.30.0.10",
+		"clusterDomain: " + clusterDomain,
 		"containerRuntimeEndpoint: unix://" + crioSocket,
 		"failSwapOn: false",
 		"volumePluginDir: " + kubeletPluginDir,

@@ -166,12 +166,15 @@ pause_command = "/usr/bin/pod"
 // CRI-O config it follows the payload where the container can and
 // departs where it cannot: kubelet talks to CRI-O's socket, but drives
 // cgroups itself because the container has no systemd, and tolerates the
-// host's swap because that is not the node's choice to make. The worker
-// container runs in a user namespace, so kubelet runs with its own flag
-// for that environment, which skips the node kernel interfaces a user
-// namespace denies. Certificate rotation stays off until something
-// approves rotation requests.
-func writeKubeletConfig(path string) error {
+// host's swap because that is not the node's choice to make. Every pod's
+// resolver points at the cluster DNS, the address the join resolved from
+// the DNS Service plus the operator's cluster domain, the fields a real
+// node's machine config renders the same way. The worker container runs
+// in a user namespace, so kubelet runs with its own flag for that
+// environment, which skips the node kernel interfaces a user namespace
+// denies. Certificate rotation stays off until something approves
+// rotation requests.
+func writeKubeletConfig(path, clusterDNS string) error {
 	config := fmt.Sprintf(`apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 authentication:
@@ -182,13 +185,16 @@ authentication:
 authorization:
   mode: Webhook
 cgroupDriver: cgroupfs
+clusterDNS:
+  - %s
+clusterDomain: %s
 containerRuntimeEndpoint: unix://%s
 failSwapOn: false
 featureGates:
   KubeletInUserNamespace: true
 rotateCertificates: false
 volumePluginDir: %s
-`, caPath, crioSocket, kubeletPluginDir)
+`, caPath, clusterDNS, clusterDomain, crioSocket, kubeletPluginDir)
 	if err := os.WriteFile(path, []byte(config), 0o644); err != nil {
 		return fmt.Errorf("write kubelet config: %w", err)
 	}

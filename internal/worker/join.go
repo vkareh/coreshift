@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -217,4 +218,70 @@ func writeNodeKubeconfig(path, server, nodeName string, caPEM, certPEM, keyPEM [
 		return fmt.Errorf("write node kubeconfig: %w", err)
 	}
 	return nil
+}
+
+// The cluster DNS the kubelet hands every pod: the DNS Service the DNS
+// operator reconciles, in the namespace its first reconcile creates,
+// and the operator's default cluster domain.
+const (
+	dnsServiceNamespace = "openshift-dns"
+	dnsServiceName      = "dns-default"
+	clusterDomain       = "cluster.local"
+)
+
+// dnsReadyTimeout bounds the wait for the cluster's DNS. The DNS
+// operator starts with the control plane and workers join after, so the
+// wait usually passes at once; it covers the worker that joins while
+// the operator's first reconcile is still in flight.
+const dnsReadyTimeout = 5 * time.Minute
+
+// resolveClusterDNS returns the cluster DNS address the kubelet hands
+// every pod: the cluster IP of the DNS Service. The DNS operator starts
+// with the control plane and the worker joins after, so a cluster whose
+// DNS is not reconciled yet is waited for here, visibly and bounded,
+// the way the control plane's startup gates wait for what the version
+// operator delivers.
+func resolveClusterDNS(ctx context.Context) (string, error) {
+	config, err := clientcmd.BuildConfigFromFlags("", nodeKubeconfigPath)
+	if err != nil {
+		return "", fmt.Errorf("read node kubeconfig: %w", err)
+	}
+	client, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return "", fmt.Errorf("create node client: %w", err)
+	}
+	return waitClusterDNS(ctx, client)
+}
+
+// waitClusterDNS polls the DNS Service until it carries a cluster IP.
+// The node identity the join just took may read services, the grant
+// every node carries for its service lister.
+func waitClusterDNS(ctx context.Context, client kubernetes.Interface) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, dnsReadyTimeout)
+	defer cancel()
+	announced := false
+	var ip string
+	pollErr := wait.PollUntilContextCancel(ctx, apiPollInterval, true, func(ctx context.Context) (bool, error) {
+		service, err := client.CoreV1().Services(dnsServiceNamespace).Get(ctx, dnsServiceName, metav1.GetOptions{})
+		if err == nil {
+			ip = service.Spec.ClusterIP
+		}
+		if ip != "" {
+			return true, nil
+		}
+		if !announced {
+			announced = true
+			fmt.Println("Waiting for the cluster's DNS")
+		}
+		return false, nil
+	})
+	if pollErr != nil {
+		if errors.Is(pollErr, context.Canceled) {
+			// Shutdown was requested mid-wait; the caller reports that.
+			return "", pollErr
+		}
+		return "", fmt.Errorf("the DNS Service %s in namespace %s never arrived within %s; the DNS operator delivers it",
+			dnsServiceName, dnsServiceNamespace, dnsReadyTimeout)
+	}
+	return ip, nil
 }

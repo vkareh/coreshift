@@ -109,13 +109,17 @@ func Run(ctx context.Context) error {
 	if err := join(ctx, nodeName); err != nil {
 		return err
 	}
+	clusterDNS, err := resolveClusterDNS(ctx)
+	if err != nil {
+		return err
+	}
 	if err := storePullSecret(); err != nil {
 		return err
 	}
 	if err := writeCRIConfig(crioConfigPath); err != nil {
 		return err
 	}
-	if err := writeKubeletConfig(kubeletConfigPath); err != nil {
+	if err := writeKubeletConfig(kubeletConfigPath, clusterDNS); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(cniConfigDir, 0o755); err != nil {
