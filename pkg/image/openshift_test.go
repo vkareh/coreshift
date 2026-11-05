@@ -149,6 +149,18 @@ func TestSelectClusterNetworkOperatorBinary(t *testing.T) {
 	}
 }
 
+func TestSelectClusterDNSOperatorBinary(t *testing.T) {
+	selected, err := selectOpenShiftComponents("cluster-dns-operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The component image names its binary dns-operator, the name its
+	// deployment runs it by, and it embeds the manifests it renders.
+	if selected[0].path != "/usr/bin/dns-operator" {
+		t.Fatalf("cluster-dns-operator path = %q, want /usr/bin/dns-operator", selected[0].path)
+	}
+}
+
 func TestCopyOpenShiftDirs(t *testing.T) {
 	root := t.TempDir()
 	writeImageFiles(t, root, "/bindata/network/ovn-kubernetes/000-ns.yaml")
