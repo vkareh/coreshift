@@ -45,10 +45,11 @@ const (
 	OpenShiftAPIServerKubeconfigFilename         = "openshift-apiserver.kubeconfig"
 	OAuthAPIServerKubeconfigFilename             = "oauth-apiserver.kubeconfig"
 	OAuthServerKubeconfigFilename                = "oauth-server.kubeconfig"
-	OpenShiftControllerManagerKubeconfigFilename         = "openshift-controller-manager.kubeconfig"
-	ClusterPolicyControllerKubeconfigFilename            = "cluster-policy-controller.kubeconfig"
-	ClusterMachineApproverKubeconfigFilename             = "cluster-machine-approver.kubeconfig"
-	ClusterNetworkOperatorKubeconfigFilename             = "cluster-network-operator.kubeconfig"
+	OpenShiftControllerManagerKubeconfigFilename = "openshift-controller-manager.kubeconfig"
+	ClusterPolicyControllerKubeconfigFilename    = "cluster-policy-controller.kubeconfig"
+	ClusterMachineApproverKubeconfigFilename     = "cluster-machine-approver.kubeconfig"
+	ClusterNetworkOperatorKubeconfigFilename     = "cluster-network-operator.kubeconfig"
+	ClusterDNSOperatorKubeconfigFilename         = "cluster-dns-operator.kubeconfig"
 	SessionSecretsFilename                       = "session-secrets.yaml"
 	SAKeyFilename                                = "sa.key"
 	SAPubFilename                                = "sa.pub"
@@ -66,6 +67,11 @@ const machineApproverIdentity = "system:serviceaccount:openshift-cluster-machine
 // release payload's own cluster-admin binding grants, so the operator
 // needs no permissions seeded for it.
 const networkOperatorIdentity = "system:serviceaccount:openshift-network-operator:cluster-network-operator"
+
+// dnsOperatorIdentity is the username the DNS operator's client
+// certificate carries: the service account the release payload's own
+// binding grants, so the operator needs no permissions seeded for it.
+const dnsOperatorIdentity = "system:serviceaccount:openshift-dns-operator:dns-operator"
 
 // GenerateAll generates every certificate and key needed to run a CoreShift
 // control plane, plus client kubeconfigs, writing all of them to outputDir.
@@ -88,6 +94,7 @@ const networkOperatorIdentity = "system:serviceaccount:openshift-network-operato
 //	cluster-policy-controller.kubeconfig            kubeconfig for the cluster policy controller
 //	cluster-machine-approver.kubeconfig              kubeconfig for the cluster machine approver
 //	cluster-network-operator.kubeconfig              kubeconfig for the cluster network operator
+//	cluster-dns-operator.kubeconfig                  kubeconfig for the cluster DNS operator
 //	session-secrets.yaml                            session signing and encryption secrets for the OAuth server
 //	sa.key, sa.pub                                  service-account signing key pair
 //
@@ -191,6 +198,12 @@ func GenerateAll(outputDir string, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("generate cluster-network-operator kubeconfig: %w", err)
 	}
+	// The DNS operator runs with the payload's own service-account
+	// identity for the same reason.
+	clusterDNSOperatorKubeconfig, err := generateComponentKubeconfig(dnsOperatorIdentity, serverURL, clusterName, caCertPEM, caKeyPEM)
+	if err != nil {
+		return fmt.Errorf("generate cluster-dns-operator kubeconfig: %w", err)
+	}
 
 	files := []struct {
 		name string
@@ -221,6 +234,7 @@ func GenerateAll(outputDir string, opts Options) error {
 		{ClusterPolicyControllerKubeconfigFilename, clusterPolicyControllerKubeconfig, 0o600},
 		{ClusterMachineApproverKubeconfigFilename, clusterMachineApproverKubeconfig, 0o600},
 		{ClusterNetworkOperatorKubeconfigFilename, clusterNetworkOperatorKubeconfig, 0o600},
+		{ClusterDNSOperatorKubeconfigFilename, clusterDNSOperatorKubeconfig, 0o600},
 		{SessionSecretsFilename, sessionSecrets, 0o600},
 		{SAKeyFilename, saKeyPEM, 0o600},
 		{SAPubFilename, saPubPEM, 0o644},

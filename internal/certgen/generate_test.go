@@ -19,7 +19,7 @@ func TestGenerateAll(t *testing.T) {
 
 	certs := []string{CACertFilename, APIServerCertFilename, FrontProxyCACertFilename, FrontProxyClientCertFilename, ServiceServingCertFilename, KubeletClientCertFilename, AdminCertFilename, SAPubFilename}
 	keys := []string{CAKeyFilename, APIServerKeyFilename, FrontProxyCAKeyFilename, FrontProxyClientKeyFilename, ServiceServingKeyFilename, KubeletClientKeyFilename, AdminKeyFilename, SAKeyFilename}
-	kubeconfigs := []string{AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, OAuthServerKubeconfigFilename, OpenShiftControllerManagerKubeconfigFilename, ClusterPolicyControllerKubeconfigFilename, ClusterMachineApproverKubeconfigFilename, ClusterNetworkOperatorKubeconfigFilename}
+	kubeconfigs := []string{AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, OAuthServerKubeconfigFilename, OpenShiftControllerManagerKubeconfigFilename, ClusterPolicyControllerKubeconfigFilename, ClusterMachineApproverKubeconfigFilename, ClusterNetworkOperatorKubeconfigFilename, ClusterDNSOperatorKubeconfigFilename}
 	for _, name := range append(append(certs, keys...), kubeconfigs...) {
 		if _, err := os.Stat(filepath.Join(outputDir, name)); err != nil {
 			t.Fatalf("expected %s to be written: %v", name, err)
@@ -103,6 +103,7 @@ func TestGenerateAll(t *testing.T) {
 	for name, identity := range map[string]string{
 		ClusterMachineApproverKubeconfigFilename: machineApproverIdentity,
 		ClusterNetworkOperatorKubeconfigFilename: networkOperatorIdentity,
+		ClusterDNSOperatorKubeconfigFilename:     dnsOperatorIdentity,
 	} {
 		config, err = clientcmd.Load(readFile(t, outputDir, name))
 		if err != nil {
@@ -206,7 +207,7 @@ func TestGenerateAllKeyPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{CAKeyFilename, APIServerKeyFilename, FrontProxyCAKeyFilename, FrontProxyClientKeyFilename, ServiceServingKeyFilename, KubeletClientKeyFilename, AdminKeyFilename, AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, OAuthServerKubeconfigFilename, OpenShiftControllerManagerKubeconfigFilename, ClusterPolicyControllerKubeconfigFilename, ClusterMachineApproverKubeconfigFilename, SAKeyFilename} {
+	for _, name := range []string{CAKeyFilename, APIServerKeyFilename, FrontProxyCAKeyFilename, FrontProxyClientKeyFilename, ServiceServingKeyFilename, KubeletClientKeyFilename, AdminKeyFilename, AdminKubeconfigFilename, ControllerManagerKubeconfigFilename, SchedulerKubeconfigFilename, OpenShiftAPIServerKubeconfigFilename, OAuthAPIServerKubeconfigFilename, OAuthServerKubeconfigFilename, OpenShiftControllerManagerKubeconfigFilename, ClusterPolicyControllerKubeconfigFilename, ClusterMachineApproverKubeconfigFilename, ClusterNetworkOperatorKubeconfigFilename, ClusterDNSOperatorKubeconfigFilename, SAKeyFilename} {
 		info, err := os.Stat(filepath.Join(outputDir, name))
 		if err != nil {
 			t.Fatal(err)
