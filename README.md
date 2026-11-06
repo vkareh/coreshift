@@ -20,8 +20,8 @@ validation — RBAC/SCC checks, API compatibility testing, admission and
 defaulting behavior — without the cost and complexity of a full cluster.
 
 The command names follow one rule: run means here in this terminal;
-create means in a managed container; delete removes the cluster, its
-workers, and its state; cleanup clears leftover state and cached images.
+create means in a managed container; delete removes the cluster and its
+state; cleanup clears leftover state and cached images.
 
 | | `coreshift run cluster` | `coreshift create cluster` |
 |---|---|---|
@@ -37,19 +37,12 @@ workers, and its state; cleanup clears leftover state and cached images.
 - `coreshift run cluster`: run the control plane in this terminal.
 - `coreshift create cluster`: run it in a managed container and wait for
   it to be ready.
-- `coreshift delete cluster [--name]`: remove a cluster, its workers,
-  and its state; `--preserve-state` keeps the state, and
-  `--preserve-workers` keeps the workers and the state.
+- `coreshift delete cluster [--name]`: remove a cluster and its state;
+  `--preserve-state` keeps the state.
 - `coreshift get clusters`: list the clusters with their port, release,
   and live readiness.
 - `coreshift get kubeconfig [--name]`: print the path to a cluster's
   admin kubeconfig.
-- `coreshift create worker`: join a worker to a running cluster in a
-  managed container and wait for its node to register.
-- `coreshift delete worker [--name]`: stop a worker's container and
-  remove it, along with its node.
-- `coreshift get workers`: list the workers with their cluster, kind,
-  and live readiness.
 - `coreshift cleanup [--name | --all]`: remove cluster state and, with
   `--cache`, everything derived and rebuildable: the image cache and the
   minted container images.
@@ -108,9 +101,8 @@ the few payload objects that live in namespaces those operators would
 have created cannot land. The status is the truth, not a fault to
 hide. The operator Deployments it creates select master nodes, and
 this control plane runs none, so they sit Pending: the payload is
-applied, but nothing runs from it, and nothing it deploys selects
-workers, so a joined worker would receive none of it either. The
-control plane stands in for the bootstrap, not for nodes.
+applied, but nothing runs from it. The control plane stands in for the
+bootstrap, not for nodes.
 
 The children that need objects the payload carries wait for them before
 starting: the OpenShift API server waits for the quota and security
@@ -226,27 +218,6 @@ scheduled on any node — and that is the truth of a deployed network
 stack with nothing to run it, the same truth the payload's other
 Deployments tell.
 
-When a worker joins a cluster in a container, the create command moves
-the rendered OVN workloads within reach of that worker, and only them.
-The operator offers no placement configuration for its operands, and
-labeling the worker a master would wake all thirty-five Pending
-operator Deployments at once, whose operands would fight the
-supervised processes — so the operator is instead put into Unmanaged,
-its own supported hands-off state, and the objects it already rendered
-are patched: the one OVN control-plane Deployment is pointed at the
-cluster's nodes at a replica count one shared namespace carries, the
-node identity DaemonSet that approves the OVN pods' certificate
-requests is placed the same way, the node DaemonSets trade their own
-critical priority for the control plane's — recorded when the node
-one asked for an OOM adjustment only the initial user namespace
-grants, which the rootless workers of that design could not give —
-and the OVN configuration gives up network
-segmentation, whose node side needs a systemd no worker container
-runs. A render pass can straddle the switch to unmanaged and land its
-writes after the patches, so the placement verifies the objects and
-repairs them until the render has settled; the other operator
-Deployments stay Pending and asleep.
-
 ### Prerequisites
 
 - a Go toolchain (1.24 or newer) to build the `coreshift` binary
@@ -323,8 +294,7 @@ there the next time.
   the `openshift-config` namespace — the global pull secret a real
   cluster keeps, seeded by the startup from the file the run was given.
   It lives in the state directory's etcd data and is destroyed with it,
-  by `delete cluster` or `coreshift cleanup`. Worker creation reads it
-  from there.
+  by `delete cluster` or `coreshift cleanup`.
 - Image cache: `~/.cache/coreshift/`, shared by all runs regardless of
   cluster; see [Cache](#cache).
 
@@ -347,8 +317,7 @@ etcd, the API server, the aggregated servers, and the controllers up, the
 aggregated availability confirmed. The machine approver, the network
 operator, and the DNS operator start after the summary and converge behind
 it, the way operators settle after a real cluster's API answers; their
-progress and gate lines follow the summary as they settle, and a worker
-joining in that window waits for what it needs, as its joins always have.
+progress and gate lines follow the summary as they settle.
 
 When a child fails, the run tears down and the error names the failed
 component, quotes the tail of its log, and points at the full log file, so a
@@ -537,7 +506,7 @@ when done:
 ./coreshift delete cluster
 ```
 
-`delete` removes the cluster, its workers, and its state, saying what was
+`delete` removes the cluster and its state, saying what was
 removed and where the state was. To keep the state for a warm re-create,
 pass `--preserve-state`: the output then says the state was preserved,
 and the next create with the same name picks it back up — on whatever
@@ -598,9 +567,7 @@ certificates and state.
   [Cache](#cache).
 - The podman network `coreshift`: the bridge network cluster containers
   run on, created by the create command and kept until
-  `coreshift cleanup --cache` finds nothing using it. A joined worker's
-  OVN gateway takes over the container's interface on it, which the
-  rootless default network's proxy would not survive.
+  `coreshift cleanup --cache` finds nothing using it.
 - The container's own boot output: kept by podman; `podman logs
   coreshift-<name>` replays it, and the create command streams it live
   while it waits.
@@ -614,522 +581,20 @@ state is preserved. Ctrl-C during the wait aborts the same way. A failure
 caused by the state directory refusing reuse says so and names `--fresh`
 and a different `--name` as the remedies.
 
-## The `create worker` command
-
-`coreshift create worker` joins a worker to a running cluster, in either
-mode: the default cluster by name, or any other cluster with
-`--cluster`, resolved by name — a cluster in a container through its
-published port, and a host-mode cluster through the port its admin
-kubeconfig records. The worker is as real as
-the control plane. Its container image is minted from the payload's
-rhel-coreos image of the release the cluster records — carrying the node
-binaries (kubelet, CRI-O, the CNI plugins) matched to that release, with
-the coreshift binary copied in and the join as its entrypoint — and its
-join material is minted from the cluster's own state: a token for the
-node bootstrap service account, the identity real nodes present, and a
-machine record the machine approver matches the worker's certificate
-request against, so the join is approved the way a real node's is,
-without anything minted by hand.
-
-The entrypoint the image runs is `coreshift run worker`, the command
-that joins the control plane and runs the node side until the container
-stops. Users never type it — the create command mounts the join material
-in and the image runs it on its own — so it is hidden from the run
-listing and the help; it exists to be the image's executable.
-
-The container runs privileged, with the join material and the host's
-kernel modules mounted in read-only, and with the cluster's pull
-secret mounted in read-only where the worker copies it to the path a
-real node's configuration writes and its CRI-O reads for every pull,
-so the payload's images come from the authenticated registry the way
-a real node's do. Everything else, above all the kubelet state, stays
-inside the container: workers are ephemeral, re-created rather than
-restarted, and a re-created worker joins fresh.
-
-The worker launches one of two ways, and the invocation is the whole
-choice: the tool never elevates itself, and privilege is the invoker's
-act. Bare, `coreshift create worker` launches the rootless worker — the
-user's own podman, inside a cgroup scope systemd delegates to the user,
-joining the cluster container's network namespace by its name, both
-containers living in the user's one store — so the whole launch, image
-build and OVN bring-up included, asks for no elevation anywhere: the
-entire tool runs rootless, control plane to node. Under `sudo`, the
-same command launches the rootful worker: the launch runs as root, the
-worker container lands in root's podman store and joins the cluster
-container's namespace by its path, the two stores being blind to each
-other, the invoking user's state and cache homes are resolved so the
-run keeps reading the same directories, and the join material the run
-writes is handed back to the invoking user.
-
-The capability map between the two forms is honest. What the rootless
-worker runs: the node itself — the join, CRI-O and kubelet — the full
-network, OVN eight-for-eight, a Ready node, the host untouched, and the
-cluster's own workloads placed on it, host-networked like the OVN pods
-and running user IDs the placement maps into the worker's namespace.
-What it does not: a workload pod that needs the pod network. A pod
-whose user IDs the worker's user namespace cannot express sticks first
-at kubelet's chown of the projected service-account token to the pod's
-user ID — the per-pod user-namespace opt-in, `hostUsers: false`, is
-blocked at the same chown, and the recorded experiment below shows
-where that path lands. A pod whose user IDs map clears that chown and
-sticks one step later, at the network namespace: the CNI server that
-would attach the pod to the network runs in the network's own
-container, and the namespace file never reaches it there, because the
-mount propagation carrying it needs privileges rootless containers do
-not have — both walls verified live, pods in ContainerCreating either
-way. The remedy is one line: create workers under sudo for workload
-pods. Under sudo the rootful worker runs them: kubelet's volume chowns
-succeed and the network namespace attaches, so a plain pod schedules,
-gets a cluster-network address from the CNI, and runs.
-
-Which network the worker runs on is decided by the cluster it joins.
-A cluster in a container has a network namespace of its own, and the
-worker joins it: the join dials the control plane at the loopback they
-share, and the worker brings up the node's OVS and the br-ex gateway
-bridge inside that namespace — the job a real node's openvswitch and
-ovs-configuration services do — so the OVN node pod, host-networked
-itself, reconfigures the interfaces of the cluster container and never
-the host's. A rootless worker joins the namespace by the cluster
-container's name, both containers living in the user's one podman
-store; the rootful worker's store cannot see that container, so it
-joins by the namespace's path, which root can join anyway. A marker
-file mounted by the create command gates that bring-up, and a host-mode
-worker, which runs on the host's own network, brings up neither: the
-cluster must not reconfigure the developer's machine. Because worker
-and control plane live in one namespace, the bring-up belongs to the
-cluster's first worker, whichever kind it is: a later worker repeating
-it would fight the first over the namespace's interfaces rather than
-share them, so later workers — a cluster may hold both kinds at once —
-join beside it with the network running and their nodes report
-NotReady. The create command refuses the pasta network a rootless
-cluster container may run on — its proxy would not survive the gateway
-takeover — and clusters created now run on the project's own podman
-network instead. Whether a host-mode cluster can have a network of its
-own behind its worker is an open question: isolating the worker there
-would cut the loopback the join dials.
-
-In that shared namespace the cluster's network comes up for real: the
-create command places the OVN workloads as above, waits for the OVN
-node pod and the control-plane pod to run on the worker, and the node
-reports Ready once the CNI configuration the pods write answers. The
-Open vSwitch kernel module is shared with the host — the worker loads
-it the way a real node does — so a host that lacks the module cannot
-bring the network up. The worker also writes the `/var/run → /run`
-symlink every real node's systemd provides and the ostree image
-carries no substitute for: without it the node runtime and the network
-pods spell the same places two ways that never meet — pod network
-namespaces land under `/var/run/netns` while the network pods mount
-`/run/netns`, and the CNI server's socket is dialed through the other
-spelling than it is created with — and no workload pod's network can
-come up.
-
-The workload story divides the same way. On the rootless worker the
-token chown is the first wall: the arbitrary pod stays stuck in
-ContainerCreating, and the pod that opts into its own user namespace
-with `hostUsers: false` — asking the container runtime to idmap its
-volumes instead of chowning them — is blocked at the same chown; the
-recorded experiment below shows where that path lands. The proof for
-the rootful side, captured below: pods answer each other through the
-overlay, and the API server answers from inside the pod network.
-
-When a worker fails — its container exits, its node never registers,
-or the OVN workloads never come up — the error quotes the tail of the
-container's log, the container is removed, and the cluster's state is
-preserved.
-
-### Quickstart
-
-With a cluster running in either mode — in host mode, leave the `run
-cluster` terminal alone and use another one — join a worker to it. The
-bare command asks for no elevation at all:
-
-```
-./coreshift create worker
-```
-
-The same command under `sudo` joins a rootful worker instead, running
-the whole launch as root; see the capability map above for what each
-form runs. Its summary drops the Limit line — the limit is the rootless
-worker's.
-
-The worker's name is picked by counting: with no `--name`, the number is
-one past the count of the cluster's nodes — every joined worker is one,
-whichever kind holds its container — so the first worker is
-`worker1`, the next `worker2`, and any name already in use is skipped
-past, so repeated bare commands scale out without flags and never
-collide with each other. The chosen name prints before anything is
-minted.
-
-The command mints the join material, mints the worker image from the
-release the cluster records — pulling the rhel-coreos base with the pull
-secret the cluster stores, kept only as a throwaway credentials file for
-the duration of the build — starts the worker container, and streams
-its boot while waiting for the node to register. The image build line
-appears the first time only; a later create skips it, because the image
-is tagged from the running binary:
-
-```
-Worker name: worker1
-Minting the bootstrap identity
-Minting the machine stand-in
-Placing the OVN workloads
-Building container image localhost/coreshift-worker:48ddb94-6ea77c2a70d4
-Starting container coreshift-worker-worker1
-Waiting for the worker to join
-Requesting node certificate
-Waiting for the node certificate to be approved
-starting ovsdb-server
-starting ovs-vswitchd
-starting crio
-starting kubelet
-Waiting for the node to register
-Node registered; it reports NotReady until a CNI exists
-Waiting for the OVN workloads to run
-OVN workloads running: ovnkube-node-8qlv5 on worker1, ovnkube-control-plane-79db54d88-vt69v
-
-Worker joined
-  Node:       worker1, with the OVN-Kubernetes pods running on it
-  Limit:      workloads whose user IDs the worker's user namespace cannot express will not start
-  Kubeconfig: /home/you/.local/state/coreshift/clusters/coreshift/admin.kubeconfig
-  Container coreshift-worker-worker1 is running in the background
-```
-
-Then watch the node and the network on it, with the kubeconfig from
-the summary:
-
-```
-export KUBECONFIG=~/.local/state/coreshift/clusters/coreshift/admin.kubeconfig
-oc get nodes
-NAME      STATUS   ROLES    AGE   VERSION
-worker1   Ready    <none>   6m    v1.35.9
-```
-
-```
-oc get pods -n openshift-ovn-kubernetes
-NAME                                     READY   STATUS    RESTARTS   AGE
-ovnkube-control-plane-79db54d88-wsns8    2/2     Running   0          6m
-ovnkube-node-df4l4                       8/8     Running   0          6m
-```
-
-Every container of the node pod runs: the OVN databases and northd,
-the ovn-controller that programs the node's OVS from them, the
-certificate-backed node controller, and their metrics proxies. The
-gateway bridge they built carries the cluster container's address, so
-the control plane keeps answering through the network its own pods
-now own — the takeover a real node's OVS configuration performs on
-the node's uplink, done here to a veth inside the cluster's
-namespace, with the host's own interfaces untouched.
-
-With the network running, the limit the summary names shows honestly: a
-plain pod, whose user ID the namespace's security allocation assigns,
-is beyond the rootless worker's user namespace and stays in
-ContainerCreating. The remedy is the command's other form — under sudo
-the same command joins a rootful worker, and on it workload pods run
-for real, the phase's end-to-end proof. A plain busybox deployment
-schedules onto the worker, leaves ContainerCreating — the volume chowns
-that are the rootless wall succeed under root — and runs with a
-cluster-network address:
-
-```
-oc get pods -o wide
-NAME                       READY   STATUS    RESTARTS   AGE     IP            NODE      NOMINATED NODE   READINESS GATES
-echoer                     1/1     Running   0          51s     10.128.0.14   worker1   <none>           <none>
-prober                     1/1     Running   0          36s     10.128.0.15   worker1   <none>           <none>
-sleeper-78f4dbc4b8-c9fp   1/1     Running   0          14m     10.128.0.6    worker1   <none>           <none>
-sleeper-78f4dbc4b8-hfrdq   1/1     Running   0          6m34s   10.128.0.10   worker1   <none>           <none>
-```
-
-The `sleeper` pods run `sleep`; the `echoer` pod serves a line over
-`nc`; the `prober` pod fetches from inside the pod network. From
-inside a pod, another pod answers through the OVN overlay:
-
-```
-$ wget -q -O - http://10.128.0.14:9000
-pong
-```
-
-and the API server answers from inside the pod network, at the
-kubernetes service's cluster address:
-
-```
-$ wget --no-check-certificate -q -O - https://172.30.0.1/version
-{
-  "major": "1",
-  "minor": "35",
-  ...
-  "gitVersion": "v1.35.9",
-  "platform": "linux/amd64"
-}
-```
-
-Cluster DNS comes with the worker's join: the join resolves the DNS
-Service the DNS operator reconciles — waiting for it when the cluster's
-DNS has not been reconciled yet — and writes its cluster address and the
-cluster domain into the kubelet's configuration, so a plain pod resolves
-cluster names. The kubelet's DNS fields are set at join, so a worker
-created before the DNS phase re-creates to pick them up. The node
-reports Ready throughout, and the host's interfaces and routes are
-unchanged: the worker's OVN configures the cluster container's
-namespace and never the host's, proven by before-and-after snapshots of
-the host's address and route state.
-
-The whole story as a user meets it, captured on a freshly created
-container-mode cluster with one rootful worker — the form workload pods
-need — on the default verified release. The DNS Service exists shortly
-after the control plane is ready: the DNS operator starts behind the
-ready summary like the network operator and reconciles it, and the
-join's DNS wait covers the gap. The CoreDNS
-DaemonSet it renders selects every Linux node, so the worker that joins
-runs it with no placement help, the node-resolver DaemonSet beside it:
-
-```
-$ oc -n openshift-dns get svc dns-default
-NAME          TYPE        CLUSTER-IP    EXTERNAL-IP   PORT(S)                  AGE   SELECTOR
-dns-default   ClusterIP   172.30.0.10   <none>        53/UDP,53/TCP,9154/TCP   60s   dns.operator.openshift.io/daemonset-dns=default
-```
-
-```
-$ oc -n openshift-dns get pods -o wide
-NAME                  READY   STATUS    RESTARTS   AGE     IP           NODE      NOMINATED NODE   READINESS GATES
-dns-default-j5ngs     2/2     Running   0          73s     10.128.0.5   worker1   <none>           <none>
-node-resolver-mwggw   1/1     Running   0          2m28s   10.89.2.6    worker1   <none>           <none>
-```
-
-The kubelet's configuration carries what the join wrote, read from
-inside the worker's container:
-
-```
-$ sudo podman exec coreshift-worker-worker1 cat /etc/kubernetes/kubelet.conf
-apiVersion: kubelet.config.k8s.io/v1beta1
-kind: KubeletConfiguration
-...
-clusterDNS:
-  - 172.30.0.10
-clusterDomain: cluster.local
-...
-```
-
-Two pods in the `default` namespace — one serving a line of text over
-HTTP with a Service in front of it, the other fetching — show the proof
-a user meets first. The Service's full cluster-domain name resolves from
-the fetching pod and the fetch answers through it; the Kubernetes
-service resolves; and the pod's resolver points at the DNS Service's
-address, the search list carrying the cluster domain so the bare names
-workloads use resolve too:
-
-```
-$ oc exec client -- nslookup web.default.svc.cluster.local
-Server:		172.30.0.10
-Address:	172.30.0.10#53
-
-Name:	web.default.svc.cluster.local
-Address: 172.30.161.82
-
-$ oc exec client -- wget -q -O - http://web.default.svc.cluster.local:8080/
-hello from the webserver pod
-
-$ oc exec client -- nslookup kubernetes.default.svc.cluster.local
-Server:		172.30.0.10
-Address:	172.30.0.10#53
-
-Name:	kubernetes.default.svc.cluster.local
-Address: 172.30.0.1
-
-$ oc exec client -- cat /etc/resolv.conf
-search default.svc.cluster.local svc.cluster.local cluster.local lan
-nameserver 172.30.0.10
-options ndots:5
-```
-
-The API server answers its own service name from inside the pod network
-with TLS the pod's projected certificate verifies — the serving
-certificate carries the service names:
-
-```
-$ oc exec client -- curl -s --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt https://kubernetes.default.svc/version
-{
-  "major": "1",
-  "minor": "35",
-  ...
-  "gitVersion": "v1.35.9",
-  "platform": "linux/amd64"
-}
-```
-
-Then the application the phase was for: a public two-tier web
-application — a web front end with its own database server behind a
-Service — deployed into a fresh namespace, whose front end reaches its
-database only by the database's service name. That shape is the
-crash-loop that motivated this phase: pointed at a database name nothing
-resolves, the same front end exits on the failed lookup and the kubelet
-restarts it,
-
-```
-$ oc -n blog get pods
-NAME                          READY   STATUS    RESTARTS      AGE
-blog-broken-b778478df-f6g62   0/1     Error     3 (58s ago)   75s
-
-$ oc -n blog logs deployment/blog-broken
-...
-Error Code: ENOTFOUND
-Error: getaddrinfo ENOTFOUND blog-missing
-```
-
-while with the name resolving, both tiers schedule onto the worker and
-run, and the front end answers HTTP through the cluster DNS by its own
-full name, from a pod in another namespace:
-
-```
-$ oc -n blog get pods -o wide
-NAME                       READY   STATUS    RESTARTS   AGE   IP            NODE      NOMINATED NODE   READINESS GATES
-blog-7d45588bb-98rcv       1/1     Running   0          68s   10.128.0.12   worker1   <none>           <none>
-blog-db-7df64fdbd9-5sqtr   1/1     Running   0          68s   10.128.0.11   worker1   <none>           <none>
-
-$ oc exec client -- curl -sI http://blog.blog.svc.cluster.local:2368/
-HTTP/1.1 200 OK
-```
-
-and both tiers' container logs read through the API — the kubelet path
-the client-certificate and node-address fixes repaired — the front
-end's log showing the database it found by name and the schema it built
-there:
-
-```
-$ oc -n blog logs deployment/blog
-[2026-11-05 22:24:25] INFO Your site is now available on http://blog.blog.svc.cluster.local:2368/
-[2026-11-05 22:24:25] WARN Database state requires initialisation.
-[2026-11-05 22:24:26] INFO Creating table: posts
-...
-[2026-11-05 22:24:31] INFO Database is in a ready state.
-```
-
-```
-$ oc -n blog logs deployment/blog-db
-2026-11-05 22:24:10 0 [Note] Server socket created on IP: '0.0.0.0', port: '3306'.
-2026-11-05 22:24:10 0 [Note] Server socket created on IP: '::', port: '3306'.
-```
-
-The join is real all the way through: the node's certificate request was
-approved by the machine approver the control plane runs, and issued:
-
-```
-oc get csr
-NAME                  AGE   SIGNERNAME                                    REQUESTOR                                                                   REQUESTEDDURATION   CONDITION
-system:node:worker1   22s   kubernetes.io/kube-apiserver-client-kubelet   system:serviceaccount:openshift-machine-config-operator:node-bootstrapper   <none>              Approved,Issued
-```
-
-```
-oc get csr system:node:worker1 -o jsonpath='{.status.conditions[0].message}'
-This CSR was approved by the Node CSR Approver (cluster-machine-approver)
-```
-
-Check what is running, and remove the worker again:
-
-```
-./coreshift get workers
-NAME      CLUSTER     MODE      READY
-worker1   coreshift   rootless  ready
-```
-
-```
-./coreshift delete worker
-Stopping container coreshift-worker-worker1
-Deleted worker worker1
-Node worker1 removed from cluster coreshift
-```
-
-The node list is clean again:
-
-```
-oc get nodes
-No resources found
-```
-
-Creating the worker once more joins fresh: the deleted worker's node,
-machine record, and certificate request went with it, so the new join
-starts from nothing.
-
-### Flags
-
-- `--name`: the worker's name, used exactly as typed. Without it the name
-  is `worker<number>`, where the number is one past the count of the
-  cluster's nodes — every joined worker is one, whichever kind holds
-  its container — so a cluster holding one worker named `foo`
-  gets `worker2` — and skips upward past any name already in use, so a
-  bare command after deletions never collides with a survivor. The
-  container is called `coreshift-worker-<name>` and the node carries
-  the name.
-- `--cluster`: the cluster the worker joins, `coreshift` by default. A
-  name no cluster exists under is refused, listing the clusters that do.
-- `--verbose`: stream the image build's output to the terminal.
-
-## The user-namespace experiment
-
-The cooperative contract is the standard per-pod field that opts a pod
-into its own user namespace: `hostUsers: false`. A pod carrying it asks
-the container runtime to idmap its volumes instead of chowning them —
-exactly the isolation a rootless node can provide — while a pod without
-it asks for user IDs only the rootful worker can express. Both sides of
-that contract were run against a live rootless worker; the evidence is
-recorded below.
-
-The question: a pod that opts into its own user namespace with
-`hostUsers: false`, carrying volumes and a user ID the rootless
-worker's user namespace cannot express by chown — does it run on the
-rootless worker, its volumes idmapped by the container runtime? The
-worker under test mapped user IDs 0-65536 only (`0 1002 1` and
-`1 589824 65536`); the pods carried 1000430000, the user ID range the
-`default` namespace's security allocation assigns, and an emptyDir
-volume plus a config map. The answer is no, and the boundary sits
-before the runtime's idmap machinery is ever reached:
-
-```
-NAME          READY   STATUS              RESTARTS   AGE
-cooperative   0/1     ContainerCreating   0          67s
-stuck         0/1     ContainerCreating   0          67s
-```
-
-The opt-in pod and its counter-example — the same pod without the
-field — stick in ContainerCreating for the same reason, in the
-kubelet's own volume setup: the projected service-account token is
-chowned to the pod's user ID before anything else exists, and that
-chown cannot express the ID:
-
-```
-E atomic_writer.go:449] pod default/cooperative volume kube-api-access-pwrbh:
-  unable to change file .../token with owner 1000430000:
-  chown .../token: invalid argument
-```
-
-The counter-example fails at the identical line — the contract's two
-sides, one boundary. The container runtime never sees either pod: its
-log carries no sandbox for them and not one idmap line, so there are no
-idmapped mounts to capture. The failure is the kubelet's, not the
-runtime's.
-
-A pod with the opt-in and a mapped user ID (1000) passes the kubelet's
-volume setup and reaches the runtime, which fails one layer deeper:
-the kubelet allocates the pod its own user namespace — a 65536-ID block
-at 2036531200 — and CRI-O creates the sandbox, then fails chowning the
-sandbox's own resolv.conf to that allocated ID, which the rootless
-worker's namespace cannot express either:
-
-```
-Warning  FailedCreatePodSandBox  kubelet  Failed to create pod sandbox:
-  create resolv conf: cannot chown .../resolv.conf to 2036531200:2036531200:
-  chown .../resolv.conf: invalid argument
-```
-
-So the per-pod user namespace field does not carry a pod past the
-rootless worker's boundary: every layer that chowns by raw user ID —
-the kubelet's projected token, the runtime's sandbox resolv.conf —
-demands IDs the rootless namespace cannot express, and the idmapped
-mounts that would finally express them are never reached. The
-cooperative contract on a rootless worker is therefore the one the
-network's own workloads already follow: run with user IDs the worker's
-namespace maps — the OVN placement re-annotates the network namespaces'
-allocated ranges for exactly that reason, and those pods run
-eight-for-eight.
+## Nodes
+
+Nodes cannot currently join a CoreShift control plane. No tooling ships
+the credentials a join needs — no bootstrap identity to present, no
+machine record for an approver to match against — so nothing in this
+repository advertises node-joining capability.
+
+What the control plane keeps is the machinery that would accept a real
+node: the machine approver running behind the ready summary, the
+controller manager's certificate signing for node client certificates,
+the node-bootstrap permissions, and the node-serving operators — network
+and DNS — rendering their workloads harmlessly with no nodes to serve.
+That layer is the accepting half of a real cluster's join path, kept for
+the planned real-node join the roadmap defers to a later phase.
 
 ## `run cluster` or `create cluster`
 
@@ -1139,27 +604,16 @@ one terminal or one CI step: it runs in the foreground and stops on
 Ctrl-C. Use `create cluster` when podman is available and the cluster
 should outlive the terminal, or when several clusters have to run side by
 side, each with its own name. Both answer the question "does it
-behave like OpenShift at the API level" equally well; `create worker`
-adds the node side to either, a real kubelet and CRI-O joining from a
-container. The first worker joining a cluster in a container runs the
-cluster's whole network stack as the real OVN pods on it; a worker
-joining a host-mode cluster joins and stops there, its node NotReady,
-because the cluster must not reconfigure the host's own network.
+behave like OpenShift at the API level" equally well.
 
 ## The `delete cluster` command
 
 `coreshift delete cluster` removes the named cluster and everything it
-owns: its workers, its container, and its state directory — the
+owns: its container and its state directory — the
 certificate authority keys, the admin credentials, the stored pull
 secret, and the etcd data. Stopping the container tears the control
-plane down in reverse startup order, like a host-mode shutdown, and the
-workers go first, each deleted the same way `delete worker` deletes it,
-while the cluster's API still answers. A cluster that has workers
-deletes under sudo, because its rootful workers live in root's podman
-store, beyond the unprivileged side's reach; attempted without it, the
-command fails naming sudo rather than escalating itself. From inside
-the sudo run the rootless workers are still managed through the
-invoking user's own podman. The command says what was removed
+plane down in reverse startup order, like a host-mode shutdown. The
+command says what was removed
 and where the state was, and leaves nothing behind: no containers, no
 state directory, not even an empty clusters tree. Keeping any of it is
 the explicit act.
@@ -1176,52 +630,12 @@ next create with the same name — on whatever port — boots from the same
 certificates and etcd data, pulling nothing. The shared image cache is
 kept either way.
 
-`--preserve-workers` leaves the cluster's workers running when the
-cluster goes, and implies `--preserve-state`, because a worker cannot
-rejoin a cluster re-created without its state. This is the
-control-plane-restart workflow: delete the cluster with the flag, then
-create it again under the same name. The preserved state is the same
-cluster — same CA, same certificates, same node objects — so the
-workers' kubelets reconnect once the API returns and resume heartbeating
-against their still-existing nodes, tolerating the outage the way nodes
-do in any real cluster. The nodes return to the state they had, NotReady
-with the honest no-CNI reason, and no new certificates are issued: they
-are the same nodes, not fresh joins. Without the flag the workers are
-deleted, so a re-created cluster starts with a clean node list until new
-workers join.
-
 A cluster whose container is already gone but whose state remains is
-reported as not running, and the state follows the same rule; its
-workers still go. Failed creates never remove state — it stays behind
+reported as not running, and the state follows the same rule. Failed
+creates never remove state — it stays behind
 for inspection — so delete is the only command that removes it by intent;
 `coreshift cleanup` is the one for state orphaned by crashes or older
 deletes.
-
-## The `delete worker` command
-
-`coreshift delete worker` stops the named worker's container and removes
-it, then removes the node and the machine record its join created, so
-the cluster's node list is clean again. A rootless worker lives in the
-user's own podman and deletes with no elevation at all; a rootful one
-lives in root's store, so its deletion runs under sudo, like its
-creation. Attempted without it, the command fails naming sudo rather
-than escalating itself: the tool never elevates, privilege is the
-invoker's act. The cluster must be
-running to remove the pair; when it is not, the container still goes,
-and the node stays until the cluster's state does. When the cluster's
-state is already gone, the container still goes too, with a note that
-the node went with the cluster's state.
-
-Deleting a cluster without `--preserve-workers` deletes its workers the
-same way, one by one before the cluster's own container goes; see
-[the `delete cluster` command](#the-delete-cluster-command) for the
-restart workflow `--preserve-workers` leaves them running for.
-
-```
-./coreshift delete worker
-```
-
-`--name` selects the worker, `worker1` by default.
 
 ## The `get` command
 
@@ -1231,8 +645,7 @@ container running and its API server answering a live probe: a stopped
 container is not ready without probing, because the port it published
 can since have been taken by another cluster, and a running but booting
 or wedged one fails the probe. With no clusters it prints
-`No clusters`. Worker containers, which share the `coreshift-` name
-prefix, are not clusters in this list.
+`No clusters`.
 
 `coreshift get kubeconfig` prints the path to the named cluster's admin
 kubeconfig — the same file host mode writes — and refuses when no state
@@ -1243,23 +656,10 @@ exists for the name, listing the clusters that do:
 /home/you/.local/state/coreshift/clusters/coreshift/admin.kubeconfig
 ```
 
-`coreshift get workers` lists the workers: name, cluster, kind, and
-readiness. A rootless worker's container lives in the user's own
-podman, the same store as the cluster's, so the unprivileged listing
-sees it; a rootful one lives in root's store, which that listing cannot
-see, so it reads that side too, without ever prompting — `sudo -n`
-refuses where it would need a password — and when the read is refused
-it reports only what the unprivileged side can see, with a plain note
-that seeing rootful workers needs elevation. A cluster may hold workers
-of both kinds; each row carries its label. Readiness requires the
-worker's container running and its node's own condition, read live from
-the cluster's API, ready: a stopped container is not ready without
-probing. With no workers it prints `No workers`.
-
 ## The `version` command
 
 `coreshift version` prints the version the binary was built with, derived
-from git at build time. The container images minted from the binary are
+from git at build time. The container image minted from the binary is
 tagged with the same string, plus a short digest of the build's inputs.
 
 ## The container image
@@ -1299,17 +699,6 @@ port. The gpgme libraries openshift-controller-manager needs are
 embedded in the binary itself and written out at boot, so the image
 carries nothing but the binary and the certificate bundle.
 
-The worker image is minted the same quiet way, from the same running
-binary, but on the payload's rhel-coreos image, digest-pinned from the
-release's component map so the node binaries in it match the release the
-target cluster runs. The ostree layout of that image owns /usr and
-symlinks /usr/local into its writable var tree, so the binary is copied
-to /var/usrlocal/bin; and the image declares SIGTERM as its stop signal,
-the one the supervisor handles, because the base image declares
-systemd's. The build pulls the base from its registry with the pull
-secret, and the tag covers the recipe naming the base, so a new release's
-base gets its own image.
-
 ## The `cleanup` command
 
 `coreshift cleanup` clears leftover state and cached images. It removes
@@ -1331,12 +720,12 @@ a container-mode cluster's state.
   survive.
 - `--cache` additionally removes everything derived and rebuildable: the
   shared image cache, and the minted container images from podman's store
-  — the `coreshift` and `coreshift-worker` tags — and the podman network
+  — the `coreshift` tags — and the podman network
   cluster containers run on, when nothing uses it anymore. All are safe
   to drop: the cache is keyed by image digest and rebuilt by re-pulling,
   the images are minted from the binary again in seconds, and the
   network is re-created by the next cluster. The base images
-  they were built from, such as the UBI and rhel-coreos bases, are shared
+  they were built from, such as the UBI bases, are shared
   with everything else and stay. A cluster whose state was kept simply
   mints its image again on re-create.
 
