@@ -759,13 +759,12 @@ func TestCleanupCache(t *testing.T) {
 }
 
 // TestCleanupCacheRemovesMintedImages checks the cache flag's widened
-// meaning: the minted images in both of the project's repositories are
-// removed alongside the cache directory, and the state removal still
-// happens with them.
+// meaning: the minted images in the project's repository are removed
+// alongside the cache directory, and the state removal still happens
+// with them.
 func TestCleanupCacheRemovesMintedImages(t *testing.T) {
 	writeFakePodman(t)
 	setRepositoryImages(t, "localhost/coreshift", "localhost/coreshift:v1-a")
-	setRepositoryImages(t, "localhost/coreshift-worker", "localhost/coreshift-worker:v1-c")
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
 	cacheBase := t.TempDir()
@@ -785,10 +784,8 @@ func TestCleanupCacheRemovesMintedImages(t *testing.T) {
 	calls := podmanCalls(t)
 	want := []string{
 		"images --format {{.Repository}}:{{.Tag}} localhost/coreshift",
-		"images --format {{.Repository}}:{{.Tag}} localhost/coreshift-worker",
 		"system df --format json",
 		"rmi localhost/coreshift:v1-a",
-		"rmi localhost/coreshift-worker:v1-c",
 		"system df --format json",
 		"network exists coreshift",
 		"network rm coreshift",
@@ -798,7 +795,6 @@ func TestCleanupCacheRemovesMintedImages(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Removing image localhost/coreshift:v1-a",
-		"Removing image localhost/coreshift-worker:v1-c",
 		"No image cache at ",
 		"Removed network coreshift",
 	} {

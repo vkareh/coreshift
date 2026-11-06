@@ -1,9 +1,7 @@
-// Package mint builds the container images CoreShift runs its podman
+// Package mint builds the container image CoreShift runs its podman
 // mode from: a copy of the running binary and a build recipe, built with
 // podman and tagged so an unchanged binary skips the build. The control
-// plane's image runs on a minimal Red Hat base; the worker's runs on the
-// payload's rhel-coreos image, which carries the node binaries the
-// release ships.
+// plane's image runs on a minimal Red Hat base.
 package mint
 
 import (
@@ -25,25 +23,9 @@ import (
 //go:embed Containerfile
 var containerfile string
 
-// The repositories the two images build into, below localhost so nothing
-// is published to any registry.
-const (
-	controlPlaneRepository = "coreshift"
-	workerRepository       = "coreshift-worker"
-)
-
-// workerContainerfile is the worker image's build recipe. The base is the
-// payload's rhel-coreos image, digest-pinned from the release's component
-// map, so the node binaries in it match the release the control plane
-// runs. The binary goes under the image's writable var tree, because the
-// ostree layout symlinks /usr/local into it and owns the rest of /usr.
-// The stop signal is the one the supervisor handles; the base image
-// declares systemd's, which nothing in the container answers.
-const workerContainerfile = `FROM %s
-COPY coreshift /var/usrlocal/bin/coreshift
-STOPSIGNAL SIGTERM
-ENTRYPOINT ["/var/usrlocal/bin/coreshift", "run", "worker"]
-`
+// controlPlaneRepository is the repository the image builds into, below
+// localhost so nothing is published to any registry.
+const controlPlaneRepository = "coreshift"
 
 // logTailLines is how many lines of the captured build output a failure
 // error includes, matching the supervisor's per-child tail.
@@ -65,34 +47,21 @@ func Image(ctx context.Context, version string, verbose bool) (string, error) {
 	return build(ctx, controlPlaneRepository, version, containerfile, "", verbose)
 }
 
-// WorkerImage returns the reference of the worker's container image,
-// built the same way from the running binary but on the payload's
-// rhel-coreos image, whose pullspec the caller resolves from the release
-// the target cluster runs. The build pulls that base from its registry,
-// so it takes the pull secret as podman's authfile.
-func WorkerImage(ctx context.Context, version, base, authfile string, verbose bool) (string, error) {
-	return build(ctx, workerRepository, version, fmt.Sprintf(workerContainerfile, base), authfile, verbose)
-}
-
 // Remove removes the minted images from podman's store: every image in
-// the project's own two repositories, and nothing else — the base images
-// they were built from are shared with everything else and stay. The
-// images are derived from the binary and rebuilt in seconds, so the
-// cache cleanup removes them with the cache directory. It reports the
-// bytes freed, measured as the drop in the store's image size, because
-// layer sharing means the sum of the removed images' sizes would
-// overstate it. Without podman there is nothing to remove.
+// the project's own repository, and nothing else — the base images it
+// was built from are shared with everything else and stay. The images
+// are derived from the binary and rebuilt in seconds, so the cache
+// cleanup removes them with the cache directory. It reports the bytes
+// freed, measured as the drop in the store's image size, because layer
+// sharing means the sum of the removed images' sizes would overstate
+// it. Without podman there is nothing to remove.
 func Remove(ctx context.Context) (int64, error) {
 	if _, err := exec.LookPath("podman"); err != nil {
 		return 0, nil
 	}
-	var refs []string
-	for _, repo := range []string{controlPlaneRepository, workerRepository} {
-		listed, err := repositoryImages(ctx, repo)
-		if err != nil {
-			return 0, err
-		}
-		refs = append(refs, listed...)
+	refs, err := repositoryImages(ctx, controlPlaneRepository)
+	if err != nil {
+		return 0, err
 	}
 	if len(refs) == 0 {
 		fmt.Println("No minted images")

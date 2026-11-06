@@ -60,20 +60,6 @@ func TestBuildContextWritesBinaryAndContainerfile(t *testing.T) {
 // TestWorkerContainerfile pins the worker image's recipe: the payload's
 // rhel-coreos base, the binary under the image's writable var tree, the
 // stop signal the supervisor handles, and the worker entrypoint.
-func TestWorkerContainerfile(t *testing.T) {
-	file := fmt.Sprintf(workerContainerfile, "reg.example/coreos@sha256:abc123")
-	for _, want := range []string{
-		"FROM reg.example/coreos@sha256:abc123",
-		"COPY coreshift /var/usrlocal/bin/coreshift",
-		"STOPSIGNAL SIGTERM",
-		`ENTRYPOINT ["/var/usrlocal/bin/coreshift", "run", "worker"]`,
-	} {
-		if !strings.Contains(file, want) {
-			t.Fatalf("worker Containerfile missing %q:\n%s", want, file)
-		}
-	}
-}
-
 // writeFakePodman writes a podman stand-in into a directory of its own
 // and prepends that directory to PATH. It records every call, one line
 // per call, in the file named by PODMAN_LOG. The image-exists check
@@ -153,19 +139,6 @@ func wantedRef(t *testing.T, version string) string {
 
 // wantedWorkerRef returns the reference WorkerImage should report for
 // version and base: the test binary's own worker tag.
-func wantedWorkerRef(t *testing.T, version, base string) string {
-	t.Helper()
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	sum, err := contextDigest(exe, fmt.Sprintf(workerContainerfile, base))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return "localhost/coreshift-worker:" + stamp(version, sum)
-}
-
 func TestImageSkipsBuildWhenTagExists(t *testing.T) {
 	writeFakePodman(t, 0)
 
@@ -277,29 +250,6 @@ func TestImageRequiresPodman(t *testing.T) {
 // under its own repository, tagged from the binary and the recipe naming
 // the base, and that the build pulls the base with the pull secret as
 // podman's authfile.
-func TestWorkerImageBuildsWithAuthfile(t *testing.T) {
-	writeFakePodman(t, 1)
-	const base = "reg.example/coreos@sha256:abc123"
-
-	ref, err := WorkerImage(context.Background(), "test", base, "/secret/pull-secret", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := wantedWorkerRef(t, "test", base); ref != want {
-		t.Fatalf("ref = %q, want %q", ref, want)
-	}
-	calls := podmanCalls(t)
-	if len(calls) != 2 {
-		t.Fatalf("podman calls = %q, want the exists check and the build", calls)
-	}
-	if calls[0] != "image exists "+ref {
-		t.Fatalf("first podman call = %q, want the exists check for %s", calls[0], ref)
-	}
-	if !strings.HasPrefix(calls[1], "build --authfile /secret/pull-secret -t "+ref+" ") {
-		t.Fatalf("second podman call = %q, want an authfile build of %s", calls[1], ref)
-	}
-}
-
 // setRepositoryImages makes the fake podman answer the images listing
 // for one repository with the given references.
 func setRepositoryImages(t *testing.T, repo string, refs ...string) {
@@ -322,13 +272,12 @@ func setStoreSize(t *testing.T, size int64) {
 	}
 }
 
-// TestRemoveRemovesBothRepositories checks the removal contract: every
-// image in both of the project's repositories is removed, and the freed
-// bytes are the drop in the store's image size, not a per-image sum.
-func TestRemoveRemovesBothRepositories(t *testing.T) {
+// TestRemoveRemovesMintedImages checks the removal contract: every image
+// in the project's repository is removed, and the freed bytes are the
+// drop in the store's image size, not a per-image sum.
+func TestRemoveRemovesMintedImages(t *testing.T) {
 	writeFakePodman(t, 0)
 	setRepositoryImages(t, "localhost/coreshift", "localhost/coreshift:v1-a", "localhost/coreshift:v1-b")
-	setRepositoryImages(t, "localhost/coreshift-worker", "localhost/coreshift-worker:v1-c")
 	setStoreSize(t, 1100)
 
 	var err error
@@ -343,24 +292,22 @@ func TestRemoveRemovesBothRepositories(t *testing.T) {
 	calls := podmanCalls(t)
 	want := []string{
 		"images --format {{.Repository}}:{{.Tag}} localhost/coreshift",
-		"images --format {{.Repository}}:{{.Tag}} localhost/coreshift-worker",
 		"system df --format json",
 		"rmi localhost/coreshift:v1-a",
 		"rmi localhost/coreshift:v1-b",
-		"rmi localhost/coreshift-worker:v1-c",
 		"system df --format json",
 	}
 	if !slices.Equal(calls, want) {
 		t.Fatalf("podman calls = %q\nwant %q", calls, want)
 	}
-	for _, ref := range []string{"localhost/coreshift:v1-a", "localhost/coreshift:v1-b", "localhost/coreshift-worker:v1-c"} {
+	for _, ref := range []string{"localhost/coreshift:v1-a", "localhost/coreshift:v1-b"} {
 		if !strings.Contains(stdout, "Removing image "+ref+"\n") {
 			t.Fatalf("stdout = %q, want each removed image named", stdout)
 		}
 	}
 }
 
-// TestRemoveWithoutImages checks the empty store: both repositories are
+// TestRemoveWithoutImages checks the empty store: the repository is
 // still listed, nothing is removed, and the plain report says so.
 func TestRemoveWithoutImages(t *testing.T) {
 	writeFakePodman(t, 0)
@@ -374,8 +321,8 @@ func TestRemoveWithoutImages(t *testing.T) {
 	if freed != 0 {
 		t.Fatalf("freed = %d, want nothing", freed)
 	}
-	if calls := podmanCalls(t); len(calls) != 2 {
-		t.Fatalf("podman calls = %q, want only the two repository listings", calls)
+	if calls := podmanCalls(t); len(calls) != 1 {
+		t.Fatalf("podman calls = %q, want only the repository listing", calls)
 	}
 	if !strings.Contains(stdout, "No minted images") {
 		t.Fatalf("stdout = %q, want the empty store reported", stdout)
