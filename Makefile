@@ -1,4 +1,4 @@
-.PHONY: build lint test
+.PHONY: build install lint test
 
 GOLANGCI_LINT_VERSION ?= v2.15.0
 
@@ -9,6 +9,12 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo unkn
 build:
 	go build ./...
 	go build -ldflags "-X main.version=$(VERSION)" -o coreshift ./cmd/coreshift
+
+# Install builds the binary the way build does and puts it in the Go
+# toolchain's own binary directory ($GOBIN, or GOPATH/bin by default),
+# the same place go install uses.
+install:
+	go install -ldflags "-X main.version=$(VERSION)" ./cmd/coreshift
 
 lint:
 	@if command -v golangci-lint >/dev/null 2>&1; then \
