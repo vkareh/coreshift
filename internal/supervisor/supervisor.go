@@ -5,6 +5,7 @@ package supervisor
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -70,10 +71,11 @@ type Supervisor struct {
 	// Progress receives one line when each child starts and stops. It
 	// defaults to os.Stdout.
 	Progress io.Writer
-	// AfterStart, when set, runs once every process has started, before
-	// Run settles into waiting for shutdown or failure. It is where a run
-	// waits for readiness and reports success. Returning an error fails
-	// the run and tears the children down.
+	// AfterStart, when set, runs once every process in the first list has
+	// started, before the processes given beyond it — the ones that settle
+	// behind the readiness it confirms — start. It is where a run waits
+	// for readiness and reports success. Returning an error fails the run
+	// and tears the children down.
 	AfterStart func(ctx context.Context) error
 }
 
@@ -88,13 +90,21 @@ type child struct {
 	err     error
 }
 
-// Run starts the given processes in order and blocks until the context is
-// canceled, SIGINT or SIGTERM arrives, or one of the processes exits. On
+// errStopped reports a shutdown that arrived while children were still
+// starting: the children are already torn down, and Run answers it with
+// the same clean nil a settled run answers with.
+var errStopped = errors.New("shutdown requested during startup")
+
+// Run starts the given processes in order and blocks until the context
+// is canceled, SIGINT or SIGTERM arrives, or one of the processes exits.
+// The processes given beyond the first list start only once the
+// AfterStart hook returned, so the children the hook's readiness report
+// waits on come first and the ones that settle behind it follow. On
 // shutdown the children are terminated in reverse startup order. If a
-// process exits before shutdown was requested, the remaining children are
-// torn down and Run returns an error naming the failed component, its
-// recent log output, and its log file.
-func (s *Supervisor) Run(ctx context.Context, processes []Process) error {
+// process exits before shutdown was requested, the remaining children
+// are torn down and Run returns an error naming the failed component,
+// its recent log output, and its log file.
+func (s *Supervisor) Run(ctx context.Context, processes []Process, afterReady ...Process) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -121,7 +131,7 @@ func (s *Supervisor) Run(ctx context.Context, processes []Process) error {
 	// Exit reports are collected from the moment each child starts, so a
 	// shutdown partway through the startup loop can still wait for children
 	// that have already been started.
-	exits := make(chan *child, len(processes))
+	exits := make(chan *child, len(processes)+len(afterReady))
 	waitForExit := func(c *child) {
 		go func() {
 			c.err = c.cmd.Wait()
@@ -135,8 +145,11 @@ func (s *Supervisor) Run(ctx context.Context, processes []Process) error {
 		}()
 	}
 
-	for i := range processes {
-		if hook := processes[i].BeforeStart; hook != nil {
+	// startOne runs a process's hooks around starting it and appends it
+	// to the teardown list. Any error it returns ends the run after
+	// tearing the children down, errStopped among them.
+	startOne := func(proc *Process) error {
+		if hook := proc.BeforeStart; hook != nil {
 			if err := hook(ctx); err != nil {
 				dead := deadChildFailure(exits)
 				shutdown()
@@ -144,27 +157,27 @@ func (s *Supervisor) Run(ctx context.Context, processes []Process) error {
 				// the hook ran; report a clean shutdown, not a hook
 				// failure.
 				if ctx.Err() != nil {
-					return nil
+					return errStopped
 				}
 				if dead != nil {
 					return dead
 				}
-				return fmt.Errorf("before start of %s: %w", processes[i].Name, err)
+				return fmt.Errorf("before start of %s: %w", proc.Name, err)
 			}
 			if ctx.Err() != nil {
 				shutdown()
-				return nil
+				return errStopped
 			}
 		}
-		s.progress("starting " + processes[i].Name)
-		c, err := s.startChild(&processes[i], stdout, stderr, &mu)
+		s.progress("starting " + proc.Name)
+		c, err := s.startChild(proc, stdout, stderr, &mu)
 		if err != nil {
 			dead := deadChildFailure(exits)
 			shutdown()
 			if dead != nil {
 				return dead
 			}
-			return fmt.Errorf("start %s: %w", processes[i].Name, err)
+			return fmt.Errorf("start %s: %w", proc.Name, err)
 		}
 		children = append(children, c)
 		waitForExit(c)
@@ -175,23 +188,43 @@ func (s *Supervisor) Run(ctx context.Context, processes []Process) error {
 			shutdown()
 			return dead
 		}
-		if hook := processes[i].AfterStart; hook != nil {
+		if hook := proc.AfterStart; hook != nil {
 			if err := hook(ctx); err != nil {
 				dead := deadChildFailure(exits)
 				shutdown()
 				if ctx.Err() != nil {
-					return nil
+					return errStopped
 				}
 				if dead != nil {
 					return dead
 				}
-				return c.withLog(fmt.Errorf("after start of %s: %w", processes[i].Name, err))
+				return c.withLog(fmt.Errorf("after start of %s: %w", proc.Name, err))
 			}
 			if ctx.Err() != nil {
 				shutdown()
-				return nil
+				return errStopped
 			}
 		}
+		return nil
+	}
+
+	// startAll starts a group in order. It reports whether the run
+	// stopped mid-group — cleanly, with the children torn down and no
+	// error — so Run returns instead of continuing past the group.
+	startAll := func(group []Process) (bool, error) {
+		for i := range group {
+			if err := startOne(&group[i]); err != nil {
+				if errors.Is(err, errStopped) {
+					return true, nil
+				}
+				return false, err
+			}
+		}
+		return false, nil
+	}
+
+	if stopped, err := startAll(processes); stopped || err != nil {
+		return err
 	}
 
 	if s.AfterStart != nil {
@@ -210,6 +243,10 @@ func (s *Supervisor) Run(ctx context.Context, processes []Process) error {
 			shutdown()
 			return nil
 		}
+	}
+
+	if stopped, err := startAll(afterReady); stopped || err != nil {
+		return err
 	}
 
 	select {

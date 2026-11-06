@@ -513,6 +513,16 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 	// Flag sets verified against the 4.22.8 payload: kube-apiserver reaches
 	// readiness with exactly the flags below; the controllers stay up with
 	// service-account credentials and leader election off.
+	//
+	// The children split in two groups around the ready summary. The
+	// first group is the API's readiness path — etcd, the API server and
+	// its controllers, the version operator ahead of the OpenShift
+	// children whose starts gate on what it applies, the aggregated
+	// servers, and the controller managers — everything the summary's
+	// readiness confirmation waits on. Behind the summary follow the
+	// operators that converge in the background the way operators settle
+	// after a real cluster's API answers: the machine approver, the
+	// network operator, and the DNS operator.
 	processes := []supervisor.Process{
 		{
 			Name: "etcd",
@@ -778,6 +788,13 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 			},
 			Env: append(os.Environ(), "POD_NAMESPACE=default"),
 		},
+	}
+
+	// The operators that settle behind the ready summary: their gates
+	// wait for the version operator's delivery the same way, but nothing
+	// on the API's readiness path waits on them, so they start once the
+	// summary has printed and converge in the background.
+	operators := []supervisor.Process{
 		// The machine approver approves the node certificate requests a
 		// joining worker's bootstrap identity makes, matching each against
 		// the machine standing in for the cloud machine that would back
@@ -892,6 +909,10 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 	sup := &supervisor.Supervisor{
 		LogDir:  filepath.Join(stateDir, "logs"),
 		Verbose: verbose,
+		// The hook runs between the two groups: it confirms the API
+		// path's readiness — the API server and the aggregated servers
+		// answering, the controllers up — and prints the summary, and
+		// the operators behind it start only once it has.
 		AfterStart: func(ctx context.Context) error {
 			fmt.Println("Waiting for the control plane to be ready")
 			ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -904,7 +925,7 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 			return nil
 		},
 	}
-	return sup.Run(ctx, processes)
+	return sup.Run(ctx, processes, operators...)
 }
 
 // kubeAPIServerArgs assembles the kube-apiserver command line from the

@@ -590,6 +590,89 @@ func TestRunAfterStartHookRunsAfterAllChildren(t *testing.T) {
 	}
 }
 
+// TestRunAfterReadyChildrenStartBehindTheHook checks the processes
+// given beyond the first list start only after the AfterStart hook
+// returned, and stop before the first list's children in the
+// reverse-order teardown.
+func TestRunAfterReadyChildrenStartBehindTheHook(t *testing.T) {
+	orderFile := filepath.Join(t.TempDir(), "order")
+	reported := filepath.Join(t.TempDir(), "reported")
+	progress, out := &syncBuffer{}, &syncBuffer{}
+	sup := &Supervisor{
+		LogDir:   t.TempDir(),
+		Verbose:  true,
+		Stdout:   out,
+		Stderr:   out,
+		Progress: progress,
+		// The hook reports by writing the file the behind-the-summary
+		// child waits for, so that child starting proves the hook ran
+		// to completion first.
+		AfterStart: func(ctx context.Context) error {
+			return os.WriteFile(reported, []byte("ready"), 0o644)
+		},
+	}
+	behind := Process{
+		Name: "behind",
+		Path: "bash",
+		Args: []string{"-c", fmt.Sprintf(
+			"trap 'echo behind >> %q; exit 0' TERM; while [ ! -f %q ]; do sleep 0.05; done; echo started; while :; do sleep 0.1; done",
+			orderFile, reported)},
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- sup.Run(context.Background(), []Process{stopper("first", orderFile)}, behind)
+	}()
+
+	waitForLine(t, out, "[behind] started")
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForRun(t, done); err != nil {
+		t.Fatalf("Run returned an error after SIGINT: %v", err)
+	}
+	// The behind-the-hook child stops first, the first group's children
+	// after it, one reverse order across both groups.
+	want := []string{"behind", "first"}
+	if got := readOrder(t, orderFile); !reflect.DeepEqual(got, want) {
+		t.Fatalf("children were terminated in order %v, want %v", got, want)
+	}
+	assertInOrder(t, progress.String(), "starting first", "starting behind", "stopping behind", "stopping first")
+}
+
+// TestRunAfterReadyChildrenStayBehindAFailingHook checks the processes
+// given beyond the first list never start when the AfterStart hook
+// fails, and the first list's children are torn down.
+func TestRunAfterReadyChildrenStayBehindAFailingHook(t *testing.T) {
+	orderFile := filepath.Join(t.TempDir(), "order")
+	out := &syncBuffer{}
+	sup := &Supervisor{
+		LogDir:   t.TempDir(),
+		Verbose:  true,
+		Stdout:   out,
+		Stderr:   out,
+		Progress: &syncBuffer{},
+		AfterStart: func(ctx context.Context) error {
+			waitForLine(t, out, "[first] started")
+			return fmt.Errorf("never ready")
+		},
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- sup.Run(context.Background(), []Process{stopper("first", orderFile)}, stopper("behind", orderFile))
+	}()
+
+	err := waitForRun(t, done)
+	if err == nil || !strings.Contains(err.Error(), "never ready") {
+		t.Fatalf("expected the hook's error, got: %v", err)
+	}
+	if got := readOrder(t, orderFile); !reflect.DeepEqual(got, []string{"first"}) {
+		t.Fatalf("children were not torn down, termination order: %v", got)
+	}
+	if strings.Contains(out.String(), "[behind] started") {
+		t.Fatalf("behind-the-hook child started despite hook failure:\n%s", out.String())
+	}
+}
+
 func TestRunAfterStartHookFailureFailsRun(t *testing.T) {
 	orderFile := filepath.Join(t.TempDir(), "order")
 	out := &syncBuffer{}

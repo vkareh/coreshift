@@ -126,11 +126,14 @@ those lines for the few seconds its delivery takes, and a gate the
 operator has already fed — delivery can land while earlier children are
 still starting — shows no line at all. The OAuth definition and the
 permission pair come from the boot cache, so their gates pass
-instantly. If objects never arrive, the boot fails after ten minutes,
-naming what was missing and pointing at the operator's log. The budget
-is sized against a cold boot's observed delivery — the security
-definition ten seconds after the API server answers, the later objects
-under a minute — leaving an order of magnitude of room.
+instantly. The approver and the network and DNS operators run behind
+the ready summary, so their waits settle in the background rather than
+holding the API's readiness. If objects never arrive, the boot fails
+after ten minutes, naming what was missing and pointing at the
+operator's log. The budget is sized against a cold boot's observed
+delivery — the security definition ten seconds after the API server
+answers, the later objects under a minute — leaving an order of
+magnitude of room.
 
 Every seed entry the payload delivers has been audited and retired: on
 a fresh boot with the operator running and the entry's seed removed,
@@ -338,6 +341,14 @@ Control plane ready
   Kubeconfig:   /home/you/.local/state/coreshift/clusters/coreshift/admin.kubeconfig
   Context:      admin@coreshift
 ```
+
+The summary's meaning is honest about what is ready: the API is usable —
+etcd, the API server, the aggregated servers, and the controllers up, the
+aggregated availability confirmed. The machine approver, the network
+operator, and the DNS operator start after the summary and converge behind
+it, the way operators settle after a real cluster's API answers; their
+progress and gate lines follow the summary as they settle, and a worker
+joining in that window waits for what it needs, as its joins always have.
 
 When a child fails, the run tears down and the error names the failed
 component, quotes the tail of its log, and points at the full log file, so a
@@ -864,9 +875,10 @@ the host's address and route state.
 
 The whole story as a user meets it, captured on a freshly created
 container-mode cluster with one rootful worker — the form workload pods
-need — on the default verified release. The DNS Service exists as soon
-as the control plane has booted: the DNS operator runs as a supervised
-child like the network operator, and reconciles it. The CoreDNS
+need — on the default verified release. The DNS Service exists shortly
+after the control plane is ready: the DNS operator starts behind the
+ready summary like the network operator and reconciles it, and the
+join's DNS wait covers the gap. The CoreDNS
 DaemonSet it renders selects every Linux node, so the worker that joins
 runs it with no placement help, the node-resolver DaemonSet beside it:
 
