@@ -101,9 +101,15 @@ const (
 	oauthServerPort                = 8445
 	openShiftControllerManagerPort = 8446
 	clusterPolicyControllerPort    = 10357
-	machineApproverMetricsPort     = 9191
-	networkOperatorMetricsPort     = 9104
-	dnsOperatorMetricsPort         = 60000
+	// The machine approver's metrics listener moved between lines: the
+	// 4.22 binary serves plain metrics on 9191, and the 5.0 one serves
+	// secure metrics itself on 9192, the port its payload's proxy
+	// sidecar used to hold. Both stay reserved so the API server cannot
+	// take either line's port.
+	machineApproverMetricsPort       = 9191
+	machineApproverSecureMetricsPort = 9192
+	networkOperatorMetricsPort       = 9104
+	dnsOperatorMetricsPort           = 60000
 )
 
 // The etcd endpoints built from the ports above, so they cannot drift.
@@ -119,8 +125,8 @@ var reservedPorts = []int{
 	etcdClientPort, etcdPeerPort,
 	openShiftAPIServerPort, oauthAPIServerPort, oauthServerPort,
 	openShiftControllerManagerPort, clusterPolicyControllerPort,
-	machineApproverMetricsPort, networkOperatorMetricsPort,
-	dnsOperatorMetricsPort,
+	machineApproverMetricsPort, machineApproverSecureMetricsPort,
+	networkOperatorMetricsPort, dnsOperatorMetricsPort,
 }
 
 // refuseReservedPort refuses an API port a control-plane child listens
