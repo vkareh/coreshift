@@ -40,14 +40,17 @@ const (
 // ClusterVersion object before applying anything, so exactly this set
 // must pre-date it. The ClusterVersion definition is the Default
 // variant, the one the self-managed-high-availability profile the
-// operator runs under includes. The FeatureGate object keeps the
-// operator's stop-on-feature-change controller from seeing a change
-// where the cluster simply has none configured yet.
+// operator runs under includes; so is the APIServer definition: the
+// 5.0 operator syncs an informer on it during startup and dies when
+// it is absent. The FeatureGate object keeps the operator's
+// stop-on-feature-change controller from seeing a change where the
+// cluster simply has none configured yet.
 var seedFiles = []string{
 	"manifests/0000_00_cluster-version-operator_00_namespace.yaml",
 	"manifests/0000_00_cluster-version-operator_01_clusterversions-Default.crd.yaml",
 	"manifests/0000_00_cluster-version-operator_01_clusteroperators.crd.yaml",
 	"release-manifests/0000_03_config-operator_01_proxies.crd.yaml",
+	"release-manifests/0000_10_config-operator_01_apiservers-Default.crd.yaml",
 	"release-manifests/0000_10_config-operator_01_featuregates.crd.yaml",
 	"release-manifests/0000_05_config-operator_02_featuregate.cr.yaml",
 }

@@ -57,6 +57,11 @@ kind: CustomResourceDefinition
 metadata:
   name: proxies.config.openshift.io
 `,
+		"release-manifests/0000_10_config-operator_01_apiservers-Default.crd.yaml": `apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: apiservers.config.openshift.io
+`,
 		"release-manifests/0000_10_config-operator_01_featuregates.crd.yaml": `apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
