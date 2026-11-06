@@ -326,6 +326,19 @@ failure can be debugged without rerunning. If a child dies while startup is
 still waiting on a sibling, the error comes from the child that died. `--verbose` trades the quiet for
 live child output.
 
+A child whose start waits for objects the version operator delivers — see
+[The version operator](#the-version-operator) — shows the wait as one progress
+line while it lasts, and once it passes, one timing line saying how long the
+gate held the start:
+
+```
+Waiting for the network operator's APIs
+Waited 14s for the network operator's APIs
+```
+
+so where a slow boot's seconds went is read off its output instead of
+guessed. A gate that passes instantly prints nothing.
+
 ### Logging in
 
 Logins use the standard OpenShift htpasswd flow. Until an identity provider

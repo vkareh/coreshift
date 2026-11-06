@@ -107,7 +107,7 @@ func TestWaitPassesSilentlyWhenObjectsExist(t *testing.T) {
 }
 
 // TestWaitPrintsOneLineWhileWaiting checks the wait is visible as one
-// progress line and passes once the objects arrive.
+// progress line, followed by one timing line once the objects arrive.
 func TestWaitPrintsOneLineWhileWaiting(t *testing.T) {
 	shortenPolling(t)
 
@@ -124,8 +124,12 @@ func TestWaitPrintsOneLineWhileWaiting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lines := strings.Split(strings.TrimSpace(out), "\n"); len(lines) != 1 || lines[0] != "Waiting for the OAuth definition" {
-		t.Fatalf("gate output = %q; want one waiting line", out)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 || lines[0] != "Waiting for the OAuth definition" {
+		t.Fatalf("gate output = %q; want the waiting line then the timing line", out)
+	}
+	if !strings.HasPrefix(lines[1], "Waited ") || !strings.HasSuffix(lines[1], " for the OAuth definition") {
+		t.Fatalf("timing line = %q; want how long the OAuth definition gate waited", lines[1])
 	}
 }
 

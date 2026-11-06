@@ -96,6 +96,7 @@ func poll(ctx context.Context, client dynamic.Interface, waitingFor, operatorLog
 	defer cancel()
 
 	announced := false
+	var waitingSince time.Time
 	var missing []Object
 	pollErr := wait.PollUntilContextCancel(ctx, pollInterval, true, func(ctx context.Context) (bool, error) {
 		missing = nil
@@ -109,11 +110,18 @@ func poll(ctx context.Context, client dynamic.Interface, waitingFor, operatorLog
 		}
 		if !announced {
 			announced = true
+			waitingSince = time.Now()
 			fmt.Printf("Waiting for %s\n", waitingFor)
 		}
 		return false, nil
 	})
 	if pollErr == nil {
+		// A gate that fired says how long it held the start, so where a
+		// slow boot's seconds went is read off its output instead of
+		// guessed; a gate that passed instantly stays silent.
+		if announced {
+			fmt.Printf("Waited %s for %s\n", time.Since(waitingSince).Round(time.Second), waitingFor)
+		}
 		return nil
 	}
 	if errors.Is(pollErr, context.Canceled) {
