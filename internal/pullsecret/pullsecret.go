@@ -1,8 +1,7 @@
 // Package pullsecret stores the cluster's global pull secret, the
 // Secret a real cluster's operators read registry credentials from. The
-// startup seeds it from the run's pull secret file, so commands that
-// need the secret after the fact, above all the worker image build,
-// read it from the cluster instead of asking for the file again.
+// startup seeds it from the run's pull secret file, so the cluster
+// carries the object a real one keeps.
 package pullsecret
 
 import (
@@ -84,30 +83,4 @@ func seed(ctx context.Context, client kubernetes.Interface, pullSecret []byte) e
 		return fmt.Errorf("store the %s Secret: %w", secretName, err)
 	}
 	return nil
-}
-
-// Fetch returns the pull secret the cluster the admin kubeconfig points
-// at stores.
-func Fetch(ctx context.Context, kubeconfigPath string) ([]byte, error) {
-	config, err := warnings.Config(kubeconfigPath)
-	if err != nil {
-		return nil, fmt.Errorf("read admin kubeconfig: %w", err)
-	}
-	client, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("create admin client: %w", err)
-	}
-	return fetch(ctx, client)
-}
-
-func fetch(ctx context.Context, client kubernetes.Interface) ([]byte, error) {
-	secret, err := client.CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("read the cluster's pull secret: %w", err)
-	}
-	data, ok := secret.Data[corev1.DockerConfigJsonKey]
-	if !ok {
-		return nil, fmt.Errorf("the cluster's %s Secret carries no %s key", secretName, corev1.DockerConfigJsonKey)
-	}
-	return data, nil
 }

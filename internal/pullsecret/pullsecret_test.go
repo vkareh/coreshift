@@ -116,34 +116,5 @@ func TestSeedFailsOnPersistentError(t *testing.T) {
 
 // TestFetchReturnsStoredPullSecret checks that what Seed stores is what
 // Fetch hands back, byte for byte.
-func TestFetchReturnsStoredPullSecret(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	if err := seedWithRetry(context.Background(), client, pullSecret); err != nil {
-		t.Fatal(err)
-	}
-
-	data, err := fetch(context.Background(), client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(data, pullSecret) {
-		t.Fatalf("fetched %q, want the stored pull secret", data)
-	}
-}
-
 // TestFetchRefusesSecretWithoutKey checks that a Secret missing the
 // standard key is refused as broken rather than read as empty.
-func TestFetchRefusesSecretWithoutKey(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	client.PrependReactor("get", "secrets", func(_ ktesting.Action) (bool, runtime.Object, error) {
-		return true, &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: secretNamespace},
-			Type:       corev1.SecretTypeDockerConfigJson,
-		}, nil
-	})
-
-	_, err := fetch(context.Background(), client)
-	if err == nil || !bytes.Contains([]byte(err.Error()), []byte(corev1.DockerConfigJsonKey)) {
-		t.Fatalf("err = %v, want a refusal naming the missing key", err)
-	}
-}
