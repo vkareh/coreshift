@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          # The release notes span the history since the previous tag.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: |
+          for arch in amd64 arm64; do
+            dir="dist/coreshift-${GITHUB_REF_NAME}-linux-${arch}"
+            mkdir -p "$dir"
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+              go build -ldflags "-X main.version=${GITHUB_REF_NAME}" \
+              -o "$dir/coreshift" ./cmd/coreshift
+          done
+
+      - name: Smoke-test the amd64 binary
+        run: |
+          test "$(./dist/coreshift-${GITHUB_REF_NAME}-linux-amd64/coreshift version)" \
+            = "${GITHUB_REF_NAME}"
+
+      - name: Package
+        run: |
+          cd dist
+          for arch in amd64 arm64; do
+            tar -czf "coreshift-${GITHUB_REF_NAME}-linux-${arch}.tar.gz" \
+              "coreshift-${GITHUB_REF_NAME}-linux-${arch}"
+          done
+          sha256sum coreshift-*.tar.gz > checksums.txt
+
+      - name: Write release notes
+        run: |
+          prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          if [ -n "$prev" ]; then
+            range="${prev}..${GITHUB_REF_NAME}"
+          else
+            range="${GITHUB_REF_NAME}"
+          fi
+          git log --oneline "$range" > dist/notes.md
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/coreshift-*.tar.gz dist/checksums.txt \
+            --title "$GITHUB_REF_NAME" --notes-file dist/notes.md

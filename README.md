@@ -17,9 +17,9 @@ You need a Go toolchain (1.24 or newer), a registry pull secret (the
 JSON file from the Red Hat Hybrid Cloud Console, with credentials for
 the release image registry), and podman. Nothing else is installed,
 and nothing on the host is modified outside the directories under
-[Where things live](#where-things-live). Once release binaries exist,
-download one, make it executable, and run it in place of the build
-step.
+[Where things live](#where-things-live). Once a release ships,
+download the tar.gz for your platform from the Releases page, unpack
+it, and run the binary in place of the build step.
 
 ```
 make build
