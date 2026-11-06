@@ -10,11 +10,11 @@ func TestSelectReleasePicksHighestVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if release.Version != (Version{Major: 4, Minor: 22, Patch: 11}) {
-		t.Fatalf("version = %v, want 4.22.11", release.Version)
+	if release.Version != (Version{Major: 5, Minor: 0, Patch: 3}) {
+		t.Fatalf("version = %v, want 5.0.3", release.Version)
 	}
-	if release.Tag() != "4.22.11-x86_64" {
-		t.Fatalf("tag = %s, want 4.22.11-x86_64", release.Tag())
+	if release.Tag() != "5.0.3-x86_64" {
+		t.Fatalf("tag = %s, want 5.0.3-x86_64", release.Tag())
 	}
 }
 

@@ -22,6 +22,8 @@ var releaseRegistryTags = []string{
 	"4.23.0-s390x",
 	"4.22.11-x86_64",
 	"4.22.11-aarch64",
+	"5.0.3-x86_64",
+	"5.0.3-aarch64",
 	"not-a-version",
 	"4.x.2-x86_64",
 	"4.22-x86_64",
@@ -35,6 +37,7 @@ func TestReleaseVersionsFiltersTagShapes(t *testing.T) {
 		{Major: 4, Minor: 22, Patch: 8},
 		{Major: 4, Minor: 22, Patch: 9},
 		{Major: 4, Minor: 22, Patch: 11},
+		{Major: 5, Minor: 0, Patch: 3},
 	}
 	if !slices.Equal(versions, want) {
 		t.Fatalf("versions = %v, want %v", versions, want)
@@ -47,6 +50,7 @@ func TestReleaseVersionsKeepsMatchingArchitecture(t *testing.T) {
 	want := []Version{
 		{Major: 4, Minor: 22, Patch: 8},
 		{Major: 4, Minor: 22, Patch: 11},
+		{Major: 5, Minor: 0, Patch: 3},
 	}
 	if !slices.Equal(versions, want) {
 		t.Fatalf("versions = %v, want %v", versions, want)
@@ -58,8 +62,8 @@ func TestVersionCompareOrdersHighestLast(t *testing.T) {
 
 	slices.SortFunc(versions, Version.Compare)
 	highest := versions[len(versions)-1]
-	if highest != (Version{Major: 4, Minor: 22, Patch: 11}) {
-		t.Fatalf("highest = %v, want 4.22.11", highest)
+	if highest != (Version{Major: 5, Minor: 0, Patch: 3}) {
+		t.Fatalf("highest = %v, want 5.0.3", highest)
 	}
 }
 

@@ -394,12 +394,12 @@ of that release's stream, the run says so in one line and names
 
 Support is defined by what CoreShift has verified. The newest verified
 line is the newest OpenShift minor the stand-ins have been checked
-against — 4.22 today — and the unversioned default stays inside it, so a
+against — 5.0 today — and the unversioned default stays inside it, so a
 brand-new, unverified major cannot arrive silently. Asking for a release
 beyond the line works; the run just prints a plain warning first:
 
 ```
-warning: 5.0.0 is beyond the newest verified line, 4.22 — it may not work
+warning: 5.1.0 is beyond the newest verified line, 5.0 — it may not work
 ```
 
 `--version newest` asks for the registry's absolute newest release,

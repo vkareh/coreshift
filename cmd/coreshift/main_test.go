@@ -1587,12 +1587,12 @@ func TestBootReleaseWarnsBeyondVerifiedLine(t *testing.T) {
 		refHas  string
 		warns   bool
 	}{
-		"version":         {releaseOptions{version: "5.0.0", arch: "x86_64"}, "5.0.0", true},
-		"newest":          {releaseOptions{version: "newest", arch: "x86_64"}, "5.0.0", true},
-		"pinned image":    {releaseOptions{image: "reg.example/ocp-release:5.0.0-x86_64"}, "5.0.0", true},
-		"in-line version": {releaseOptions{version: "4.22.11", arch: "x86_64"}, "4.22.11", false},
+		"version":         {releaseOptions{version: "5.1.0", arch: "x86_64"}, "5.1.0", true},
+		"newest":          {releaseOptions{version: "newest", arch: "x86_64"}, "5.1.0", true},
+		"pinned image":    {releaseOptions{image: "reg.example/ocp-release:5.1.0-x86_64"}, "5.1.0", true},
+		"in-line version": {releaseOptions{version: "5.0.1", arch: "x86_64"}, "5.0.1", false},
 	} {
-		tc.release.registry = newTagRegistry(t, "4.22.11-x86_64", "5.0.0-x86_64")
+		tc.release.registry = newTagRegistry(t, "5.0.1-x86_64", "5.1.0-x86_64")
 
 		ref, note, err := bootRelease(context.Background(), &image.Client{}, tc.release, t.TempDir())
 		if err != nil {

@@ -8,7 +8,7 @@ import "fmt"
 // absolute newest, and a release beyond it runs only when asked for,
 // with a warning. Raising it is deliberate work: the stand-ins for a new
 // line come first.
-const verifiedLine = "4.22"
+const verifiedLine = "5.0"
 
 // newestVersion is the version value that asks for the registry's
 // absolute newest release, ignoring the verified line, so the nightly
