@@ -38,6 +38,7 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	"github.com/vkareh/coreshift/internal/aggregation"
+	"github.com/vkareh/coreshift/internal/bootcache"
 	"github.com/vkareh/coreshift/internal/certgen"
 	"github.com/vkareh/coreshift/internal/clusterversion"
 	"github.com/vkareh/coreshift/internal/crd"
@@ -443,18 +444,20 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 	}
 
 	// gateOn holds a child's start until the objects it needs exist,
-	// whoever applied them: the seed layer's post-readiness work today,
-	// the version operator's manifest application once it owns them. A
-	// timeout points at the operator, the deliverer.
+	// whoever applied them: the boot cache's instant copies, the seed
+	// layer's post-readiness work, the version operator's manifest
+	// application once it owns them. A timeout points at the operator,
+	// the deliverer.
 	gateOn := func(ctx context.Context, waitingFor string, objects ...gate.Object) error {
 		return gate.Wait(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), waitingFor,
 			filepath.Join(stateDir, "logs", "cluster-version-operator.log"), objects...)
 	}
 
 	// The controller managers' pod security labeling reads the grant that
-	// lets every signed-in user use the restricted constraint; the version
-	// operator delivers that pair from the payload, so the gate holds
-	// their starts until it lands.
+	// lets every signed-in user use the restricted constraint; the boot
+	// cache seeds the payload's copy of the pair, so the gate passes
+	// instantly, and the version operator converges the pair to its own
+	// versions as it does everything else.
 	controllerRBAC := []gate.Object{
 		gate.ClusterRole("system:openshift:scc:restricted-v3"),
 		gate.ClusterRoleBinding("system:openshift:scc:restricted-v3"),
@@ -616,7 +619,11 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 			// maintains in a real cluster — the network operator's
 			// feature gate reader requires it, and the version
 			// operator's own stop-on-change controller must find it
-			// already in place.
+			// already in place — and then the boot cache, the copies of
+			// the payload objects the API path's later gates wait on,
+			// seeded from the same payload so those gates pass the
+			// moment their children come up instead of waiting out this
+			// operator's convergence of them.
 			BeforeStart: func(ctx context.Context) error {
 				ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 				defer cancel()
@@ -625,8 +632,12 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 					return err
 				}
 				fmt.Println("Seeding feature gate record")
-				return featuregates.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename),
-					openShiftBinaries["cluster-config-api"], payloadDir)
+				if err := featuregates.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename),
+					openShiftBinaries["cluster-config-api"], payloadDir); err != nil {
+					return err
+				}
+				fmt.Println("Seeding the API's readiness path")
+				return bootcache.Seed(ctx, filepath.Join(stateDir, certgen.AdminKubeconfigFilename), payloadDir)
 			},
 		},
 		{
@@ -680,7 +691,10 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 				"--requestheader-extra-headers-prefix=X-Remote-Extra-",
 				"--client-ca-file=" + filepath.Join(stateDir, certgen.CACertFilename),
 			},
-			// The OAuth definition must exist before this server starts.
+			// The OAuth definition must exist before this server starts;
+			// the boot cache seeds the payload's copy, so the gate passes
+			// instantly, and the version operator converges the
+			// definition as it does everything else.
 			BeforeStart: func(ctx context.Context) error {
 				return gateOn(ctx, "the OAuth definition",
 					gate.Definition("oauths.config.openshift.io"))
@@ -741,7 +755,8 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 			},
 			// The controller managers label namespaces with their pod
 			// security level from the constraint use grants the cluster
-			// carries, so the grant must exist before they start.
+			// carries, so the grant must exist before they start; the
+			// boot cache's copy makes that instant.
 			BeforeStart: func(ctx context.Context) error {
 				return gateOn(ctx, "the controller RBAC", controllerRBAC...)
 			},

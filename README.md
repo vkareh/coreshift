@@ -114,19 +114,23 @@ control plane stands in for the bootstrap, not for nodes.
 
 The children that need objects the payload carries wait for them before
 starting: the OpenShift API server waits for the quota and security
-definitions, the OAuth API server for the OAuth definition, and the
+definitions, the OAuth API server for the OAuth definition, the
 controller managers for the permission pair that backs pod security
-labeling. The wait shows as one progress line while it lasts and passes
-the moment the objects exist, whoever applied them: the version operator
-is the deliverer for all of them, so a normal boot shows each line only
-for the few seconds its delivery takes, and a gate the operator has
-already fed — delivery can land while earlier children are still
-starting — shows no line at all. If they never arrive, the boot fails
-after ten minutes, naming what was missing and pointing at the
-operator's log. The budget is sized against a cold boot's observed
-delivery — the security definition ten seconds after the API server
-answers, the OAuth definition thirty-six, the permission pair under a
-minute — leaving an order of magnitude of room.
+labeling, and the approver and the network and DNS operators for their
+own APIs and permissions. The wait shows as one progress line while it
+lasts, a timing line once it passes, and it releases the moment the
+objects exist, whoever applied them. The version operator is the
+deliverer for the security definition and everything the approver and
+the network and DNS operators wait on, so a normal boot shows each of
+those lines for the few seconds its delivery takes, and a gate the
+operator has already fed — delivery can land while earlier children are
+still starting — shows no line at all. The OAuth definition and the
+permission pair come from the boot cache, so their gates pass
+instantly. If objects never arrive, the boot fails after ten minutes,
+naming what was missing and pointing at the operator's log. The budget
+is sized against a cold boot's observed delivery — the security
+definition ten seconds after the API server answers, the later objects
+under a minute — leaving an order of magnitude of room.
 
 Every seed entry the payload delivers has been audited and retired: on
 a fresh boot with the operator running and the entry's seed removed,
@@ -139,7 +143,22 @@ the insights runtime extractor and the machine API termination handler);
 the grant that lets every signed-in user use the restricted constraint;
 the machine approver's cluster role; and the cluster's infrastructure
 object, from the payload's own create-only manifest. None of these is
-seeded anymore.
+seeded as an owner anymore.
+
+Two of the audited objects return as a different class of seed, the
+boot-critical cache: the OAuth definition and the
+restricted-constraint grant, the two objects the API's readiness path
+waits on. Unlike the permanent chicken-and-egg seeds — objects the API
+server needs before it answers, which the version operator can never
+deliver — these two are ordinary payload objects the operator delivers
+anyway, so seeding them changes nothing about who owns them: the seed
+applies the same payload manifests the operator applies, purely as a
+cache for boot speed, and the operator converges the objects to its own
+versions as it does everything else it owns. The cache is updated by
+hand only if a future release makes a breaking change to these objects,
+and that is caught loudly rather than drifting silently: the seed reads
+the files the release ships, so one that moved or reshaped them fails
+the boot instead of serving a stale copy.
 
 What the operator cannot deliver stays seeded, each with its reason
 recorded where the seed lives. Two definitions must pre-date the API
