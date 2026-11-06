@@ -57,12 +57,9 @@ func TestBuildContextWritesBinaryAndContainerfile(t *testing.T) {
 	}
 }
 
-// TestWorkerContainerfile pins the worker image's recipe: the payload's
-// rhel-coreos base, the binary under the image's writable var tree, the
-// stop signal the supervisor handles, and the worker entrypoint.
 // writeFakePodman writes a podman stand-in into a directory of its own
-// and prepends that directory to PATH. It records every call, one line
-// per call, in the file named by PODMAN_LOG. The image-exists check
+// and prepends it to PATH. It records every call, one line per call, in
+// the file named by PODMAN_LOG. The image-exists check
 // answers with existsStatus, and a build answers with two lines of
 // output and the exit status named by PODMAN_BUILD_STATUS, zero when
 // unset. Images answers with the per-repository file from PODMAN_IMAGES;
@@ -137,8 +134,6 @@ func wantedRef(t *testing.T, version string) string {
 	return "localhost/coreshift:" + stamp(version, sum)
 }
 
-// wantedWorkerRef returns the reference WorkerImage should report for
-// version and base: the test binary's own worker tag.
 func TestImageSkipsBuildWhenTagExists(t *testing.T) {
 	writeFakePodman(t, 0)
 
@@ -246,10 +241,6 @@ func TestImageRequiresPodman(t *testing.T) {
 	}
 }
 
-// TestWorkerImageBuildsWithAuthfile checks that the worker image builds
-// under its own repository, tagged from the binary and the recipe naming
-// the base, and that the build pulls the base with the pull secret as
-// podman's authfile.
 // setRepositoryImages makes the fake podman answer the images listing
 // for one repository with the given references.
 func setRepositoryImages(t *testing.T, repo string, refs ...string) {

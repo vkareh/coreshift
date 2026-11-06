@@ -1223,9 +1223,8 @@ func printReadySummary(stateDir, name, release string, port int) {
 	fmt.Printf("  Context:      admin@%s\n", name)
 }
 
-// podmanPlain builds a podman call against the store of whoever is
-// running: root's under sudo, the invoking user's rootless store
-// otherwise.
+// podmanPlain builds a podman call against the invoking user's podman
+// store, where the tool's containers live.
 func podmanPlain(args ...string) *exec.Cmd {
 	return exec.Command("podman", args...)
 }

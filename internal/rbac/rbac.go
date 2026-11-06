@@ -45,9 +45,8 @@ const (
 	// The node bootstrap permission pair the machine config operator
 	// applies in real clusters: the service account whose token a node's
 	// bootstrap kubeconfig carries may request node client certificates.
-	// The join material minting creates the account itself, so the
-	// account and its namespace are shared facts. The payload does not
-	// carry the binding.
+	// Whatever joins a node creates the account itself; the payload does
+	// not carry the binding.
 	nodeBootstrapperBinding = "system-bootstrap-node-bootstrapper"
 )
 
@@ -276,8 +275,8 @@ func ensurePrivilegedSyncer(ctx context.Context, client kubernetes.Interface) er
 // bootstrap service account the standard node-bootstrap role, the
 // permission its token exercises when a node's bootstrap kubeconfig
 // requests a client certificate. Copied verbatim from the operator's
-// manifests; the service account itself belongs to the join material a
-// worker's create command mints, so only the permission is seeded.
+// manifests; the service account itself is created by whatever joins a
+// node, so only the permission is seeded.
 func ensureNodeBootstrapper(ctx context.Context, client kubernetes.Interface) error {
 	binding := &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: nodeBootstrapperBinding},
