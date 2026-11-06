@@ -404,10 +404,12 @@ warning: 5.0.0 is beyond the newest verified line, 4.22 — it may not work
 
 `--version newest` asks for the registry's absolute newest release,
 ignoring the line. It exists for the nightly drift alarm in CI, which
-probes the frontier so a new release is noticed; everything else should
-stay on the verified default. Raising the line is deliberate work, done
-together with the stand-in updates a new line needs, and it is one
-constant in the code.
+probes the frontier so a new release is noticed: it boots the release,
+soaks it, and checks its pod security labeling, its login chain, and
+its aggregated API before shutting it down; everything else should
+stay on the verified default. Raising the line is deliberate work,
+done together with the stand-in updates a new line needs, and it is
+one constant in the code.
 
 `--version X.Y` pins a minor: the newest patch release of that stream is
 resolved.
