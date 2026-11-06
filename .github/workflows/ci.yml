@@ -157,6 +157,7 @@ jobs:
           boot "$log"
           logged_in=""
           served=""
+          csr_issued=""
           soaked=""
           if grep -q "Control plane ready" "$log"; then
             # The login probe: the OAuth endpoint authenticates the
@@ -185,6 +186,42 @@ jobs:
             # aggregated server and the front proxy.
             admin "$api/apis/project.openshift.io/v1/projects" \
               | grep -q '"kind": *"ProjectList"' && served=1
+            # The join-acceptance probe: a certificate request shaped
+            # the way a joining node presents one, made through the
+            # admin credentials impersonating the node-bootstrapper
+            # service account whose token a node's bootstrap
+            # kubeconfig presents. The machine record the approver
+            # matches the request against stands in for the cloud
+            # machine backing the node, and its status subresource
+            # takes the address as its own write; the key behind the
+            # request is throwaway, because the probe exercises the
+            # acceptance machinery, not a node.
+            openssl req -new -newkey rsa:2048 -nodes \
+              -keyout "$RUNNER_TEMP/drift-node.key" \
+              -subj '/O=system:nodes/CN=system:node:drift-probe' \
+              -out "$RUNNER_TEMP/drift-node.csr"
+            admin -H 'Content-Type: application/json' \
+              -d '{"apiVersion":"machine.openshift.io/v1beta1","kind":"Machine","metadata":{"name":"drift-probe","namespace":"openshift-machine-api"}}' \
+              "$api/apis/machine.openshift.io/v1beta1/namespaces/openshift-machine-api/machines" > /dev/null
+            admin -X PATCH -H 'Content-Type: application/merge-patch+json' \
+              -d '{"status":{"addresses":[{"type":"InternalDNS","address":"drift-probe"}]}}' \
+              "$api/apis/machine.openshift.io/v1beta1/namespaces/openshift-machine-api/machines/drift-probe/status" > /dev/null
+            csr='{"apiVersion":"certificates.k8s.io/v1","kind":"CertificateSigningRequest","metadata":{"name":"drift-probe"},"spec":{"request":"'
+            csr+=$(base64 -w0 "$RUNNER_TEMP/drift-node.csr")
+            csr+='","signerName":"kubernetes.io/kube-apiserver-client-kubelet","usages":["digital signature","key encipherment","client auth"]}}'
+            admin -H 'Content-Type: application/json' \
+              -H 'Impersonate-User: system:serviceaccount:openshift-machine-config-operator:node-bootstrapper' \
+              -d "$csr" \
+              "$api/apis/certificates.k8s.io/v1/certificatesigningrequests" > /dev/null
+            # Up to one minute: the machine approver approves and the
+            # controller manager issues within seconds of the request.
+            for _ in {1..12}; do
+              admin "$api/apis/certificates.k8s.io/v1/certificatesigningrequests/drift-probe" \
+                | grep -q '"certificate":' && csr_issued=1 && break
+              sleep 5
+            done
+            admin -X DELETE "$api/apis/certificates.k8s.io/v1/certificatesigningrequests/drift-probe" > /dev/null
+            admin -X DELETE "$api/apis/machine.openshift.io/v1beta1/namespaces/openshift-machine-api/machines/drift-probe" > /dev/null
             # Five minutes: a component can die a while after the control
             # plane is ready, past every check above.
             soaked=1
@@ -214,11 +251,15 @@ jobs:
             echo "The latest release did not answer a project listing through the aggregated OpenShift API; the aggregated serving behind the main endpoint needs updating."
             exit 1
           fi
+          if [ "$csr_issued" != 1 ]; then
+            echo "The latest release did not approve and issue a joining node's certificate request; the join-acceptance layer needs updating."
+            exit 1
+          fi
           if [ "$soaked" != 1 ]; then
             echo "The latest release did not stay up and answering for the five minutes after ready; its stand-ins need updating before it can be supported."
             exit 1
           fi
-          echo "The latest release reached ready on both runs, labeled a new namespace, logged a generated user in, answered a project listing through the aggregated OpenShift API, stayed up for its five-minute soak, and shut down cleanly."
+          echo "The latest release reached ready on both runs, labeled a new namespace, logged a generated user in, answered a project listing through the aggregated OpenShift API, approved and issued a joining node's certificate request, stayed up for its five-minute soak, and shut down cleanly."
 
   container-smoke:
     if: github.event_name == 'push' || github.event_name == 'schedule'
