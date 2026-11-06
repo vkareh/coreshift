@@ -1,15 +1,12 @@
 # CoreShift
 
-CoreShift is a lightweight tool for running a real OpenShift control
-plane without a full cluster install — no VM, no kubelet, no
-proprietary tooling required to actually run it. One binary runs
-thirteen real, version-matched upstream processes — etcd,
-kube-apiserver, kube-controller-manager, kube-scheduler, and the full
-OpenShift API layer — grown from a current upstream release payload,
-not reimplementations. It gives a quick, disposable, real OpenShift
-API for validation — RBAC/SCC checks, API compatibility testing,
-admission and defaulting behavior — without the cost and complexity
-of a full cluster.
+A real OpenShift control plane from one binary — no VM, no cluster, no nodes.
+
+- **Real**: version-matched components from the current release payload — real API server, real admission, real OAuth logins
+- **Light**: rootless, disposable, API-ready in under a minute
+- **For**: CI gating, operator dev loops, API compatibility testing
+
+Nodes don't join and workloads don't run — [why, and what would change that](docs/how-it-works.md).
 
 ## Quickstart
 
