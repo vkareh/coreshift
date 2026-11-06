@@ -17,19 +17,14 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/user"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/vkareh/coreshift/internal/certgen"
 	"github.com/vkareh/coreshift/internal/oauth"
@@ -956,9 +951,8 @@ func TestRootWithoutArgumentsPrintsHelp(t *testing.T) {
 }
 
 // TestRunWithoutNounPrintsHelp checks that bare run prints the list of
-// runnable things and succeeds: the worker entrypoint is the worker
-// image's own, not something a user types, so it stays out of the
-// listing.
+// runnable things and succeeds, and that the list carries no noun
+// besides the cluster.
 func TestRunWithoutNounPrintsHelp(t *testing.T) {
 	var out bytes.Buffer
 	root := newRootCommand()
@@ -972,25 +966,7 @@ func TestRunWithoutNounPrintsHelp(t *testing.T) {
 		t.Fatalf("run help missing the cluster noun:\n%s", out.String())
 	}
 	if strings.Contains(out.String(), "worker") {
-		t.Fatalf("run help lists the worker entrypoint, which users never type:\n%s", out.String())
-	}
-}
-
-// TestWorkerCommandHiddenButRunnable checks that the worker entrypoint
-// is hidden from the listings while remaining resolvable: it is the
-// worker image's entrypoint, typed by no user but run by every worker
-// container.
-func TestWorkerCommandHiddenButRunnable(t *testing.T) {
-	root := newRootCommand()
-	worker, _, err := root.Find([]string{"run", "worker"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if worker.Name() != "worker" {
-		t.Fatalf("found %q, want the worker entrypoint", worker.Name())
-	}
-	if !worker.Hidden {
-		t.Fatal("the worker entrypoint must be hidden: it is the image's own, not a user command")
+		t.Fatalf("run help lists a worker noun:\n%s", out.String())
 	}
 }
 
@@ -1970,74 +1946,6 @@ exit 0
 	t.Setenv("PODMAN_PIDS", t.TempDir())
 }
 
-// writeFakeSudo stands in for sudo, recording its calls. A read against
-// root's store (-n) is answered by running the call against the
-// container set SUDO_CONTAINERS names, so the root side is a world of
-// its own, unless SUDO_REFUSE names a file: then it is refused, the way
-// a real sudo refuses without a cached password.
-func writeFakeSudo(t *testing.T) {
-	t.Helper()
-	dir := t.TempDir()
-	script := `#!/bin/sh
-echo "sudo $@" >> "$SUDO_LOG"
-if [ "$1" = "-n" ]; then
-	if [ -e "$SUDO_REFUSE" ]; then
-		echo "sudo: a password is required" >&2
-		exit 1
-	fi
-	shift
-	exec env PODMAN_CONTAINERS="$SUDO_CONTAINERS" "$@"
-fi
-exec "$@"
-`
-	path := filepath.Join(dir, "sudo")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
-	t.Setenv("SUDO_LOG", filepath.Join(t.TempDir(), "calls"))
-	containers := filepath.Join(t.TempDir(), "containers")
-	if err := os.WriteFile(containers, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("SUDO_CONTAINERS", containers)
-}
-
-// setRootfulContainers makes the fake sudo's root-side podman report
-// exactly these containers as existing.
-func setRootfulContainers(t *testing.T, names ...string) {
-	t.Helper()
-	if err := os.WriteFile(os.Getenv("SUDO_CONTAINERS"), []byte(strings.Join(names, "\n")+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// setContainerPID makes the fake podman answer pid inspection for
-// container with the given process id.
-func setContainerPID(t *testing.T, container string, pid int) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(os.Getenv("PODMAN_PIDS"), container), []byte(fmt.Sprintf("%d\n", pid)), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// sudoCalls returns the calls the fake sudo recorded; a fake sudo never
-// invoked recorded none.
-func sudoCalls(t *testing.T) []string {
-	t.Helper()
-	data, err := os.ReadFile(os.Getenv("SUDO_LOG"))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(data) == 0 {
-		return nil
-	}
-	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
-}
-
 // setRepositoryImages makes the fake podman answer the images listing
 // for one repository with the given references.
 func setRepositoryImages(t *testing.T, repo string, refs ...string) {
@@ -2086,22 +1994,8 @@ func setContainerRunning(t *testing.T, container string, running bool) {
 
 // setContainerLabel makes the fake podman answer label inspection for
 // container with label.
-func setContainerLabel(t *testing.T, container, label string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(os.Getenv("PODMAN_LABELS"), container), []byte(label), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // setContainerLog makes the fake podman answer logs for container with
 // the given output.
-func setContainerLog(t *testing.T, container, log string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(os.Getenv("PODMAN_LOGS"), container), []byte(log), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // podmanCalls returns the calls the fake podman recorded; a fake podman
 // never invoked recorded none.
 func podmanCalls(t *testing.T) []string {
@@ -2372,33 +2266,6 @@ func TestPrintReadySummary(t *testing.T) {
 	}
 }
 
-// TestPrintWorkerSummary checks the joined worker's summary: it reports
-// the node and its state, and a rootless worker states its limit as the
-// fact alone, without coaching the remedy.
-func TestPrintWorkerSummary(t *testing.T) {
-	out := captureStdout(t, func() {
-		printWorkerSummary("coreshift-worker-worker1", "/state/dev", "worker1", "container:coreshift-dev", true)
-	})
-	for _, want := range []string{
-		"Worker joined\n",
-		"  Node:       worker1, with the OVN-Kubernetes pods running on it\n",
-		"  Kubeconfig: /state/dev/admin.kubeconfig\n",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("output =\n%s\nwant it to contain %q", out, want)
-		}
-	}
-	if strings.Contains(out, "sudo") || strings.Contains(out, "oc ") {
-		t.Fatalf("output =\n%s\nwant no command suggestion", out)
-	}
-	if os.Geteuid() != 0 {
-		limit := "  Limit:      workloads whose user IDs the worker's user namespace cannot express will not start\n"
-		if !strings.Contains(out, limit) {
-			t.Fatalf("output =\n%s\nwant it to contain %q", out, limit)
-		}
-	}
-}
-
 // TestGetCommandsRequirePodman checks that get clusters fails naming
 // podman when it is missing.
 func TestGetCommandsRequirePodman(t *testing.T) {
@@ -2417,7 +2284,7 @@ func TestGetCommandsRequirePodman(t *testing.T) {
 // podman when it is missing.
 func TestDeleteRequiresPodman(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	err := runDelete(context.Background(), "dev", false, false)
+	err := runDelete(context.Background(), "dev", false)
 	if err == nil || !strings.Contains(err.Error(), "podman") {
 		t.Fatalf("err = %v, want an error naming podman", err)
 	}
@@ -2475,7 +2342,6 @@ func TestDeleteUnknownNounPrintsHelp(t *testing.T) {
 // container's port is never asked.
 func TestRunDeleteStopsAndRemovesState(t *testing.T) {
 	writeFakePodman(t)
-	writeFakeSudo(t)
 	setContainers(t, "coreshift-dev")
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
@@ -2486,15 +2352,13 @@ func TestRunDeleteStopsAndRemovesState(t *testing.T) {
 	writeStateTree(t, stateDir, "dev")
 
 	var delErr error
-	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false, false) })
+	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false) })
 	if delErr != nil {
 		t.Fatal(delErr)
 	}
 	calls := podmanCalls(t)
 	want := []string{
 		"container exists coreshift-dev",
-		"ps -a --format {{.Names}}",
-		"ps -a --format {{.Names}}",
 		"stop --timeout 120 coreshift-dev",
 		"rm coreshift-dev",
 	}
@@ -2517,7 +2381,6 @@ func TestRunDeleteStopsAndRemovesState(t *testing.T) {
 // with the cluster reported not running.
 func TestRunDeleteNotRunningRemovesState(t *testing.T) {
 	writeFakePodman(t)
-	writeFakeSudo(t)
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
 	stateDir, err := clusterDir("dev")
@@ -2527,17 +2390,15 @@ func TestRunDeleteNotRunningRemovesState(t *testing.T) {
 	writeStateTree(t, stateDir, "dev")
 
 	var delErr error
-	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false, false) })
+	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false) })
 	if delErr != nil {
 		t.Fatal(delErr)
 	}
 	want := []string{
 		"container exists coreshift-dev",
-		"ps -a --format {{.Names}}",
-		"ps -a --format {{.Names}}",
 	}
 	if calls := podmanCalls(t); !slices.Equal(calls, want) {
-		t.Fatalf("podman calls = %q, want only the existence check and the worker listings", calls)
+		t.Fatalf("podman calls = %q, want only the existence check", calls)
 	}
 	if !strings.Contains(out, "not running") || !strings.Contains(out, "State removed at "+stateDir) {
 		t.Fatalf("output = %q, want the cluster reported not running with its removed state named", out)
@@ -2552,7 +2413,6 @@ func TestRunDeleteNotRunningRemovesState(t *testing.T) {
 // and its marker stay, with the preservation said plainly in the output.
 func TestRunDeletePreserveStateKeepsState(t *testing.T) {
 	writeFakePodman(t)
-	writeFakeSudo(t)
 	setContainers(t, "coreshift-dev")
 	base := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", base)
@@ -2563,15 +2423,13 @@ func TestRunDeletePreserveStateKeepsState(t *testing.T) {
 	writeStateTree(t, stateDir, "dev")
 
 	var delErr error
-	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", true, false) })
+	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", true) })
 	if delErr != nil {
 		t.Fatal(delErr)
 	}
 	calls := podmanCalls(t)
 	want := []string{
 		"container exists coreshift-dev",
-		"ps -a --format {{.Names}}",
-		"ps -a --format {{.Names}}",
 		"stop --timeout 120 coreshift-dev",
 		"rm coreshift-dev",
 	}
@@ -2595,7 +2453,7 @@ func TestRunDeleteMissingCluster(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	for _, preserveState := range []bool{false, true} {
 		writeFakePodman(t)
-		err := runDelete(context.Background(), "nope", preserveState, false)
+		err := runDelete(context.Background(), "nope", preserveState)
 		if err == nil || !strings.Contains(err.Error(), "no cluster named nope") {
 			t.Fatalf("preserveState=%v: err = %v, want a plain refusal", preserveState, err)
 		}
@@ -2605,257 +2463,13 @@ func TestRunDeleteMissingCluster(t *testing.T) {
 	}
 }
 
-// writeWorkerMaterial stands up a cluster state directory holding one
-// worker's join material, the record an unprivileged side has of a
-// rootful worker.
-func writeWorkerMaterial(t *testing.T, stateDir, worker string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Join(stateDir, workersDirName, worker), 0o755); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestRunDeleteNamesSudoForWorkers checks the invoker's-act rule on the
-// cluster side: a cluster whose state records workers is not deleted
-// unprivileged, because a rootful worker's container lives in root's
-// store; the command refuses naming sudo before touching anything, with
-// the workers preserved or not.
-func TestRunDeleteNamesSudoForWorkers(t *testing.T) {
-	for _, preserveWorkers := range []bool{false, true} {
-		writeFakePodman(t)
-		writeFakeSudo(t)
-		base := t.TempDir()
-		t.Setenv("XDG_STATE_HOME", base)
-		stateDir, err := clusterDir("dev")
-		if err != nil {
-			t.Fatal(err)
-		}
-		writeStateTree(t, stateDir, "dev")
-		writeWorkerMaterial(t, stateDir, "worker1")
-
-		err = runDelete(context.Background(), "dev", false, preserveWorkers)
-		if err == nil || !strings.Contains(err.Error(), "sudo") {
-			t.Fatalf("preserveWorkers=%v: err = %v, want a refusal naming sudo", preserveWorkers, err)
-		}
-		if calls := podmanCalls(t); len(calls) != 0 {
-			t.Fatalf("preserveWorkers=%v: podman calls = %q, want nothing touched", preserveWorkers, calls)
-		}
-		if _, err := os.Stat(stateDir); err != nil {
-			t.Fatalf("preserveWorkers=%v: the refusal path removed the state", preserveWorkers)
-		}
-	}
-}
-
-// TestRunDeleteWithoutWorkersStaysUnelevated checks that a cluster
-// without workers deletes without asking for elevation: no material,
-// nothing rootful to touch.
-func TestRunDeleteWithoutWorkersStaysUnelevated(t *testing.T) {
-	writeFakePodman(t)
-	writeFakeSudo(t)
-	base := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", base)
-	stateDir, err := clusterDir("dev")
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeStateTree(t, stateDir, "dev")
-
-	var delErr error
-	captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false, false) })
-	if delErr != nil {
-		t.Fatal(delErr)
-	}
-	// The non-prompting read of root's store may happen — that is how
-	// the deletion looks for rootful workers — but every sudo call
-	// stays a read: the tool never escalates itself.
-	for _, call := range sudoCalls(t) {
-		if !strings.HasPrefix(call, "sudo -n ") {
-			t.Fatalf("sudo calls = %q, want only non-prompting reads", sudoCalls(t))
-		}
-	}
-}
-
-// TestRunDeleteCascadesWorkers checks the cascade: deleting a cluster
-// deletes each of its workers the way delete worker does, containers
-// stopped and removed, before the cluster's own container goes. Another
-// cluster's workers are left alone.
-func TestRunDeleteCascadesWorkers(t *testing.T) {
-	writeFakePodman(t)
-	writeFakeSudo(t)
-	base := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", base)
-	setContainers(t, "coreshift-dev", "coreshift-worker-worker1", "coreshift-worker-worker2", "coreshift-worker-foreign")
-	setContainerLabel(t, "coreshift-worker-worker1", "dev")
-	setContainerLabel(t, "coreshift-worker-worker2", "dev")
-	setContainerLabel(t, "coreshift-worker-foreign", "nope")
-	stateDir, err := clusterDir("dev")
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeStateTree(t, stateDir, "dev")
-
-	var delErr error
-	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false, false) })
-	if delErr != nil {
-		t.Fatal(delErr)
-	}
-	var stops []string
-	for _, call := range podmanCalls(t) {
-		if strings.HasPrefix(call, "stop --timeout") {
-			stops = append(stops, call)
-		}
-	}
-	want := []string{
-		"stop --timeout 120 coreshift-worker-worker1",
-		"stop --timeout 120 coreshift-worker-worker2",
-		"stop --timeout 120 coreshift-dev",
-	}
-	if !slices.Equal(stops, want) {
-		t.Fatalf("stops = %q\nwant %q", stops, want)
-	}
-	for _, want := range []string{
-		"Deleted worker worker1",
-		"Deleted worker worker2",
-		"Deleted cluster dev",
-		"State removed at " + stateDir,
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("output = %q, want %q named", out, want)
-		}
-	}
-	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
-		t.Fatal("delete left the cluster's state behind")
-	}
-	if strings.Contains(out, "foreign") {
-		t.Fatalf("another cluster's worker was deleted too:\n%s", out)
-	}
-}
-
-// TestRunDeleteWorkerWithoutClusterState checks the edge a cascade can
-// hit too: a worker whose cluster's state directory is gone is still
-// stopped and removed, with a note that its node went with the data.
-func TestRunDeleteWorkerWithoutClusterState(t *testing.T) {
-	writeFakePodman(t)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	setContainers(t, "coreshift-worker-w1")
-	setContainerLabel(t, "coreshift-worker-w1", "dev")
-
-	var delErr error
-	out := captureStdout(t, func() { delErr = runDeleteWorker(context.Background(), "w1") })
-	if delErr != nil {
-		t.Fatal(delErr)
-	}
-	calls := podmanCalls(t)
-	want := []string{
-		"container exists coreshift-worker-w1",
-		`inspect --format {{index .Config.Labels "coreshift-cluster"}} coreshift-worker-w1`,
-		"container exists coreshift-worker-w1",
-		"stop --timeout 120 coreshift-worker-w1",
-		"rm coreshift-worker-w1",
-	}
-	if !slices.Equal(calls, want) {
-		t.Fatalf("podman calls = %q\nwant %q", calls, want)
-	}
-	for _, want := range []string{"Deleted worker w1", "no state left"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("output = %q, want %q named", out, want)
-		}
-	}
-	if strings.Contains(out, "not running") {
-		t.Fatalf("output = %q, want the state-gone note, not the not-running one", out)
-	}
-}
-
-// TestRunDeleteWorkerRemovesMaterial checks the delete contract's state
-// side: the join material directory goes with the worker's container
-// even when the cluster is not running to remove the node, so nothing
-// of the worker stays in the cluster's state tree.
-func TestRunDeleteWorkerRemovesMaterial(t *testing.T) {
-	writeFakePodman(t)
-	base := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", base)
-	setContainers(t, "coreshift-worker-w1")
-	setContainerLabel(t, "coreshift-worker-w1", "dev")
-	stateDir, err := clusterDir("dev")
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeStateTree(t, stateDir, "dev")
-	writeWorkerMaterial(t, stateDir, "w1")
-
-	var delErr error
-	out := captureStdout(t, func() { delErr = runDeleteWorker(context.Background(), "w1") })
-	if delErr != nil {
-		t.Fatal(delErr)
-	}
-	if _, err := os.Stat(filepath.Join(stateDir, workersDirName, "w1")); !os.IsNotExist(err) {
-		t.Fatal("delete left the worker's join material behind")
-	}
-	for _, want := range []string{"Deleted worker w1", "not running"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("output = %q, want %q named", out, want)
-		}
-	}
-}
-
-// TestRunDeletePreserveWorkersLeavesWorkers checks the flag's contract:
-// the cluster's container goes, its workers stay untouched, and the state
-// is preserved with them — the flag implies it, since the workers could
-// never rejoin a cluster re-created without its state — so they reconnect
-// when the cluster returns.
-func TestRunDeletePreserveWorkersLeavesWorkers(t *testing.T) {
-	writeFakePodman(t)
-	writeFakeSudo(t)
-	base := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", base)
-	setContainers(t, "coreshift-dev", "coreshift-worker-worker1", "coreshift-worker-worker2")
-	setContainerLabel(t, "coreshift-worker-worker1", "dev")
-	setContainerLabel(t, "coreshift-worker-worker2", "dev")
-	stateDir, err := clusterDir("dev")
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeStateTree(t, stateDir, "dev")
-
-	var delErr error
-	out := captureStdout(t, func() { delErr = runDelete(context.Background(), "dev", false, true) })
-	if delErr != nil {
-		t.Fatal(delErr)
-	}
-	calls := podmanCalls(t)
-	want := []string{
-		"container exists coreshift-dev",
-		"ps -a --format {{.Names}}",
-		`inspect --format {{index .Config.Labels "coreshift-cluster"}} coreshift-worker-worker1`,
-		`inspect --format {{index .Config.Labels "coreshift-cluster"}} coreshift-worker-worker2`,
-		"ps -a --format {{.Names}}",
-		"stop --timeout 120 coreshift-dev",
-		"rm coreshift-dev",
-	}
-	if !slices.Equal(calls, want) {
-		t.Fatalf("podman calls = %q\nwant %q", calls, want)
-	}
-	for _, want := range []string{
-		"Workers left running: worker1, worker2",
-		"State preserved at " + stateDir,
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("output = %q, want %q named", out, want)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(stateDir, clusterMarkerFilename)); err != nil {
-		t.Fatal("preserve-workers removed the state directory")
-	}
-}
-
 // TestDeleteClusterFlagDefaults checks that the delete command comes with
-// the documented defaults, and that the retired cleanup flag is gone.
+// the documented defaults, and that the retired flags are gone.
 func TestDeleteClusterFlagDefaults(t *testing.T) {
 	cmd := newDeleteClusterCommand()
 	for name, want := range map[string]string{
-		"name":             "coreshift",
-		"preserve-state":   "false",
-		"preserve-workers": "false",
+		"name":           "coreshift",
+		"preserve-state": "false",
 	} {
 		if flag := cmd.Flags().Lookup(name); flag == nil {
 			t.Fatalf("flag --%s is not defined", name)
@@ -2866,114 +2480,9 @@ func TestDeleteClusterFlagDefaults(t *testing.T) {
 	if flag := cmd.Flags().Lookup("cleanup"); flag != nil {
 		t.Fatal("flag --cleanup is gone: delete removes the state by default")
 	}
-}
-
-// TestCreateWorkerFlagDefaults checks that the worker creation flags are
-// accepted and come with the documented defaults — the name has none,
-// because a bare creation counts it. The rootless launch is the bare
-// default; the retired flag is gone.
-func TestCreateWorkerFlagDefaults(t *testing.T) {
-	cmd := newCreateWorkerCommand()
-	for name, want := range map[string]string{
-		"name":    "",
-		"cluster": "coreshift",
-		"verbose": "false",
-	} {
-		if flag := cmd.Flags().Lookup(name); flag == nil {
-			t.Fatalf("flag --%s is not defined", name)
-		} else if flag.DefValue != want {
-			t.Fatalf("--%s default = %q, want %q", name, flag.DefValue, want)
-		}
+	if flag := cmd.Flags().Lookup("preserve-workers"); flag != nil {
+		t.Fatal("flag --preserve-workers is gone: there are no workers to preserve")
 	}
-	if flag := cmd.Flags().Lookup("rootless"); flag != nil {
-		t.Fatal("flag --rootless is gone: the rootless launch is the default")
-	}
-	if usage := cmd.Flags().Lookup("name").Usage; !strings.Contains(usage, "count") {
-		t.Fatalf("--name usage = %q, want the counting default described", usage)
-	}
-	if flag := cmd.Flags().Lookup("pull-secret"); flag != nil {
-		t.Fatal("flag --pull-secret is gone: the cluster's stored secret is the only source")
-	}
-}
-
-// TestDeleteWorkerFlagDefaults checks that the worker deletion comes
-// with the documented default.
-func TestDeleteWorkerFlagDefaults(t *testing.T) {
-	cmd := newDeleteWorkerCommand()
-	if flag := cmd.Flags().Lookup("name"); flag == nil {
-		t.Fatal("flag --name is not defined")
-	} else if flag.DefValue != "worker1" {
-		t.Fatalf("--name default = %q, want worker1", flag.DefValue)
-	}
-}
-
-// TestWorkerRunArgs checks the podman command line that starts a worker
-// container for a host-mode cluster: its name and cluster label, the
-// host network it dials the control plane on, the privilege its cgroup
-// hierarchy needs, the join material and pull secret mounted read-only
-// where the entrypoint and runtime read them, and the host's kernel
-// modules read-only.
-func TestWorkerRunArgs(t *testing.T) {
-	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", "", false)
-	want := []string{
-		"run", "--detach",
-		"--name", "coreshift-worker-w1",
-		"--label", "coreshift-cluster=dev",
-		"--network", "host",
-		"--privileged",
-		"--volume", "/state/api/workers/w1/bootstrap-kubeconfig:/etc/kubernetes/bootstrap-kubeconfig:ro,z",
-		"--volume", "/state/api/workers/w1/node-name:/etc/coreshift/node-name:ro,z",
-		"--volume", "/state/api/workers/w1/pull-secret:/etc/coreshift/pull-secret:ro,z",
-		"--volume", "/lib/modules:/lib/modules:ro",
-		"localhost/coreshift-worker:v1",
-	}
-	if !slices.Equal(got, want) {
-		t.Fatalf("podman args = %q\nwant %q", got, want)
-	}
-}
-
-// TestWorkerRunArgsContainerMode checks the podman command line that
-// starts a rootful worker joining a cluster in a container: it joins the
-// cluster container's network namespace by its path — the worker runs
-// rootful, the cluster container rootless, and the two podman stores
-// cannot see each other's containers — and carries the marker that
-// tells the worker its network is the tool's own to configure.
-func TestWorkerRunArgsContainerMode(t *testing.T) {
-	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", "ns:/proc/4242/ns/net", true)
-	for i, arg := range got {
-		switch arg {
-		case "--network":
-			if got[i+1] != "ns:/proc/4242/ns/net" {
-				t.Fatalf("worker network = %q, want the cluster container's namespace by path", got[i+1])
-			}
-		case "--volume":
-			if got[i+1] == "/state/api/workers/w1/network-isolated:/etc/coreshift/network-isolated:ro,z" {
-				return
-			}
-		}
-	}
-	t.Fatalf("podman args = %q, want the network marker mounted", got)
-}
-
-// TestWorkerRunArgsRootlessContainerMode checks the podman command line
-// that starts a rootless worker joining a cluster in a container: both
-// containers live in the user's one store, so the join is by the
-// cluster container's name, with no path gymnastics.
-func TestWorkerRunArgsRootlessContainerMode(t *testing.T) {
-	got := workerRunArgs("coreshift-worker-w1", "dev", "/state/api/workers/w1", "localhost/coreshift-worker:v1", "container:coreshift-dev", true)
-	for i, arg := range got {
-		switch arg {
-		case "--network":
-			if got[i+1] != "container:coreshift-dev" {
-				t.Fatalf("worker network = %q, want the cluster container by name", got[i+1])
-			}
-		case "--volume":
-			if got[i+1] == "/state/api/workers/w1/network-isolated:/etc/coreshift/network-isolated:ro,z" {
-				return
-			}
-		}
-	}
-	t.Fatalf("podman args = %q, want the network marker mounted", got)
 }
 
 // TestStdinIsTerminalOnPipe checks the fresh-start question's terminal
@@ -2983,739 +2492,5 @@ func TestStdinIsTerminalOnPipe(t *testing.T) {
 	noTerminal(t)
 	if stdinIsTerminal() {
 		t.Fatal("a pipe on standard input must not count as a terminal")
-	}
-}
-
-// TestInvokingUserHomes checks the sudo-side home resolution: the homes
-// come from the invoking user's own entry, so a run under sudo reads
-// the same state and cache the bare one does, and an unknown user is
-// refused.
-func TestInvokingUserHomes(t *testing.T) {
-	uid := strconv.Itoa(os.Getuid())
-	stateHome, cacheHome, err := invokingUserHomes(uid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	invoking, err := user.LookupId(uid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := filepath.Join(invoking.HomeDir, ".local", "state"); stateHome != want {
-		t.Fatalf("state home = %q, want %q", stateHome, want)
-	}
-	if want := filepath.Join(invoking.HomeDir, ".cache"); cacheHome != want {
-		t.Fatalf("cache home = %q, want %q", cacheHome, want)
-	}
-	if _, _, err := invokingUserHomes("no-such-uid"); err == nil {
-		t.Fatal("expected an error for an unknown user")
-	}
-}
-
-// TestCreateWorkerBareStaysUnelevated checks the default's promise: a
-// bare worker creation asks for no elevation at all, running in the
-// user's own podman, so with every way to elevate refused it still
-// proceeds to the cluster resolution. The state home is the test's
-// own, so that resolution cannot reach a live default-named cluster.
-func TestCreateWorkerBareStaysUnelevated(t *testing.T) {
-	writeFakePodman(t)
-	writeFakeSudo(t)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	noTerminal(t)
-	refusal := filepath.Join(t.TempDir(), "no-passwordless")
-	if err := os.WriteFile(refusal, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("SUDO_REFUSE", refusal)
-
-	root := newRootCommand()
-	root.SetArgs([]string{"create", "worker"})
-	err := root.Execute()
-	if err == nil || !strings.Contains(err.Error(), "no cluster named coreshift") {
-		t.Fatalf("err = %v, want the cluster resolution", err)
-	}
-	if sudo := sudoCalls(t); len(sudo) != 0 {
-		t.Fatalf("sudo calls = %q, want none: the rootless worker needs no elevation", sudo)
-	}
-}
-
-// TestClusterNetworkNamespace checks the namespace path a worker joins:
-// the cluster container's main process, whose namespace root joins by
-// path because the two podman stores cannot see each other's
-// containers. A stopped container has no process left to join.
-func TestClusterNetworkNamespace(t *testing.T) {
-	writeFakePodman(t)
-	setContainers(t, "coreshift-dev")
-	setContainerPID(t, "coreshift-dev", 4242)
-
-	got, err := clusterNetworkNamespace("dev")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "/proc/4242/ns/net" {
-		t.Fatalf("namespace = %q, want the cluster container's by path", got)
-	}
-
-	setContainerPID(t, "coreshift-dev", 0)
-	if _, err := clusterNetworkNamespace("dev"); err == nil || !strings.Contains(err.Error(), "not running") {
-		t.Fatalf("err = %v, want the stopped cluster refused", err)
-	}
-}
-
-// TestRunCreateWorkerRefusals checks the refusals that must arrive before
-// anything is minted: a name the objects cannot carry, a taken worker
-// name, an unknown cluster, and a cluster whose API is not answering.
-// None needs a pull secret flag, since the refusals precede its use.
-// The state home is the test's own, so the refusals read no real
-// cluster state.
-func TestRunCreateWorkerRefusals(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	for name, tc := range map[string]struct {
-		worker  string
-		cluster string
-		want    string
-	}{
-		"name is not a DNS label": {"Bad Name", "coreshift", "DNS label"},
-		"name is empty":           {"", "coreshift", "DNS label"},
-		"worker name is taken":    {"w1", "coreshift", "worker w1 already exists"},
-		"cluster is unknown":      {"fresh", "nope", "no cluster named nope"},
-		"cluster is not running":  {"fresh", "dev", "not running"},
-	} {
-		writeFakePodman(t)
-		setContainers(t, "coreshift-worker-w1", "coreshift-dev")
-		setContainerPort(t, "coreshift-dev", 17443)
-
-		err := runCreateWorker(context.Background(), tc.worker, true, tc.cluster, false)
-		if err == nil || !strings.Contains(err.Error(), tc.want) {
-			t.Fatalf("%s: err = %v, want a refusal containing %q", name, err, tc.want)
-		}
-		// A refusal before the first podman call leaves no call log.
-		if calls, err := os.ReadFile(os.Getenv("PODMAN_LOG")); err == nil && strings.Contains(string(calls), "build") {
-			t.Fatalf("%s: an image was minted despite the refusal", name)
-		}
-	}
-}
-
-// TestNextWorkerName checks the counting rule a bare worker creation
-// names by: the number is one past the cluster's node count — not the
-// first free slot — and skips upward past any name already in use, as a
-// node or as a container, so gaps left by deletions never cause a
-// collision. The nodes are the truth across both worker kinds, since a
-// cluster may hold either.
-func TestNextWorkerName(t *testing.T) {
-	for name, tc := range map[string]struct {
-		nodes      []string
-		containers []string
-		want       string
-	}{
-		"fresh cluster": {
-			want: "worker1",
-		},
-		"one worker named foo": {
-			nodes: []string{"foo"},
-			want:  "worker2",
-		},
-		"three nodes count to the fourth": {
-			nodes: []string{"worker1", "worker2", "worker3"},
-			want:  "worker4",
-		},
-		"deleted middle leaves the number skipped": {
-			nodes: []string{"worker1", "worker3"},
-			want:  "worker4",
-		},
-		"a name taken by a container is skipped": {
-			nodes:      []string{"worker1"},
-			containers: []string{"coreshift-worker-worker2"},
-			want:       "worker3",
-		},
-	} {
-		writeFakePodman(t)
-		setContainers(t, tc.containers...)
-
-		if got := nextWorkerName(tc.nodes); got != tc.want {
-			t.Fatalf("%s: name = %q, want %q", name, got, tc.want)
-		}
-	}
-}
-
-// writeClusterNodes stands up a TLS stand-in for a cluster's API serving
-// the node list — the given names — and its health endpoint, and writes
-// an admin kubeconfig pointing at it into the state directory, the way a
-// real cluster's state directory holds one. The stand-in's own
-// certificate is the kubeconfig's authority, so the readiness probe and
-// the API clients trust it alike, and the fake cluster container
-// publishes the stand-in's port.
-func writeClusterNodes(t *testing.T, stateDir, cluster string, names ...string) {
-	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	mux.HandleFunc("/api/v1/nodes", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		items := make([]corev1.Node, 0, len(names))
-		for _, name := range names {
-			items = append(items, corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}})
-		}
-		_ = json.NewEncoder(w).Encode(corev1.NodeList{Items: items})
-	})
-	server := httptest.NewTLSServer(mux)
-	t.Cleanup(server.Close)
-	config := clientcmdapi.NewConfig()
-	config.Clusters["coreshift"] = &clientcmdapi.Cluster{
-		Server:                   server.URL,
-		CertificateAuthorityData: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}),
-	}
-	config.AuthInfos["admin"] = &clientcmdapi.AuthInfo{}
-	config.Contexts["admin@coreshift"] = &clientcmdapi.Context{Cluster: "coreshift", AuthInfo: "admin"}
-	config.CurrentContext = "admin@coreshift"
-	if err := clientcmd.WriteToFile(*config, filepath.Join(stateDir, certgen.AdminKubeconfigFilename)); err != nil {
-		t.Fatal(err)
-	}
-	address, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	port, err := strconv.Atoi(address.Port())
-	if err != nil {
-		t.Fatal(err)
-	}
-	setContainerPort(t, clusterContainerPrefix+cluster, port)
-}
-
-// TestRunCreateWorkerBarePrintsCountedName checks that a bare creation
-// picks the counted name from the cluster's nodes and prints it, so the
-// command is never mysterious about what it is creating.
-func TestRunCreateWorkerBarePrintsCountedName(t *testing.T) {
-	writeFakePodman(t)
-	setContainers(t, "coreshift-nope")
-	base := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", base)
-	stateDir, err := clusterDir("nope")
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeClusterNodes(t, stateDir, "nope", "worker1")
-
-	var runErr error
-	out := captureStdout(t, func() {
-		runErr = runCreateWorker(context.Background(), "", false, "nope", false)
-	})
-	// The stand-in cluster serves no join endpoints, so the mint that
-	// follows the pick fails; the pick itself is what is tested.
-	if runErr == nil {
-		t.Fatal("want the join to fail against the stand-in cluster")
-	}
-	if !strings.Contains(out, "Worker name: worker2") {
-		t.Fatalf("output = %q, want the counted name printed prominently", out)
-	}
-}
-
-// TestCreateWorkerHandsBackWorkersTree checks the ownership promise of
-// an elevated creation: the hand-back covers the cluster's whole
-// workers tree, the directory holding the material included, so the
-// user's state tree stays user-owned however the run ends. The run
-// fails at the mint against the stand-in cluster, so the hand-back is
-// observed on a failure exit; the seam stands in for the chown because
-// an unelevated test cannot observe one.
-func TestCreateWorkerHandsBackWorkersTree(t *testing.T) {
-	writeFakePodman(t)
-	base := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", base)
-	setContainers(t, "coreshift-dev")
-	stateDir, err := clusterDir("dev")
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeClusterNodes(t, stateDir, "dev")
-
-	var handed []string
-	orig := chownToUser
-	chownToUser = func(path string) error {
-		handed = append(handed, path)
-		return nil
-	}
-	t.Cleanup(func() { chownToUser = orig })
-
-	err = runCreateWorker(context.Background(), "w1", true, "dev", false)
-	if err == nil {
-		t.Fatal("want the mint to fail against the stand-in cluster")
-	}
-	workersDir := filepath.Join(stateDir, workersDirName)
-	if len(handed) != 1 || handed[0] != workersDir {
-		t.Fatalf("handed back = %q, want the workers tree %q alone", handed, workersDir)
-	}
-}
-
-// TestWorkerRunArgsSecondWorkerBesideNetwork checks the podman command
-// line that starts a worker joining beside the one that runs the
-// cluster's network: it still joins the cluster container's namespace,
-// but carries no marker, so it reconfigures no interfaces.
-func TestWorkerRunArgsSecondWorkerBesideNetwork(t *testing.T) {
-	got := workerRunArgs("coreshift-worker-w2", "dev", "/state/api/workers/w2", "localhost/coreshift-worker:v1", "container:coreshift-dev", false)
-	for i, arg := range got {
-		switch arg {
-		case "--network":
-			if got[i+1] != "container:coreshift-dev" {
-				t.Fatalf("worker network = %q, want the cluster container by name", got[i+1])
-			}
-		case "--volume":
-			if got[i+1] == "/state/api/workers/w2/network-isolated:/etc/coreshift/network-isolated:ro,z" {
-				t.Fatalf("podman args = %q, want no network marker beside the first worker", got)
-			}
-		}
-	}
-}
-
-// writeClusterPullSecret stands up a plain-HTTP stand-in for a cluster's
-// API serving the pull secret read — the given secret's JSON, or
-// not-found when none is given — and writes an admin kubeconfig pointing
-// at it into the state directory, the way a real cluster's state
-// directory holds one.
-func writeClusterPullSecret(t *testing.T, stateDir string, pullSecret []byte) {
-	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/namespaces/openshift-config/secrets/pull-secret", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if pullSecret == nil {
-			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(metav1.Status{
-				Status: metav1.StatusFailure,
-				Reason: metav1.StatusReasonNotFound,
-				Code:   http.StatusNotFound,
-			})
-			return
-		}
-		_ = json.NewEncoder(w).Encode(corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "pull-secret", Namespace: "openshift-config"},
-			Type:       corev1.SecretTypeDockerConfigJson,
-			Data:       map[string][]byte{corev1.DockerConfigJsonKey: pullSecret},
-		})
-	})
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
-	config := clientcmdapi.NewConfig()
-	config.Clusters["coreshift"] = &clientcmdapi.Cluster{Server: server.URL}
-	config.AuthInfos["admin"] = &clientcmdapi.AuthInfo{}
-	config.Contexts["admin@coreshift"] = &clientcmdapi.Context{Cluster: "coreshift", AuthInfo: "admin"}
-	config.CurrentContext = "admin@coreshift"
-	if err := clientcmd.WriteToFile(*config, filepath.Join(stateDir, certgen.AdminKubeconfigFilename)); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestWorkerPullSecretReadsClusterSecret checks that the Secret the
-// cluster stores becomes both the build's credentials and its throwaway
-// auth file, which the cleanup removes.
-func TestWorkerPullSecretReadsClusterSecret(t *testing.T) {
-	secret := []byte(`{"auths":{"quay.io":{"auth":"dXNlcjpwYXNz"}}}`)
-	stateDir := t.TempDir()
-	writeClusterPullSecret(t, stateDir, secret)
-
-	pullSecret, authfile, cleanup, err := workerPullSecret(context.Background(), stateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(pullSecret, secret) {
-		t.Fatalf("pull secret = %q, want the cluster's stored one", pullSecret)
-	}
-	data, err := os.ReadFile(authfile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(data, secret) {
-		t.Fatalf("auth file holds %q, want the cluster's secret", data)
-	}
-	cleanup()
-	if _, err := os.Stat(authfile); !os.IsNotExist(err) {
-		t.Fatal("cleanup left the throwaway auth file behind")
-	}
-}
-
-// TestWorkerClusterTarget checks how a worker's cluster is resolved: a
-// cluster in a container through its published port, and a host-mode
-// cluster, which has no container to ask, through the port its admin
-// kubeconfig records.
-func TestWorkerClusterTarget(t *testing.T) {
-	writeFakePodman(t)
-	base := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", base)
-	setContainers(t, "coreshift-dev")
-	setContainerPort(t, "coreshift-dev", 7443)
-
-	port, dir, err := workerClusterTarget("dev")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if port != 7443 || dir != filepath.Join(base, "coreshift", "clusters", "dev") {
-		t.Fatalf("container cluster: port %d, dir %q", port, dir)
-	}
-
-	// Host mode: no cluster container, but the cluster's state directory
-	// holds the admin kubeconfig a run wrote, pointing at its port.
-	stateDir := filepath.Join(base, "coreshift", "clusters", "coreshift")
-	writeClusterPullSecret(t, stateDir, nil)
-	config, err := clientcmd.LoadFromFile(filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
-	if err != nil {
-		t.Fatal(err)
-	}
-	config.Clusters["coreshift"].Server = "https://127.0.0.1:16443"
-	if err := clientcmd.WriteToFile(*config, filepath.Join(stateDir, certgen.AdminKubeconfigFilename)); err != nil {
-		t.Fatal(err)
-	}
-	port, dir, err = workerClusterTarget("coreshift")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if port != 16443 || dir != stateDir {
-		t.Fatalf("host-mode cluster: port %d, dir %q", port, dir)
-	}
-
-	if _, _, err := workerClusterTarget("nope"); err == nil || !strings.Contains(err.Error(), "no cluster named nope") {
-		t.Fatalf("err = %v, want a plain refusal", err)
-	}
-}
-
-// TestRunGetWorkersEmpty checks that an empty worker list is reported
-// plainly, with the root side read without a prompt: nothing there and
-// nothing here means no workers, and no note.
-func TestRunGetWorkersEmpty(t *testing.T) {
-	writeFakePodman(t)
-	writeFakeSudo(t)
-	var err error
-	out := captureStdout(t, func() { err = runGetWorkers() })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out, "No workers") {
-		t.Fatalf("output = %q, want the empty list reported", out)
-	}
-	if strings.Contains(out, "elevation") {
-		t.Fatalf("output = %q, want no elevation note: the root side was read", out)
-	}
-}
-
-// TestRunGetWorkersListsWorkers checks the row each worker gets: its
-// name, the cluster its container is labeled with, its kind, and
-// readiness from its container running and its node's live condition
-// agreeing, so a running worker without a reachable cluster shows as
-// not ready and one without a label shows no cluster. A worker in the
-// user's own store is the rootless kind.
-func TestRunGetWorkersListsWorkers(t *testing.T) {
-	writeFakePodman(t)
-	writeFakeSudo(t)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	setContainers(t, "coreshift-dev", "coreshift-worker-w1", "coreshift-worker-w2")
-	setContainerPort(t, "coreshift-dev", 7443)
-	setContainerLabel(t, "coreshift-worker-w1", "dev")
-	setContainerRunning(t, "coreshift-worker-w1", true)
-
-	var err error
-	out := captureStdout(t, func() { err = runGetWorkers() })
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("output has %d lines, want a header and two workers:\n%s", len(lines), out)
-	}
-	if fields := strings.Fields(lines[1]); len(fields) < 4 || fields[0] != "w1" || fields[1] != "dev" || fields[2] != "rootless" || strings.Join(fields[3:], " ") != "not ready" {
-		t.Fatalf("w1 row = %q, want its name, cluster, rootless kind, and not ready", lines[1])
-	}
-	if fields := strings.Fields(lines[2]); len(fields) < 4 || fields[0] != "w2" || fields[1] != "-" || fields[2] != "rootless" || strings.Join(fields[3:], " ") != "not ready" {
-		t.Fatalf("w2 row = %q, want its name, no cluster, rootless kind, and not ready", lines[2])
-	}
-}
-
-// TestRunGetWorkersListsRootfulWorkers checks the split the listing is
-// honest about: rootful worker containers live in root's store, read
-// through the non-interactive elevation, and a worker only that side
-// can see is listed as the rootful kind, with its row read the same
-// way.
-func TestRunGetWorkersListsRootfulWorkers(t *testing.T) {
-	writeFakePodman(t)
-	writeFakeSudo(t)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	setContainers(t, "coreshift-dev")
-	setRootfulContainers(t, "coreshift-worker-w1")
-	setContainerPort(t, "coreshift-dev", 7443)
-	setContainerLabel(t, "coreshift-worker-w1", "dev")
-	setContainerRunning(t, "coreshift-worker-w1", true)
-
-	var err error
-	out := captureStdout(t, func() { err = runGetWorkers() })
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("output has %d lines, want a header and the rootful worker:\n%s", len(lines), out)
-	}
-	if fields := strings.Fields(lines[1]); len(fields) < 4 || fields[0] != "w1" || fields[1] != "dev" || fields[2] != "rootful" || strings.Join(fields[3:], " ") != "not ready" {
-		t.Fatalf("w1 row = %q, want its name, cluster, rootful kind, and not ready", lines[1])
-	}
-	// The row was read through the root side: the label read went
-	// through elevation, not plain podman. (The fake podman logs both
-	// paths alike; the sudo log is the one that tells them apart.)
-	if sudo := sudoCalls(t); !slices.ContainsFunc(sudo, func(call string) bool {
-		return strings.Contains(call, `inspect --format {{index .Config.Labels "coreshift-cluster"}} coreshift-worker-w1`)
-	}) {
-		t.Fatalf("sudo calls = %q, want the rootful worker's label read elevated", sudo)
-	}
-	if strings.Contains(out, "elevation") {
-		t.Fatalf("output = %q, want no elevation note: the root side was read", out)
-	}
-}
-
-// TestRunGetWorkersListsBothKinds checks the row each kind of one
-// cluster's workers gets: a cluster may hold rootless and rootful
-// workers at once, and the listing shows both, each labeled with its
-// kind.
-func TestRunGetWorkersListsBothKinds(t *testing.T) {
-	writeFakePodman(t)
-	writeFakeSudo(t)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	setContainers(t, "coreshift-dev", "coreshift-worker-worker1")
-	setRootfulContainers(t, "coreshift-worker-worker2")
-	setContainerPort(t, "coreshift-dev", 7443)
-	setContainerLabel(t, "coreshift-worker-worker1", "dev")
-	setContainerLabel(t, "coreshift-worker-worker2", "dev")
-
-	var err error
-	out := captureStdout(t, func() { err = runGetWorkers() })
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("output has %d lines, want a header and both workers:\n%s", len(lines), out)
-	}
-	if fields := strings.Fields(lines[1]); fields[0] != "worker1" || fields[1] != "dev" || fields[2] != "rootless" {
-		t.Fatalf("worker1 row = %q, want the rootless kind labeled", lines[1])
-	}
-	if fields := strings.Fields(lines[2]); fields[0] != "worker2" || fields[1] != "dev" || fields[2] != "rootful" {
-		t.Fatalf("worker2 row = %q, want the rootful kind labeled", lines[2])
-	}
-}
-
-// TestRunGetWorkersNotesRefusedElevation checks the fallback's honesty:
-// when the non-interactive read of root's store is refused — no cached
-// credentials — the listing reports only what the unprivileged side
-// can see and says plainly that rootful workers need elevation.
-func TestRunGetWorkersNotesRefusedElevation(t *testing.T) {
-	writeFakePodman(t)
-	writeFakeSudo(t)
-	refusal := filepath.Join(t.TempDir(), "refused")
-	if err := os.WriteFile(refusal, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("SUDO_REFUSE", refusal)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-
-	var err error
-	out := captureStdout(t, func() { err = runGetWorkers() })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out, "No workers") {
-		t.Fatalf("output = %q, want the empty list reported", out)
-	}
-	if !strings.Contains(out, "needs elevation") {
-		t.Fatalf("output = %q, want the elevation note", out)
-	}
-}
-
-// TestRunGetWorkersStoppedContainerNotReady checks the row a stopped
-// worker gets: not ready, without probing, even when its node's
-// condition still reads ready in the cluster's API, which is the shape
-// a just-stopped worker leaves behind until the cluster notices.
-func TestRunGetWorkersStoppedContainerNotReady(t *testing.T) {
-	writeFakePodman(t)
-	writeFakeSudo(t)
-	base := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", base)
-
-	// The cluster's API reports every node ready, stopped ones included.
-	var mu sync.Mutex
-	probes := map[string]int{}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/nodes/", func(w http.ResponseWriter, r *http.Request) {
-		name := strings.TrimPrefix(r.URL.Path, "/api/v1/nodes/")
-		mu.Lock()
-		probes[name]++
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(corev1.Node{
-			TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Node"},
-			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
-				Type:   corev1.NodeReady,
-				Status: corev1.ConditionTrue,
-			}}},
-		})
-	})
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
-
-	stateDir, err := clusterDir("dev")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	config := clientcmdapi.NewConfig()
-	config.Clusters["dev"] = &clientcmdapi.Cluster{Server: server.URL}
-	config.AuthInfos["admin"] = &clientcmdapi.AuthInfo{}
-	config.Contexts["admin@dev"] = &clientcmdapi.Context{Cluster: "dev", AuthInfo: "admin"}
-	config.CurrentContext = "admin@dev"
-	if err := clientcmd.WriteToFile(*config, filepath.Join(stateDir, certgen.AdminKubeconfigFilename)); err != nil {
-		t.Fatal(err)
-	}
-
-	setContainers(t, "coreshift-dev", "coreshift-worker-w1", "coreshift-worker-w3")
-	setContainerPort(t, "coreshift-dev", 7443)
-	setContainerLabel(t, "coreshift-worker-w1", "dev")
-	setContainerLabel(t, "coreshift-worker-w3", "dev")
-	setContainerRunning(t, "coreshift-worker-w1", true)
-
-	var outErr error
-	out := captureStdout(t, func() { outErr = runGetWorkers() })
-	if outErr != nil {
-		t.Fatal(outErr)
-	}
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("output has %d lines, want a header and two workers:\n%s", len(lines), out)
-	}
-	if fields := strings.Fields(lines[1]); len(fields) < 3 || fields[0] != "w1" || strings.Join(fields[3:], " ") != "ready" {
-		t.Fatalf("w1 row = %q, want ready", lines[1])
-	}
-	if fields := strings.Fields(lines[2]); len(fields) < 4 || fields[0] != "w3" || strings.Join(fields[3:], " ") != "not ready" {
-		t.Fatalf("w3 row = %q, want not ready", lines[2])
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if probes["w3"] != 0 {
-		t.Fatalf("the stopped worker's node was probed %d times, want none", probes["w3"])
-	}
-	if probes["w1"] != 1 {
-		t.Fatalf("the running worker's node was probed %d times, want once", probes["w1"])
-	}
-}
-
-// TestRunDeleteWorkerStopsAndRemoves checks the delete contract: the
-// container is stopped with the same teardown time the cluster's gets
-// and then removed, its cluster read from its label — all through the
-// user's own store, with no elevation anywhere. The state home is the
-// test's own: the label names the default cluster, whose real state
-// the node removal must never reach.
-func TestRunDeleteWorkerStopsAndRemoves(t *testing.T) {
-	writeFakePodman(t)
-	writeFakeSudo(t)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	setContainers(t, "coreshift-worker-w1")
-	setContainerLabel(t, "coreshift-worker-w1", "coreshift")
-
-	var delErr error
-	captureStdout(t, func() { delErr = runDeleteWorker(context.Background(), "w1") })
-	if delErr != nil {
-		t.Fatal(delErr)
-	}
-	calls := podmanCalls(t)
-	want := []string{
-		"container exists coreshift-worker-w1",
-		`inspect --format {{index .Config.Labels "coreshift-cluster"}} coreshift-worker-w1`,
-		"container exists coreshift-worker-w1",
-		"stop --timeout 120 coreshift-worker-w1",
-		"rm coreshift-worker-w1",
-	}
-	// The cluster resolution trails the removal; only the head of the
-	// call sequence is the delete itself.
-	if !slices.Equal(calls[:len(want)], want) {
-		t.Fatalf("podman calls = %q\nwant %q at the head", calls, want)
-	}
-	if sudo := sudoCalls(t); len(sudo) != 0 {
-		t.Fatalf("sudo calls = %q, want none: a rootless worker deletes unelevated", sudo)
-	}
-}
-
-// TestRunDeleteWorkerRootfulNeedsSudo checks the invoker's-act rule: a
-// worker the invoking user's podman cannot see — rootful, or not there
-// at all — is not deleted unprivileged; the command refuses naming sudo
-// and touches nothing beyond the user-store existence check.
-func TestRunDeleteWorkerRootfulNeedsSudo(t *testing.T) {
-	writeFakePodman(t)
-	writeFakeSudo(t)
-
-	var err error
-	captureStdout(t, func() { err = runDeleteWorker(context.Background(), "w1") })
-	if err == nil || !strings.Contains(err.Error(), "sudo") {
-		t.Fatalf("err = %v, want a refusal naming sudo", err)
-	}
-	if calls := podmanCalls(t); len(calls) != 1 || calls[0] != "container exists coreshift-worker-w1" {
-		t.Fatalf("podman calls = %q, want only the user-store existence check", calls)
-	}
-}
-
-// TestWorkerFailureQuotesLogAndRemoves checks the failure contract: the
-// error carries the container's log tail, a join that failed on the
-// cgroup hierarchy gains the rootful remedy, and the container is
-// removed.
-func TestWorkerFailureQuotesLogAndRemoves(t *testing.T) {
-	writeFakePodman(t)
-	setContainerLog(t, "coreshift-worker-w1",
-		"enabling the cgroup controllers failed\nthe worker container's cgroup hierarchy must be delegated to it\n")
-
-	err := workerFailure("coreshift-worker-w1", "/state/api", "w1", fmt.Errorf("the worker did not join"))
-	if err == nil {
-		t.Fatal("expected a failure report")
-	}
-	for _, want := range []string{
-		"the worker did not join",
-		"recent log output:",
-		"must be delegated to it",
-		"under sudo",
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("failure missing %q:\n%v", want, err)
-		}
-	}
-	if calls := podmanCalls(t); !slices.Contains(calls, "rm --force coreshift-worker-w1") {
-		t.Fatalf("podman calls = %q, want the container removed", calls)
-	}
-}
-
-// TestWorkerFailureWithoutLogKeepsErrorPlain checks that a failure with
-// no log output to quote stays plain, still removing the container.
-func TestWorkerFailureWithoutLogKeepsErrorPlain(t *testing.T) {
-	writeFakePodman(t)
-
-	err := workerFailure("coreshift-worker-w1", "/state/api", "w1", fmt.Errorf("the worker did not join"))
-	if err == nil || err.Error() != "the worker did not join" {
-		t.Fatalf("err = %v, want the plain failure", err)
-	}
-	if calls := podmanCalls(t); !slices.Contains(calls, "rm --force coreshift-worker-w1") {
-		t.Fatalf("podman calls = %q, want the container removed", calls)
-	}
-}
-
-// TestGetClustersSkipsWorkers checks that worker containers, which share
-// the cluster prefix, are not listed as clusters.
-func TestGetClustersSkipsWorkers(t *testing.T) {
-	writeFakePodman(t)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	setContainers(t, "coreshift-dev", "coreshift-worker-w1")
-	setContainerPort(t, "coreshift-dev", 7443)
-
-	var err error
-	out := captureStdout(t, func() { err = runGetClusters() })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(out, "w1") {
-		t.Fatalf("worker listed as a cluster:\n%s", out)
-	}
-	if !strings.Contains(out, "dev") {
-		t.Fatalf("cluster missing from the list:\n%s", out)
 	}
 }
