@@ -135,6 +135,20 @@ directory can be upgraded in place with `--version`. Create applies
 the reuse rule before building or starting anything, so a doomed run
 fails before an image is minted.
 
+The cluster's state can also live in an external etcd instead of the
+supervised internal one: pass `--external-etcd-endpoints` with the three
+certificate flags `--external-etcd-ca`, `--external-etcd-cert`, and
+`--external-etcd-key` to either cluster command — the four are required
+together, and the endpoints must be https URLs, because an external etcd
+is reached over a network. The internal etcd is then not run at all, and
+every component that stores state points at the external one; in
+container mode the three certificate files are mounted into the
+container read-only, like the pull secret. The marker records which etcd
+the state belongs to, and a run against a different etcd — the other
+mode, or different endpoints — refuses, because the same certificates
+over different etcd data would silently become a different cluster; run
+under another name or start fresh instead.
+
 The port, 6443 by default, is not part of the cluster's identity: the
 state directory does not depend on it, and a cluster re-created on a
 different port reuses its state warm — with the kubeconfig's server
@@ -356,10 +370,10 @@ whose OAuth follower is taken or reserved.
 tail of its log, and points at the full log file; see [Reading a
 failed boot](#reading-a-failed-boot).
 
-**The state directory refuses reuse.** A cross-stream move or a patch
-downgrade refuses. Run under another name to keep both, answer the
-terminal's fresh-start question, or use `--fresh` in container mode;
-see [Cluster state](#cluster-state).
+**The state directory refuses reuse.** A cross-stream move, a patch
+downgrade, or a different etcd refuses. Run under another name to keep
+both, answer the terminal's fresh-start question, or use `--fresh` in
+container mode; see [Cluster state](#cluster-state).
 
 **Cleanup refuses to run.** If a control plane is running, the
 command asks to stop it first, because cleaning under a live instance

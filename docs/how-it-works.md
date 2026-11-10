@@ -21,7 +21,9 @@ leaves running in the background.
 The thirteen children:
 
 - etcd, kube-apiserver, kube-controller-manager, and kube-scheduler —
-  the kube core.
+  the kube core. An external etcd can hold the state instead, in which
+  case etcd itself is not run at all; see
+  [Operations](operations.md#cluster-state).
 - openshift-apiserver — the OpenShift API.
 - oauth-apiserver — the OAuth API.
 - oauth-server — serves logins.
