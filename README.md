@@ -66,3 +66,4 @@ Nodes cannot join: no join credentials ship. The machinery that would accept a n
 
 - [How it works](docs/how-it-works.md) — architecture
 - [Operations](docs/operations.md) — logging in, failures, state, releases, troubleshooting
+- [Nested in a cluster](docs/nested.md) — the control plane as a pod in a host cluster
