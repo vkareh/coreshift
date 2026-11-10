@@ -68,6 +68,62 @@ type releaseOptions struct {
 	arch     string
 }
 
+// etcdOptions carries an external etcd configuration: the endpoints the
+// components that store state dial, and the client certificate material
+// for them. The zero value means the supervised internal etcd.
+type etcdOptions struct {
+	endpoints string
+	caFile    string
+	certFile  string
+	keyFile   string
+}
+
+// external reports whether an external etcd is configured.
+func (e etcdOptions) external() bool {
+	return e.endpoints != ""
+}
+
+// validate refuses a partial external etcd configuration: the endpoints
+// and the three certificate flags are required together, and every
+// endpoint must be an https URL, because an external etcd is reached
+// over a network and must be TLS-verified.
+func (e etcdOptions) validate() error {
+	if e.endpoints == "" && e.caFile == "" && e.certFile == "" && e.keyFile == "" {
+		return nil
+	}
+	if e.endpoints == "" || e.caFile == "" || e.certFile == "" || e.keyFile == "" {
+		return fmt.Errorf("--external-etcd-endpoints, --external-etcd-ca, --external-etcd-cert, and --external-etcd-key are required together")
+	}
+	for _, endpoint := range strings.Split(e.endpoints, ",") {
+		if !strings.HasPrefix(endpoint, "https://") {
+			return fmt.Errorf("external etcd endpoints must be https URLs: %q", endpoint)
+		}
+	}
+	return nil
+}
+
+// etcdServers returns the etcd endpoints the API servers dial: the
+// external ones, or the internal etcd's URL.
+func etcdServers(etcd etcdOptions) string {
+	if etcd.external() {
+		return etcd.endpoints
+	}
+	return etcdClientURL
+}
+
+// etcdTLSFlags returns the etcd TLS flags the API servers take for an
+// external etcd; the internal one is plain http and takes none.
+func etcdTLSFlags(etcd etcdOptions) []string {
+	if !etcd.external() {
+		return nil
+	}
+	return []string{
+		"--etcd-cafile=" + etcd.caFile,
+		"--etcd-certfile=" + etcd.certFile,
+		"--etcd-keyfile=" + etcd.keyFile,
+	}
+}
+
 // goArchToUname maps Go's runtime architecture names to the uname -m
 // names that release image tags use.
 var goArchToUname = map[string]string{
@@ -245,6 +301,7 @@ func newClusterCommand() *cobra.Command {
 	var port int
 	var verbose bool
 	var release releaseOptions
+	var etcd etcdOptions
 	defaultArch, err := releaseArch(runtime.GOARCH)
 	if err != nil {
 		// Every architecture OpenShift releases payloads for is in the
@@ -259,7 +316,10 @@ func newClusterCommand() *cobra.Command {
 		// after them would bury it.
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAPI(cmd.Context(), pullSecretPath, name, port, verbose, release)
+			if err := etcd.validate(); err != nil {
+				return err
+			}
+			return runAPI(cmd.Context(), pullSecretPath, name, port, verbose, release, etcd)
 		},
 	}
 	cmd.Flags().StringVar(&pullSecretPath, "pull-secret", "", "path to a Red Hat pull secret with credentials for the release image registry (required)")
@@ -270,13 +330,17 @@ func newClusterCommand() *cobra.Command {
 	cmd.Flags().StringVar(&release.version, "version", "", "OpenShift version to run, X.Y, X.Y.Z, or newest for the registry's absolute newest; defaults to the newest verified release, or the release recorded in the state directory")
 	cmd.Flags().StringVar(&release.registry, "registry", defaultReleaseRepository, "repository to resolve the release image from")
 	cmd.Flags().StringVar(&release.arch, "arch", defaultArch, "architecture of the release payload, as uname -m reports it")
+	cmd.Flags().StringVar(&etcd.endpoints, "external-etcd-endpoints", "", "comma-separated https URLs of an external etcd holding the cluster's state instead of the supervised internal one; the three certificate flags are required with it")
+	cmd.Flags().StringVar(&etcd.caFile, "external-etcd-ca", "", "path to the CA certificate of the external etcd")
+	cmd.Flags().StringVar(&etcd.certFile, "external-etcd-cert", "", "path to the client certificate for the external etcd")
+	cmd.Flags().StringVar(&etcd.keyFile, "external-etcd-key", "", "path to the client key for the external etcd")
 	if err := cmd.MarkFlagRequired("pull-secret"); err != nil {
 		panic(err) // the flag is defined above
 	}
 	return cmd
 }
 
-func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose bool, release releaseOptions) error {
+func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose bool, release releaseOptions, etcd etcdOptions) error {
 	if err := refuseReservedPort(port); err != nil {
 		return err
 	}
@@ -317,7 +381,7 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 	if note != "" {
 		fmt.Println(note)
 	}
-	if err := ensureClusterMarker(stateDir, name, releaseRef); err != nil {
+	if err := ensureClusterMarker(stateDir, name, releaseRef, etcd); err != nil {
 		if err := offerFreshStart(stateDir, name, err); err != nil {
 			return err
 		}
@@ -326,7 +390,7 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 		if err := prepareState(stateDir, name, port); err != nil {
 			return err
 		}
-		if err := ensureClusterMarker(stateDir, name, releaseRef); err != nil {
+		if err := ensureClusterMarker(stateDir, name, releaseRef, etcd); err != nil {
 			return err
 		}
 	}
@@ -338,9 +402,14 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 	if err != nil {
 		return fmt.Errorf("prepare release payload: %w", err)
 	}
-	etcdPath, err := client.ExtractEtcd(ctx, releaseRoot)
-	if err != nil {
-		return err
+	// The internal etcd's binary is extracted only when it runs; an
+	// external etcd is not supervised and pulls nothing.
+	var etcdPath string
+	if !etcd.external() {
+		etcdPath, err = client.ExtractEtcd(ctx, releaseRoot)
+		if err != nil {
+			return err
+		}
 	}
 	kubeBinaries, err := client.ExtractKubeComponents(ctx, releaseRoot)
 	if err != nil {
@@ -372,7 +441,7 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 		aggregatedServers[i].Address = advertiseAddress
 	}
 
-	openShiftAPIServerConfig, err := writeOpenShiftAPIServerConfig(stateDir, advertiseAddress)
+	openShiftAPIServerConfig, err := writeOpenShiftAPIServerConfig(stateDir, advertiseAddress, etcd)
 	if err != nil {
 		return err
 	}
@@ -487,7 +556,7 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 	// service-account credentials and leader election off.
 	//
 	// The children split in two groups around the ready summary. The
-	// first group is the API's readiness path — etcd, the API server and
+	// first group is the API's readiness path — the API server and
 	// its controllers, the version operator ahead of the OpenShift
 	// children whose starts gate on what it applies, the aggregated
 	// servers, and the controller managers — everything the summary's
@@ -495,21 +564,18 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 	// operators that converge in the background the way operators settle
 	// after a real cluster's API answers: the machine approver, the
 	// network operator, and the DNS operator.
-	processes := []supervisor.Process{
-		{
-			Name: "etcd",
-			Path: etcdPath,
-			Args: []string{
-				"--data-dir=" + filepath.Join(stateDir, "etcd-data"),
-				"--listen-client-urls=" + etcdClientURL,
-				"--advertise-client-urls=" + etcdClientURL,
-				"--listen-peer-urls=" + etcdPeerURL,
-			},
-		},
+	//
+	// The internal etcd leads the list; an external etcd is not
+	// supervised at all, so its entry is left out entirely.
+	var processes []supervisor.Process
+	if !etcd.external() {
+		processes = append(processes, internalEtcdProcess(stateDir, etcdPath))
+	}
+	processes = append(processes, []supervisor.Process{
 		{
 			Name: "kube-apiserver",
 			Path: kubeBinaries["kube-apiserver"],
-			Args: kubeAPIServerArgs(stateDir, etcdClientURL, port, kubeAPIServerConfig, tokenReviewKubeconfig),
+			Args: kubeAPIServerArgs(stateDir, etcd, port, kubeAPIServerConfig, tokenReviewKubeconfig),
 			AfterStart: func(ctx context.Context) error {
 				// The aggregated servers need kube-apiserver up for delegated
 				// auth, the aggregation wiring needs it to accept writes, and
@@ -655,14 +721,14 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 		{
 			Name: "openshift-oauth-apiserver",
 			Path: openShiftBinaries["oauth-apiserver"],
-			Args: []string{
+			Args: append([]string{
 				"start",
 				"--secure-port=" + fmt.Sprint(oauthAPIServerPort),
 				"--bind-address=" + advertiseAddress,
 				"--kubeconfig=" + filepath.Join(stateDir, certgen.OAuthAPIServerKubeconfigFilename),
 				"--authentication-kubeconfig=" + filepath.Join(stateDir, certgen.OAuthAPIServerKubeconfigFilename),
 				"--authorization-kubeconfig=" + filepath.Join(stateDir, certgen.OAuthAPIServerKubeconfigFilename),
-				"--etcd-servers=" + etcdClientURL,
+				"--etcd-servers=" + etcdServers(etcd),
 				"--api-audiences=https://kubernetes.default.svc.cluster.local",
 				"--tls-cert-file=" + filepath.Join(stateDir, certgen.ServiceServingCertFilename),
 				"--tls-private-key-file=" + filepath.Join(stateDir, certgen.ServiceServingKeyFilename),
@@ -672,7 +738,7 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 				"--requestheader-group-headers=X-Remote-Group",
 				"--requestheader-extra-headers-prefix=X-Remote-Extra-",
 				"--client-ca-file=" + filepath.Join(stateDir, certgen.CACertFilename),
-			},
+			}, etcdTLSFlags(etcd)...),
 			// The OAuth definition must exist before this server starts;
 			// the boot cache seeds the payload's copy, so the gate passes
 			// instantly, and the version operator converges the
@@ -760,7 +826,7 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 			},
 			Env: append(os.Environ(), "POD_NAMESPACE=default"),
 		},
-	}
+	}...)
 
 	// The operators that settle behind the ready summary: their gates
 	// wait for the version operator's delivery the same way, but nothing
@@ -900,12 +966,27 @@ func runAPI(ctx context.Context, pullSecretPath, name string, port int, verbose 
 	return sup.Run(ctx, processes, operators...)
 }
 
+// internalEtcdProcess is the supervised internal etcd: a single-node
+// plain-http etcd keeping its data under the state directory.
+func internalEtcdProcess(stateDir, path string) supervisor.Process {
+	return supervisor.Process{
+		Name: "etcd",
+		Path: path,
+		Args: []string{
+			"--data-dir=" + filepath.Join(stateDir, "etcd-data"),
+			"--listen-client-urls=" + etcdClientURL,
+			"--advertise-client-urls=" + etcdClientURL,
+			"--listen-peer-urls=" + etcdPeerURL,
+		},
+	}
+}
+
 // kubeAPIServerArgs assembles the kube-apiserver command line from the
-// generated material under the state directory and the etcd client URL
-// the etcd process listens on.
-func kubeAPIServerArgs(stateDir, etcdClientURL string, port int, openshiftConfigPath, tokenReviewKubeconfig string) []string {
-	return []string{
-		"--etcd-servers=" + etcdClientURL,
+// generated material under the state directory and the etcd endpoints in
+// use.
+func kubeAPIServerArgs(stateDir string, etcd etcdOptions, port int, openshiftConfigPath, tokenReviewKubeconfig string) []string {
+	return append([]string{
+		"--etcd-servers=" + etcdServers(etcd),
 		"--secure-port=" + strconv.Itoa(port),
 		"--bind-address=" + apiBindAddress(),
 		"--tls-cert-file=" + filepath.Join(stateDir, certgen.APIServerCertFilename),
@@ -959,7 +1040,7 @@ func kubeAPIServerArgs(stateDir, etcdClientURL string, port int, openshiftConfig
 		// fails on authentication.
 		"--kubelet-client-certificate=" + filepath.Join(stateDir, certgen.KubeletClientCertFilename),
 		"--kubelet-client-key=" + filepath.Join(stateDir, certgen.KubeletClientKeyFilename),
-	}
+	}, etcdTLSFlags(etcd)...)
 }
 
 // networkOperatorImages lists the image variables the network
@@ -1265,6 +1346,7 @@ func newCreateClusterCommand() *cobra.Command {
 	var port int
 	var fresh, verbose bool
 	var release releaseOptions
+	var etcd etcdOptions
 	defaultArch, err := releaseArch(runtime.GOARCH)
 	if err != nil {
 		panic(err)
@@ -1274,7 +1356,10 @@ func newCreateClusterCommand() *cobra.Command {
 		Short:        "Create the OpenShift API control plane in a podman container",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runCreate(cmd.Context(), name, port, fresh, verbose, imagePath, pullSecretPath, release)
+			if err := etcd.validate(); err != nil {
+				return err
+			}
+			return runCreate(cmd.Context(), name, port, fresh, verbose, imagePath, pullSecretPath, release, etcd)
 		},
 	}
 	cmd.Flags().StringVar(&pullSecretPath, "pull-secret", "", "path to a Red Hat pull secret with credentials for the release image registry (required)")
@@ -1287,21 +1372,28 @@ func newCreateClusterCommand() *cobra.Command {
 	cmd.Flags().StringVar(&release.version, "version", "", "OpenShift version to run, X.Y, X.Y.Z, or newest for the registry's absolute newest; defaults to the newest verified release, or the release recorded in the state directory")
 	cmd.Flags().StringVar(&release.registry, "registry", defaultReleaseRepository, "repository to resolve the release image from")
 	cmd.Flags().StringVar(&release.arch, "arch", defaultArch, "architecture of the release payload, as uname -m reports it")
+	cmd.Flags().StringVar(&etcd.endpoints, "external-etcd-endpoints", "", "comma-separated https URLs of an external etcd holding the cluster's state instead of the supervised internal one; the three certificate flags are required with it")
+	cmd.Flags().StringVar(&etcd.caFile, "external-etcd-ca", "", "path to the CA certificate of the external etcd")
+	cmd.Flags().StringVar(&etcd.certFile, "external-etcd-cert", "", "path to the client certificate for the external etcd")
+	cmd.Flags().StringVar(&etcd.keyFile, "external-etcd-key", "", "path to the client key for the external etcd")
 	if err := cmd.MarkFlagRequired("pull-secret"); err != nil {
 		panic(err) // the flag is defined above
 	}
 	return cmd
 }
 
-// The container's XDG homes, and where the pull secret is mounted. The
-// cluster's state directory and the shared image cache are bind-mounted
-// onto the .../coreshift paths the run inside derives from its XDG
-// environment, so container-side state lands exactly where the host
-// expects to find the kubeconfig and CA.
+// The container's XDG homes, and where the pull secret and the external
+// etcd certificates are mounted. The cluster's state directory and the
+// shared image cache are bind-mounted onto the .../coreshift paths the
+// run inside derives from its XDG environment, so container-side state
+// lands exactly where the host expects to find the kubeconfig and CA.
 const (
 	containerStateHome  = "/var/lib/coreshift/state"
 	containerCacheHome  = "/var/lib/coreshift/cache"
 	containerPullSecret = "/etc/coreshift/pull-secret"
+	containerEtcdCA     = "/etc/coreshift/etcd-ca"
+	containerEtcdCert   = "/etc/coreshift/etcd-cert"
+	containerEtcdKey    = "/etc/coreshift/etcd-key"
 )
 
 // runCreate creates a cluster container and waits for it to be ready. It
@@ -1313,7 +1405,7 @@ const (
 // detached, streams its boot output, and polls readiness from the host. On
 // success the container keeps running; on any failure it is removed while
 // the state is preserved.
-func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, imagePath, pullSecretPath string, release releaseOptions) error {
+func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, imagePath, pullSecretPath string, release releaseOptions, etcd etcdOptions) error {
 	if err := refuseReservedPort(port); err != nil {
 		return err
 	}
@@ -1335,6 +1427,15 @@ func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, 
 	}
 	if _, err := os.Stat(pullSecretPath); err != nil {
 		return fmt.Errorf("read pull secret: %w", err)
+	}
+	if etcd.external() {
+		// The certificate files are mounted into the container, which
+		// needs their absolute paths.
+		for _, path := range []*string{&etcd.caFile, &etcd.certFile, &etcd.keyFile} {
+			if *path, err = filepath.Abs(*path); err != nil {
+				return err
+			}
+		}
 	}
 	stateDir, err := clusterDir(name)
 	if err != nil {
@@ -1380,7 +1481,7 @@ func runCreate(ctx context.Context, name string, port int, fresh, verbose bool, 
 	if err := ensureClusterNetwork(); err != nil {
 		return err
 	}
-	args := podmanRunArgs(container, name, port, stateDir, cacheRoot, pullSecretPath, imageRef, release)
+	args := podmanRunArgs(container, name, port, stateDir, cacheRoot, pullSecretPath, imageRef, release, etcd)
 	run := exec.CommandContext(ctx, "podman", args...)
 	run.Stdout = io.Discard // the detached run only prints the container ID
 	run.Stderr = os.Stderr
@@ -1429,13 +1530,14 @@ func removeClusterNetwork(ctx context.Context) {
 // act), the OAuth login endpoint published the same way on the port after
 // it, so `oc login` from the host can follow the discovery document to
 // the OAuth server, the cluster's state directory and the shared image
-// cache bind-mounted, the pull secret mounted read-only, and the name, the
-// release flags, and the port passed through to the run inside. The
-// container runs on the project's own podman network. The image's
+// cache bind-mounted, the pull secret and the external etcd's
+// certificates mounted read-only, and the name, the release flags, the
+// port, and the external etcd flags passed through to the run inside.
+// The container runs on the project's own podman network. The image's
 // entrypoint is `coreshift run cluster`, so the arguments after the image
 // reference land on it.
-func podmanRunArgs(container, name string, port int, stateDir, cacheRoot, pullSecretPath, imageRef string, release releaseOptions) []string {
-	return []string{
+func podmanRunArgs(container, name string, port int, stateDir, cacheRoot, pullSecretPath, imageRef string, release releaseOptions, etcd etcdOptions) []string {
+	args := []string{
 		"run", "--detach",
 		"--name", container,
 		"--network", clusterNetworkName,
@@ -1448,15 +1550,33 @@ func podmanRunArgs(container, name string, port int, stateDir, cacheRoot, pullSe
 		"--volume", stateDir + ":" + filepath.Join(containerStateHome, "coreshift", clustersDirName, name) + ":z",
 		"--volume", cacheRoot + ":" + containerCacheHome + "/coreshift:z",
 		"--volume", pullSecretPath + ":" + containerPullSecret + ":ro,z",
-		imageRef,
-		"--pull-secret=" + containerPullSecret,
-		"--name=" + name,
-		"--port=" + strconv.Itoa(port),
-		"--release-image=" + release.image,
-		"--version=" + release.version,
-		"--registry=" + release.registry,
-		"--arch=" + release.arch,
 	}
+	if etcd.external() {
+		args = append(args,
+			"--volume", etcd.caFile+":"+containerEtcdCA+":ro,z",
+			"--volume", etcd.certFile+":"+containerEtcdCert+":ro,z",
+			"--volume", etcd.keyFile+":"+containerEtcdKey+":ro,z",
+		)
+	}
+	args = append(args,
+		imageRef,
+		"--pull-secret="+containerPullSecret,
+		"--name="+name,
+		"--port="+strconv.Itoa(port),
+		"--release-image="+release.image,
+		"--version="+release.version,
+		"--registry="+release.registry,
+		"--arch="+release.arch,
+	)
+	if etcd.external() {
+		args = append(args,
+			"--external-etcd-endpoints="+etcd.endpoints,
+			"--external-etcd-ca="+containerEtcdCA,
+			"--external-etcd-cert="+containerEtcdCert,
+			"--external-etcd-key="+containerEtcdKey,
+		)
+	}
+	return args
 }
 
 // checkCreateState refuses a create whose state directory cannot run the
@@ -2401,17 +2521,22 @@ func stateRoot() (string, error) {
 	return filepath.Join(base, "coreshift"), nil
 }
 
-// clusterMarkerFilename records a cluster state directory's name and the
-// release image that created its etcd data, so the directory is
+// clusterMarkerFilename records a cluster state directory's name, the
+// release image that created its etcd data, and the external etcd
+// endpoints when the state lives in one, so the directory is
 // self-describing. etcd data only moves within the release's minor
 // stream, so the release is checked before anything starts: a newer patch
 // of the stream upgrades the directory in place, anything else refuses.
+// The etcd the data lives in is checked the same way, because the same
+// certificates over different etcd data would silently become a
+// different cluster.
 const clusterMarkerFilename = "cluster"
 
 // clusterMarker is the content of a cluster state directory's marker.
 type clusterMarker struct {
-	Name    string `json:"name"`
-	Release string `json:"release"`
+	Name          string `json:"name"`
+	Release       string `json:"release"`
+	EtcdEndpoints string `json:"etcdEndpoints,omitempty"`
 }
 
 // readClusterMarker returns the marker a state directory records, or the
@@ -2455,12 +2580,13 @@ func stateRelease(stateDir string) string {
 }
 
 // ensureClusterMarker refuses to reuse a state directory whose etcd data
-// cannot run the release this run resolved, and records the cluster's
-// name and the release on a fresh directory. A newer patch of the same
+// cannot run the release this run resolved, or that was created with a
+// different etcd than this run uses, and records the cluster's name, the
+// release, and the etcd on a fresh directory. A newer patch of the same
 // minor stream reuses the directory as an in-place upgrade, the same move
 // a real OpenShift cluster makes on a patch update; anything else
 // refuses.
-func ensureClusterMarker(stateDir, name, releaseRef string) error {
+func ensureClusterMarker(stateDir, name, releaseRef string, etcd etcdOptions) error {
 	marker, err := readClusterMarker(stateDir)
 	if err != nil {
 		return err
@@ -2469,10 +2595,32 @@ func ensureClusterMarker(stateDir, name, releaseRef string) error {
 		return stateRefusal(stateDir, marker.Release, releaseRef,
 			fmt.Sprintf("Use a different --name to get a separate state directory, or remove %s to start fresh", stateDir))
 	}
-	if marker.Name == name && marker.Release == releaseRef {
+	if marker.Release != "" && marker.EtcdEndpoints != etcd.endpoints {
+		return etcdRefusal(stateDir, marker.EtcdEndpoints, etcd.endpoints)
+	}
+	if marker.Name == name && marker.Release == releaseRef && marker.EtcdEndpoints == etcd.endpoints {
 		return nil
 	}
-	return writeClusterMarker(stateDir, clusterMarker{Name: name, Release: releaseRef})
+	return writeClusterMarker(stateDir, clusterMarker{Name: name, Release: releaseRef, EtcdEndpoints: etcd.endpoints})
+}
+
+// etcdMode names an etcd configuration for a refusal: the external
+// endpoints, or the supervised internal etcd.
+func etcdMode(endpoints string) string {
+	if endpoints == "" {
+		return "the supervised internal etcd"
+	}
+	return "external etcd at " + endpoints
+}
+
+// etcdRefusal is the error for a state directory created with a different
+// etcd than the run asked for: without the refusal the directory would
+// silently become a different cluster, its certificates over different
+// etcd data.
+func etcdRefusal(stateDir, recorded, requested string) error {
+	return fmt.Errorf("state directory %s was created with %s and cannot be reused by %s\n"+
+		"Use a different --name to get a separate state directory, or remove %s to start fresh",
+		stateDir, etcdMode(recorded), etcdMode(requested), stateDir)
 }
 
 // releaseReuse reports whether a state directory recorded as created by
@@ -2695,12 +2843,21 @@ leaderElection:
 
 // writeOpenShiftAPIServerConfig writes openshift-apiserver's component
 // configuration: serving on the advertise address with the shared
-// service-serving certificate, storing to the local etcd, and
-// authenticating as the generated admin identity. The empty etcd TLS flag
-// overrides clear the in-pod client certificate paths that OpenShift's
-// config defaults would otherwise fill in for plain-http etcd.
-func writeOpenShiftAPIServerConfig(stateDir, advertiseAddress string) (string, error) {
+// service-serving certificate, storing to the etcd in use, and
+// authenticating as the generated admin identity. The etcd TLS arguments
+// are empty strings for the plain-http internal etcd, clearing the
+// in-pod client certificate paths OpenShift's config defaults would
+// otherwise fill in, and hold the external etcd's certificate material
+// when one is configured.
+func writeOpenShiftAPIServerConfig(stateDir, advertiseAddress string, etcd etcdOptions) (string, error) {
 	path := filepath.Join(stateDir, "openshift-apiserver-config.yaml")
+	cert, key, ca := "", "", ""
+	if etcd.external() {
+		cert, key, ca = etcd.certFile, etcd.keyFile, etcd.caFile
+	}
+	// A comma-separated endpoint list becomes one URL list entry per
+	// endpoint.
+	urls := strings.ReplaceAll(etcdServers(etcd), ",", "\n  - ")
 	config := fmt.Sprintf(`apiVersion: openshiftcontrolplane.config.openshift.io/v1
 kind: OpenShiftAPIServerConfig
 servingInfo:
@@ -2710,11 +2867,11 @@ servingInfo:
   clientCA: %s
 apiServerArguments:
   etcd-certfile:
-  - ""
+  - %q
   etcd-keyfile:
-  - ""
+  - %q
   etcd-cafile:
-  - ""
+  - %q
 storageConfig:
   urls:
   - %s
@@ -2724,7 +2881,8 @@ kubeClientConfig:
 		filepath.Join(stateDir, certgen.ServiceServingCertFilename),
 		filepath.Join(stateDir, certgen.ServiceServingKeyFilename),
 		filepath.Join(stateDir, certgen.CACertFilename),
-		etcdClientURL,
+		cert, key, ca,
+		urls,
 		filepath.Join(stateDir, certgen.OpenShiftAPIServerKubeconfigFilename))
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		return "", fmt.Errorf("write openshift-apiserver config: %w", err)

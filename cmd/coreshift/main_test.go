@@ -591,7 +591,7 @@ func TestKubeAPIServerConfigBindsLoopbackOnHost(t *testing.T) {
 // port-forwarding failing on name resolution, and without the client
 // certificate every kubelet-proxied path fails on authentication.
 func TestKubeAPIServerArgsKubeletConnection(t *testing.T) {
-	args := kubeAPIServerArgs("/state", "http://127.0.0.1:2379", defaultAPIPort,
+	args := kubeAPIServerArgs("/state", etcdOptions{}, defaultAPIPort,
 		"/state/kube-apiserver-config.json", "/state/token-review.kubeconfig")
 	var addressTypes, clientCert, clientKey bool
 	for _, arg := range args {
@@ -1054,7 +1054,7 @@ func TestPodmanRunArgs(t *testing.T) {
 		registry: "quay.io/openshift-release-dev/ocp-release",
 		arch:     "x86_64",
 	}
-	got := podmanRunArgs("coreshift-dev", "dev", 7443, "/state/root/clusters/dev", "/cache/root", "/secret/pull-secret", "localhost/coreshift:v1", release)
+	got := podmanRunArgs("coreshift-dev", "dev", 7443, "/state/root/clusters/dev", "/cache/root", "/secret/pull-secret", "localhost/coreshift:v1", release, etcdOptions{})
 	want := []string{
 		"run", "--detach",
 		"--name", "coreshift-dev",
@@ -1074,6 +1074,55 @@ func TestPodmanRunArgs(t *testing.T) {
 		"--version=",
 		"--registry=quay.io/openshift-release-dev/ocp-release",
 		"--arch=x86_64",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("podman args = %q\nwant %q", got, want)
+	}
+}
+
+// TestPodmanRunArgsExternalEtcd checks the podman command line for a
+// cluster on an external etcd: the three certificate files mounted
+// read-only like the pull secret, and the four external etcd flags passed
+// through to the run inside, pointing at the mounted copies.
+func TestPodmanRunArgsExternalEtcd(t *testing.T) {
+	release := releaseOptions{
+		image:    "reg.example/ocp-release:4.22.8-x86_64",
+		registry: "quay.io/openshift-release-dev/ocp-release",
+		arch:     "x86_64",
+	}
+	etcd := etcdOptions{
+		endpoints: "https://etcd.example:2379",
+		caFile:    "/etcd/ca.crt",
+		certFile:  "/etcd/client.crt",
+		keyFile:   "/etcd/client.key",
+	}
+	got := podmanRunArgs("coreshift-dev", "dev", 7443, "/state/root/clusters/dev", "/cache/root", "/secret/pull-secret", "localhost/coreshift:v1", release, etcd)
+	want := []string{
+		"run", "--detach",
+		"--name", "coreshift-dev",
+		"--network", "coreshift",
+		"--publish", "127.0.0.1:7443:7443",
+		"--publish", "127.0.0.1:7444:8445",
+		"--env", "XDG_STATE_HOME=/var/lib/coreshift/state",
+		"--env", "XDG_CACHE_HOME=/var/lib/coreshift/cache",
+		"--volume", "/state/root/clusters/dev:/var/lib/coreshift/state/coreshift/clusters/dev:z",
+		"--volume", "/cache/root:/var/lib/coreshift/cache/coreshift:z",
+		"--volume", "/secret/pull-secret:/etc/coreshift/pull-secret:ro,z",
+		"--volume", "/etcd/ca.crt:/etc/coreshift/etcd-ca:ro,z",
+		"--volume", "/etcd/client.crt:/etc/coreshift/etcd-cert:ro,z",
+		"--volume", "/etcd/client.key:/etc/coreshift/etcd-key:ro,z",
+		"localhost/coreshift:v1",
+		"--pull-secret=/etc/coreshift/pull-secret",
+		"--name=dev",
+		"--port=7443",
+		"--release-image=reg.example/ocp-release:4.22.8-x86_64",
+		"--version=",
+		"--registry=quay.io/openshift-release-dev/ocp-release",
+		"--arch=x86_64",
+		"--external-etcd-endpoints=https://etcd.example:2379",
+		"--external-etcd-ca=/etc/coreshift/etcd-ca",
+		"--external-etcd-cert=/etc/coreshift/etcd-cert",
+		"--external-etcd-key=/etc/coreshift/etcd-key",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("podman args = %q\nwant %q", got, want)
@@ -1333,13 +1382,82 @@ func TestWriteOAuthServerConfigRendersProviders(t *testing.T) {
 	}
 }
 
+// TestKubeAPIServerArgsEtcd pins both etcd shapes kube-apiserver takes:
+// with no external etcd configured, the internal etcd's plain-http URL
+// and no TLS flags, byte for byte as before the external flags existed;
+// with one configured, the external endpoints and the three TLS flags
+// pointing at the given files.
+func TestKubeAPIServerArgsEtcd(t *testing.T) {
+	internal := kubeAPIServerArgs("/state", etcdOptions{}, defaultAPIPort,
+		"/state/kube-apiserver-config.json", "/state/token-review.kubeconfig")
+	if !slices.Contains(internal, "--etcd-servers="+etcdClientURL) {
+		t.Fatalf("internal args missing the internal etcd URL:\n%q", internal)
+	}
+	for _, flag := range []string{"--etcd-cafile", "--etcd-certfile", "--etcd-keyfile"} {
+		if slices.ContainsFunc(internal, func(arg string) bool { return strings.HasPrefix(arg, flag+"=") }) {
+			t.Fatalf("internal args carry the external etcd TLS flag %s:\n%q", flag, internal)
+		}
+	}
+
+	etcd := etcdOptions{
+		endpoints: "https://etcd.example:2379",
+		caFile:    "/etcd/ca.crt",
+		certFile:  "/etcd/client.crt",
+		keyFile:   "/etcd/client.key",
+	}
+	external := kubeAPIServerArgs("/state", etcd, defaultAPIPort,
+		"/state/kube-apiserver-config.json", "/state/token-review.kubeconfig")
+	for _, want := range append(etcdTLSFlags(etcd), "--etcd-servers=https://etcd.example:2379") {
+		if !slices.Contains(external, want) {
+			t.Fatalf("external args missing %q:\n%q", want, external)
+		}
+	}
+}
+
+// TestEtcdOptionsValidate checks the external etcd flags' rule: the four
+// are required together, and plain-http endpoints are refused.
+func TestEtcdOptionsValidate(t *testing.T) {
+	complete := etcdOptions{
+		endpoints: "https://etcd.example:2379,https://etcd2.example:2379",
+		caFile:    "/etcd/ca.crt",
+		certFile:  "/etcd/client.crt",
+		keyFile:   "/etcd/client.key",
+	}
+	if err := complete.validate(); err != nil {
+		t.Fatalf("complete configuration refused: %v", err)
+	}
+	if err := (etcdOptions{}).validate(); err != nil {
+		t.Fatalf("empty configuration refused: %v", err)
+	}
+	for name, missing := range map[string]func(*etcdOptions){
+		"endpoints": func(e *etcdOptions) { e.endpoints = "" },
+		"ca":        func(e *etcdOptions) { e.caFile = "" },
+		"cert":      func(e *etcdOptions) { e.certFile = "" },
+		"key":       func(e *etcdOptions) { e.keyFile = "" },
+	} {
+		partial := complete
+		missing(&partial)
+		err := partial.validate()
+		if err == nil || !strings.Contains(err.Error(), "required together") {
+			t.Fatalf("%s: err = %v, want the required-together refusal", name, err)
+		}
+	}
+	plain := complete
+	plain.endpoints = "http://etcd.example:2379"
+	err := plain.validate()
+	if err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("err = %v, want plain-http endpoints refused", err)
+	}
+}
+
 // TestWriteOpenShiftAPIServerConfigContents checks that the config serves
 // on the advertise address with the shared service-serving certificate
 // and stores to the local etcd, so the constants cannot drift from what
-// the config carries.
+// the config carries. With no external etcd configured, the etcd TLS
+// arguments stay blank, the shape plain-http internal etcd needs.
 func TestWriteOpenShiftAPIServerConfigContents(t *testing.T) {
 	stateDir := t.TempDir()
-	path, err := writeOpenShiftAPIServerConfig(stateDir, "10.1.2.3")
+	path, err := writeOpenShiftAPIServerConfig(stateDir, "10.1.2.3", etcdOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1348,6 +1466,40 @@ func TestWriteOpenShiftAPIServerConfigContents(t *testing.T) {
 		fmt.Sprintf("10.1.2.3:%d", openShiftAPIServerPort),
 		filepath.Join(stateDir, certgen.ServiceServingCertFilename),
 		"- " + etcdClientURL,
+		`etcd-certfile:
+  - ""`,
+		`etcd-keyfile:
+  - ""`,
+		`etcd-cafile:
+  - ""`,
+	} {
+		if !strings.Contains(config, want) {
+			t.Fatalf("config missing %q:\n%s", want, config)
+		}
+	}
+}
+
+// TestWriteOpenShiftAPIServerConfigExternalEtcd checks the external
+// shape: the storage URLs point at the external endpoints, one entry per
+// endpoint, and the etcd TLS arguments carry the given files.
+func TestWriteOpenShiftAPIServerConfigExternalEtcd(t *testing.T) {
+	stateDir := t.TempDir()
+	etcd := etcdOptions{
+		endpoints: "https://10.9.8.7:2379,https://10.9.8.8:2379",
+		caFile:    "/etcd/ca.crt",
+		certFile:  "/etcd/client.crt",
+		keyFile:   "/etcd/client.key",
+	}
+	path, err := writeOpenShiftAPIServerConfig(stateDir, "10.1.2.3", etcd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := string(readFile(t, stateDir, filepath.Base(path)))
+	for _, want := range []string{
+		"etcd-certfile:\n  - \"/etcd/client.crt\"",
+		"etcd-keyfile:\n  - \"/etcd/client.key\"",
+		"etcd-cafile:\n  - \"/etcd/ca.crt\"",
+		"urls:\n  - https://10.9.8.7:2379\n  - https://10.9.8.8:2379",
 	} {
 		if !strings.Contains(config, want) {
 			t.Fatalf("config missing %q:\n%s", want, config)
@@ -1357,7 +1509,7 @@ func TestWriteOpenShiftAPIServerConfigContents(t *testing.T) {
 
 func TestEnsureClusterMarkerTracksFreshDirectory(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64"); err != nil {
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64", etcdOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	marker, err := readClusterMarker(stateDir)
@@ -1368,18 +1520,18 @@ func TestEnsureClusterMarkerTracksFreshDirectory(t *testing.T) {
 		t.Fatalf("marker = %+v, want the cluster's name and the release image reference", marker)
 	}
 	// The same name and release reuse the directory unchanged.
-	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64"); err != nil {
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64", etcdOptions{}); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestEnsureClusterMarkerRefusesDifferentRelease(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64"); err != nil {
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64", etcdOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
-	err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.19.3-x86_64")
+	err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.19.3-x86_64", etcdOptions{})
 	if err == nil {
 		t.Fatal("expected a refusal for a different release")
 	}
@@ -1402,11 +1554,11 @@ func TestEnsureClusterMarkerRefusesDifferentRelease(t *testing.T) {
 // directory, recording the upgrade, the same move a real cluster makes.
 func TestEnsureClusterMarkerUpgradesPatchInPlace(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64"); err != nil {
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64", etcdOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.9-x86_64"); err != nil {
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.9-x86_64", etcdOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	marker, err := readClusterMarker(stateDir)
@@ -1422,11 +1574,11 @@ func TestEnsureClusterMarkerUpgradesPatchInPlace(t *testing.T) {
 // older patch still refuses, stating the rule.
 func TestEnsureClusterMarkerRefusesPatchDowngrade(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.9-x86_64"); err != nil {
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.9-x86_64", etcdOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
-	err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64")
+	err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64", etcdOptions{})
 	if err == nil {
 		t.Fatal("expected a refusal for a patch downgrade")
 	}
@@ -1449,14 +1601,14 @@ func TestEnsureClusterMarkerRefusesPatchDowngrade(t *testing.T) {
 // the directory, as before, rather than guessing at an upgrade.
 func TestEnsureClusterMarkerExactMatchWithoutVersion(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:nightly"); err != nil {
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:nightly", etcdOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:nightly"); err != nil {
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:nightly", etcdOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
-	err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.9-x86_64")
+	err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.9-x86_64", etcdOptions{})
 	if err == nil {
 		t.Fatal("expected a refusal without a parseable version to compare")
 	}
@@ -1475,6 +1627,105 @@ func writeMarker(t *testing.T, stateDir, name, releaseRef string) {
 	t.Helper()
 	if err := writeClusterMarker(stateDir, clusterMarker{Name: name, Release: releaseRef}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestEnsureClusterMarkerRecordsEtcdMode checks that a state directory
+// records which etcd its data lives in, and that a run in the same mode
+// reuses it, marker unchanged.
+func TestEnsureClusterMarkerRecordsEtcdMode(t *testing.T) {
+	stateDir := t.TempDir()
+	etcd := etcdOptions{
+		endpoints: "https://etcd.example:2379",
+		caFile:    "/etcd/ca.crt",
+		certFile:  "/etcd/client.crt",
+		keyFile:   "/etcd/client.key",
+	}
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64", etcd); err != nil {
+		t.Fatal(err)
+	}
+	marker, err := readClusterMarker(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marker.EtcdEndpoints != etcd.endpoints {
+		t.Fatalf("marker = %+v, want the external etcd endpoints recorded", marker)
+	}
+	if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64", etcd); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestEnsureClusterMarkerRefusesEtcdModeMismatch checks the etcd mode's
+// reuse rule: a directory created with one etcd refuses a run asking for
+// the other, and one asking for different external endpoints, naming
+// both modes and the remedy. Without the refusal the directory would
+// silently become a different cluster, its certificates over different
+// etcd data.
+func TestEnsureClusterMarkerRefusesEtcdModeMismatch(t *testing.T) {
+	external := etcdOptions{
+		endpoints: "https://etcd.example:2379",
+		caFile:    "/etcd/ca.crt",
+		certFile:  "/etcd/client.crt",
+		keyFile:   "/etcd/client.key",
+	}
+	for name, tc := range map[string]struct{ recorded, requested etcdOptions }{
+		"internal to external": {etcdOptions{}, external},
+		"external to internal": {external, etcdOptions{}},
+	} {
+		stateDir := t.TempDir()
+		if err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64", tc.recorded); err != nil {
+			t.Fatal(err)
+		}
+
+		err := ensureClusterMarker(stateDir, "dev", "reg.example/ocp-release:4.22.8-x86_64", tc.requested)
+		if err == nil {
+			t.Fatalf("%s: expected a refusal", name)
+		}
+		for _, want := range []string{
+			"cannot be reused by",
+			"the supervised internal etcd",
+			"external etcd at " + external.endpoints,
+			"--name",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("%s: refusal missing %q:\n%v", name, want, err)
+			}
+		}
+		marker, err := readClusterMarker(stateDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if marker.EtcdEndpoints != tc.recorded.endpoints {
+			t.Fatalf("%s: refusal overwrote the marker, now %+v", name, marker)
+		}
+	}
+}
+
+// TestRunClusterRefusesPartialExternalEtcd checks that the together rule
+// fails a run before anything else: with no pull secret to read, the
+// endpoints without the certificates still yield the flag refusal.
+func TestRunClusterRefusesPartialExternalEtcd(t *testing.T) {
+	root := newRootCommand()
+	root.SetArgs([]string{"run", "cluster", "--pull-secret", "/nonexistent",
+		"--external-etcd-endpoints", "https://etcd.example:2379"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "required together") {
+		t.Fatalf("err = %v, want the external etcd flags' together refusal", err)
+	}
+}
+
+// TestCreateClusterRefusesEtcdCertsWithoutEndpoints checks the other
+// partial shape on the container command, refused before podman is even
+// looked for.
+func TestCreateClusterRefusesEtcdCertsWithoutEndpoints(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	root := newRootCommand()
+	root.SetArgs([]string{"create", "cluster", "--pull-secret", "/nonexistent",
+		"--external-etcd-ca", "/etcd/ca.crt"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "required together") {
+		t.Fatalf("err = %v, want the external etcd flags' together refusal", err)
 	}
 }
 
