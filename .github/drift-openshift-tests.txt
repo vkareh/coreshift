@@ -1,0 +1,95 @@
+# The nightly drift alarm's fifth probe: the curated slice of OpenShift's
+# own suite, run against the nightly cluster through the tests binary the
+# release payload ships. The list is fixed on purpose: a release that
+# renames or removes a listed test fails the alarm instead of quietly
+# narrowing it, and raising a verified line includes re-curating this
+# list against that line's release.
+#
+# Curation: tests that exercise the API surface and pass green on a
+# healthy nodeless control plane, so the alarm fires on drift, not on
+# designed limits. Excluded, with reasons:
+# - tests that require nodes, because pods must schedule and run
+#   (router serving, idling, builds, LDAP identity provider, image
+#   import and pull)
+# - tests that require deliberately-unrun operators (the image registry
+#   operator's config, the version operator's update states, the
+#   operator-created api Services behind the aggregated health checks)
+# - tests driven through the oc binary, which this alarm does not ship
+# - tests tagged [Slow] or [Disruptive]
+#
+# Trimmed from the natural green selection of 96 to fit the nightly
+# window: the slowest per-test costs (project watch and scoped access,
+# cluster-wide quota control, serial image admission) and duplicate
+# variants within a family (template instance impersonation, legacy RBAC
+# proxy endpoints, role binding restrictions, JSON patch, audit rule
+# rejection, pod security mapping, late lifecycle observation).
+#
+# Baseline: 62 tests, 5m12s wall, all green on 5.0.1 (2026-11-13),
+# reproduced on a second fresh boot of the same release.
+#
+# The alarm strips comment and blank lines before feeding the rest to
+# the runner, one test name per line, because the runner accepts
+# nothing else in the file.
+
+"[sig-api-machinery] APIServer CR fields validation additionalCORSAllowedOrigins [apigroup:config.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery] JSON Patch [apigroup:operator.openshift.io] should delete an entry from an array with a test precondition provided [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery] [Jira:apiserver-auth] Audit [OTP][OCP-24698] should report the current audit profile as a known valid value [apigroup:config.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery] [Jira:apiserver-auth] Audit [OTP][OCP-24699] should reject an invalid audit profile name in the APIServer configuration [apigroup:config.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery] [Jira:apiserver-auth] Audit [OTP][OCP-68361] should reject a custom audit rule with an empty group name [apigroup:config.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:APIServer] anonymous browsers should get a 403 from / [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:APIServer] authenticated browser should get a 200 from / [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:APIServer] should serve openapi v3 [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:APIServer] should serve openapi v3 discovery [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:APIServer][Late] kube-apiserver terminates within graceful termination period [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:FeatureGate][OCPFeatureGate:OKD] should reject OKD featureset on OCP clusters [apigroup:config.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:NetworkPolicy] Config Operator NetworkPolicy should restore config operator NetworkPolicies after delete or mutation [Serial][apigroup:config.openshift.io] [Suite:openshift/conformance/serial]"
+"[sig-api-machinery][Feature:NetworkPolicy] Config Operator NetworkPolicy should verify config namespace NetworkPolicy enforcement [apigroup:config.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ResourceQuota] Object count should properly count the number of imagestreams resources [apigroup:image.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ResourceQuota] Object count should properly count the number of persistentvolumeclaims resources [Serial] [Suite:openshift/conformance/serial]"
+"[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply should work for apps.openshift.io/v1, Resource=deploymentconfigs [apigroup:apps.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply should work for build.openshift.io/v1, Resource=buildconfigs [apigroup:build.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply should work for build.openshift.io/v1, Resource=builds [apigroup:build.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply should work for image.openshift.io/v1, Resource=images [apigroup:image.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply should work for image.openshift.io/v1, Resource=imagestreams [apigroup:image.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply should work for oauth.openshift.io/v1, Resource=oauthaccesstokens [apigroup:oauth.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply should work for oauth.openshift.io/v1, Resource=oauthauthorizetokens [apigroup:oauth.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply should work for oauth.openshift.io/v1, Resource=oauthclientauthorizations [apigroup:oauth.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply should work for oauth.openshift.io/v1, Resource=oauthclients [apigroup:oauth.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply should work for route.openshift.io/v1, Resource=routes [apigroup:route.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply should work for security.openshift.io/v1, Resource=rangeallocations [apigroup:security.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply should work for template.openshift.io/v1, Resource=brokertemplateinstances [apigroup:template.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply should work for template.openshift.io/v1, Resource=templateinstances [apigroup:template.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply should work for template.openshift.io/v1, Resource=templates [apigroup:template.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply should work for user.openshift.io/v1, Resource=groups [apigroup:user.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply should work for user.openshift.io/v1, Resource=identities [apigroup:user.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply should work for user.openshift.io/v1, Resource=users [apigroup:user.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-apimachinery] server-side-apply should function properly should clear fields when they are no longer being applied in FeatureGates [apigroup:config.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-apimachinery] server-side-apply should function properly should clear fields when they are no longer being applied in built-in APIs [Suite:openshift/conformance/parallel]"
+"[sig-arch][Early] APIs for openshift.io must have stable versions [Suite:openshift/conformance/parallel]"
+"[sig-arch][Early] CRDs for openshift.io should have subresource.status [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:OAuthServer] OAuth Authenticator accepts sha256 access tokens [apigroup:user.openshift.io][apigroup:oauth.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:OpenShiftAuthorization] The default cluster RBAC policy should have correct RBAC rules [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:OpenShiftAuthorization] authorization TestAuthorizationSubjectAccessReviewAPIGroup should succeed [apigroup:authorization.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:OpenShiftAuthorization] authorization TestBrowserSafeAuthorizer should succeed [apigroup:user.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:OpenShiftAuthorization] scopes TestTokensWithIllegalScopes should succeed [apigroup:oauth.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:OpenShiftAuthorization] scopes TestUnknownScopes should succeed [apigroup:user.openshift.io][apigroup:authorization.openshift.io][apigroup:project.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:OpenShiftAuthorization] self-SAR compatibility TestBootstrapPolicySelfSubjectAccessReviews should succeed [apigroup:user.openshift.io][apigroup:authorization.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:PodSecurity][Feature:SCC] creating pod controllers [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:PodSecurity][Feature:SCC] required-scc annotation is being applied to workloads [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:ProjectAPI]  TestInvalidRoleRefs should succeed [apigroup:authorization.openshift.io][apigroup:user.openshift.io][apigroup:project.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:ProjectAPI]  TestProjectIsNamespace should succeed [apigroup:project.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:ProjectAPI]  TestUnprivilegedNewProject [apigroup:project.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:RoleBindingRestrictions] RoleBindingRestrictions should be functional Create a RBAC rolebinding when subject is not already bound and is not permitted by any RBR should fail [apigroup:authorization.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:RoleBindingRestrictions] RoleBindingRestrictions should be functional Create a rolebinding that also contains system:non-existing users should succeed [apigroup:authorization.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:RoleBindingRestrictions] RoleBindingRestrictions should be functional Create a rolebinding when subject is already bound should succeed [apigroup:authorization.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:SCC][Early] should not have pod creation failures during install [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:SecurityContextConstraints]  TestAllowedSCCViaRBAC [apigroup:project.openshift.io][apigroup:user.openshift.io][apigroup:authorization.openshift.io][apigroup:security.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:SecurityContextConstraints]  TestPodUpdateSCCEnforcement [apigroup:user.openshift.io][apigroup:authorization.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:UserAPI] groups should work [apigroup:user.openshift.io][apigroup:project.openshift.io][apigroup:authorization.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-auth][Feature:UserAPI] users can manipulate groups [apigroup:user.openshift.io][apigroup:authorization.openshift.io][apigroup:project.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-devex][Feature:Templates] template-api TestTemplate [apigroup:template.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-devex][Feature:Templates] template-api TestTemplateTransformationFromConfig [apigroup:template.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-devex][Feature:Templates] templateinstance impersonation tests [apigroup:user.openshift.io][apigroup:authorization.openshift.io] should pass impersonation creation tests [apigroup:template.openshift.io] [Suite:openshift/conformance/parallel]"
+"[sig-etcd] etcd record the start revision of the etcd-operator [Early] [Suite:openshift/conformance/parallel]"
+"[sig-network] ServiceCIDR should be blocked [Suite:openshift/conformance/parallel]"
+"[sig-node][DRA][OCPFeatureGate:DynamicResourceAllocation] Dynamic Resource Allocation should serve only the expected DRA API versions [apigroup:resource.k8s.io] [Suite:openshift/conformance/parallel]"
