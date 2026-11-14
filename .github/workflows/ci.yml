@@ -159,6 +159,9 @@ jobs:
           served=""
           csr_issued=""
           soaked=""
+          tests_bin=""
+          suite_status=""
+          suite_missing=""
           if grep -q "Control plane ready" "$log"; then
             # The login probe: the OAuth endpoint authenticates the
             # generated user and hands out a token, which names its holder
@@ -222,6 +225,41 @@ jobs:
             done
             admin -X DELETE "$api/apis/certificates.k8s.io/v1/certificatesigningrequests/drift-probe" > /dev/null
             admin -X DELETE "$api/apis/machine.openshift.io/v1beta1/namespaces/openshift-machine-api/machines/drift-probe" > /dev/null
+            # The upstream suite probe: the payload's own test binary,
+            # resolved from the release the run already booted, runs the
+            # repository's curated API-surface selection against the
+            # admin kubeconfig. OPENSHIFT_SKIP_EXTERNAL_TESTS keeps the
+            # runner to its built-in suite, so it pulls no other
+            # component's test images; the nodeless control plane skips
+            # the operator-stability gate and the singleton rebalance,
+            # which wait on machinery that never runs here; the one
+            # monitor left is inert bookkeeping, standing in for the
+            # node- and operator-watching defaults. Ten minutes bound the
+            # run at twice its five-minute baseline.
+            tests_bin=$(./coreshift get tests --pull-secret "$secret")
+            selection="$RUNNER_TEMP/drift-tests.txt"
+            grep -vE '^(#|$)' .github/drift-openshift-tests.txt > "$selection"
+            tests_log="$RUNNER_TEMP/drift-tests.log"
+            KUBECONFIG="$state/admin.kubeconfig" \
+              OPENSHIFT_SKIP_EXTERNAL_TESTS=1 \
+              OPENSHIFT_TESTS_SKIP_STABLE_CLUSTER=1 \
+              OPENSHIFT_TESTS_SKIP_SINGLETON_REBALANCE=1 \
+              timeout 600 "$tests_bin" run -f "$selection" \
+              --monitor interval-serializer \
+              --junit-dir "$RUNNER_TEMP/drift-junit" \
+              > "$tests_log" 2>&1 || suite_status=$?
+            unset KUBECONFIG
+            # A green exit is not enough: every test in the selection
+            # must have run and passed, so a release that renames or
+            # removes a curated test fails the alarm instead of quietly
+            # narrowing it.
+            if [ -z "$suite_status" ]; then
+              while IFS= read -r test; do
+                grep -F -- "$test" "$tests_log" | grep -q '^passed:' \
+                  || suite_missing="$suite_missing
+$test"
+              done < "$selection"
+            fi
             # Five minutes: a component can die a while after the control
             # plane is ready, past every check above.
             soaked=1
@@ -255,11 +293,25 @@ jobs:
             echo "The latest release did not approve and issue a joining node's certificate request; the join-acceptance layer needs updating."
             exit 1
           fi
+          if [ -z "$tests_bin" ]; then
+            echo "The latest release's own test binary could not be resolved from its payload; the tests component needs attention before it can be supported."
+            exit 1
+          fi
+          if [ -n "$suite_status" ] || grep -q '^failed:' "$tests_log" 2>/dev/null; then
+            echo "The latest release failed tests from OpenShift's own suite; its stand-ins need updating before it can be supported. Failing tests:"
+            grep '^failed:' "$tests_log" | sed 's/^failed: ([^)]*) [^ ]* /  /' || true
+            exit 1
+          fi
+          if [ -n "$suite_missing" ]; then
+            echo "OpenShift's own suite no longer runs every test in the curated selection; the selection needs refreshing for this release. Tests missing from the run:"
+            echo "$suite_missing"
+            exit 1
+          fi
           if [ "$soaked" != 1 ]; then
             echo "The latest release did not stay up and answering for the five minutes after ready; its stand-ins need updating before it can be supported."
             exit 1
           fi
-          echo "The latest release reached ready on both runs, labeled a new namespace, logged a generated user in, answered a project listing through the aggregated OpenShift API, approved and issued a joining node's certificate request, stayed up for its five-minute soak, and shut down cleanly."
+          echo "The latest release reached ready on both runs, labeled a new namespace, logged a generated user in, answered a project listing through the aggregated OpenShift API, approved and issued a joining node's certificate request, passed its own suite's curated API-surface tests, stayed up for its five-minute soak, and shut down cleanly."
 
   container-smoke:
     if: github.event_name == 'push' || github.event_name == 'schedule'

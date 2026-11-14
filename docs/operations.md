@@ -311,8 +311,11 @@ warning: 5.1.0 is beyond the newest verified line, 5.0 — it may not work
 ignoring the line. It exists for the nightly drift alarm in CI, which
 probes the frontier so a new release is noticed: it boots the
 release, soaks it, and checks its pod security labeling, its login
-chain, its aggregated API, and its node join acceptance before
-shutting it down; everything else should stay on the verified
+chain, its aggregated API, its node join acceptance, and a curated
+slice of the release's own test suite — the fifth probe runs the
+payload's `openshift-tests` binary against the booted cluster, so each
+release is vetted by its own suite — before shutting it down;
+everything else should stay on the verified
 default. Raising the line is deliberate work, done together with the
 stand-in updates a new line needs, and it is one constant in the
 code.
