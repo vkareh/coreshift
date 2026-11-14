@@ -1969,6 +1969,7 @@ func newGetCommand() *cobra.Command {
 	}
 	cmd.AddCommand(newGetClustersCommand())
 	cmd.AddCommand(newGetKubeconfigCommand())
+	cmd.AddCommand(newGetTestsCommand())
 	return cmd
 }
 
@@ -2058,6 +2059,61 @@ func runGetKubeconfig(name string) error {
 		return unknownCluster(name)
 	}
 	fmt.Println(filepath.Join(stateDir, certgen.AdminKubeconfigFilename))
+	return nil
+}
+
+// newGetTestsCommand builds the command that prints the path to the
+// payload's own test binary, extracting it into the shared cache first.
+func newGetTestsCommand() *cobra.Command {
+	var name string
+	var pullSecretPath string
+	cmd := &cobra.Command{
+		Use:          "tests",
+		Short:        "Print the path to the recorded release's own test binary, extracting it if needed",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runGetTests(cmd.Context(), name, pullSecretPath)
+		},
+	}
+	cmd.Flags().StringVar(&name, "name", defaultClusterName, "name of the cluster whose release the tests are resolved from")
+	cmd.Flags().StringVar(&pullSecretPath, "pull-secret", "", "path to the pull secret for the registry the release's images come from")
+	if err := cmd.MarkFlagRequired("pull-secret"); err != nil {
+		panic(err) // the flag is defined above
+	}
+	return cmd
+}
+
+// runGetTests resolves the tests binary from the release the named
+// cluster's state records — the payload the run already resolved, not
+// whatever the registry holds newest — extracts it into the shared cache,
+// and prints its path. The control plane need not be running; only the
+// recorded release matters.
+func runGetTests(ctx context.Context, name, pullSecretPath string) error {
+	stateDir, err := clusterDir(name)
+	if err != nil {
+		return err
+	}
+	release := stateRelease(stateDir)
+	if release == "" {
+		return unknownCluster(name)
+	}
+	pullSecret, err := os.ReadFile(pullSecretPath)
+	if err != nil {
+		return fmt.Errorf("read pull secret: %w", err)
+	}
+	client, err := image.NewClient(pullSecret)
+	if err != nil {
+		return fmt.Errorf("create image client: %w", err)
+	}
+	releaseRoot, err := client.CachedRelease(ctx, release)
+	if err != nil {
+		return fmt.Errorf("prepare release image: %w", err)
+	}
+	path, err := client.ExtractTests(ctx, releaseRoot)
+	if err != nil {
+		return err
+	}
+	fmt.Println(path)
 	return nil
 }
 

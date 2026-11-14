@@ -25,6 +25,13 @@ const testReleaseManifest = `{
           "kind": "DockerImage",
           "name": "quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:hyperkubedigest"
         }
+      },
+      {
+        "name": "tests",
+        "from": {
+          "kind": "DockerImage",
+          "name": "quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:testsdigest"
+        }
       }
     ]
   }

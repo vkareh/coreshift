@@ -35,6 +35,7 @@ One rule: `run` means this terminal, `create` means a managed container, `delete
 | `delete cluster` | `--name`, `--preserve-state` | Remove the cluster and its state; `--preserve-state` keeps the state. |
 | `get clusters` | | List clusters: port, release, live readiness. |
 | `get kubeconfig` | `--name` | Print a cluster's admin kubeconfig path. |
+| `get tests` | `--pull-secret` (required), `--name` | Print the path to the recorded release's own test binary, extracting it if needed. |
 | `cleanup` | `--name`, `--all`, `--cache` | Remove state; `--cache` also clears everything rebuildable (image cache, minted images). |
 | `version` | | Print the build version. |
 
