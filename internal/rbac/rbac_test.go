@@ -143,6 +143,31 @@ func TestSeedRegistersNodeBootstrapper(t *testing.T) {
 	}
 }
 
+func TestSeedRegistersProjectDeployer(t *testing.T) {
+	client := fake.NewSimpleClientset()
+
+	if err := seed(context.Background(), client); err != nil {
+		t.Fatal(err)
+	}
+
+	role, err := client.RbacV1().ClusterRoles().Get(context.Background(), deployerRole, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("cluster role: %v", err)
+	}
+	wantRules := []rbacv1.PolicyRule{
+		{APIGroups: []string{""}, Resources: []string{"replicationcontrollers"}, Verbs: []string{"delete", "get", "list", "patch", "update", "watch"}},
+		{APIGroups: []string{""}, Resources: []string{"replicationcontrollers/scale"}, Verbs: []string{"get", "update"}},
+		{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"create", "get", "list", "watch"}},
+		{APIGroups: []string{""}, Resources: []string{"pods/log"}, Verbs: []string{"get"}},
+		{APIGroups: []string{""}, Resources: []string{"events"}, Verbs: []string{"create", "list"}},
+		{APIGroups: []string{"", "image.openshift.io"}, Resources: []string{"imagestreamtags", "imagetags"}, Verbs: []string{"create", "update"}},
+	}
+	if !reflect.DeepEqual(role.Rules, wantRules) {
+		t.Fatalf("cluster role has unexpected rules: %+v", role.Rules)
+	}
+	assertBoundToServiceAccount(t, client, deployerRole, defaultRoleBindingPrefix)
+}
+
 func TestSeedIsRepeatable(t *testing.T) {
 	client := fake.NewSimpleClientset()
 
@@ -156,15 +181,15 @@ func TestSeedIsRepeatable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(roles.Items) != 3 {
-		t.Fatalf("expected the same three cluster roles after reseeding, got %d", len(roles.Items))
+	if len(roles.Items) != 4 {
+		t.Fatalf("expected the same four cluster roles after reseeding, got %d", len(roles.Items))
 	}
 	bindings, err := client.RbacV1().ClusterRoleBindings().List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bindings.Items) != 5 {
-		t.Fatalf("expected the same five cluster role bindings after reseeding, got %d", len(bindings.Items))
+	if len(bindings.Items) != 6 {
+		t.Fatalf("expected the same six cluster role bindings after reseeding, got %d", len(bindings.Items))
 	}
 }
 

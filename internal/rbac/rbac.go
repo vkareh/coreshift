@@ -50,6 +50,17 @@ const (
 	nodeBootstrapperBinding = "system-bootstrap-node-bootstrapper"
 )
 
+// The deployer permission pair the openshift-controller-manager-operator
+// applies in real clusters: the controller manager creates the
+// system:deployers role binding in every new project, and the API server
+// only lets it bind a role the controller itself holds, so without the
+// pair the binding never arrives and project setup that waits for it
+// stalls.
+const (
+	deployerRole             = "system:deployer"
+	defaultRoleBindingPrefix = "default-rolebindings-controller"
+)
+
 // The node bootstrap identity the machine config operator's join flow
 // uses: the service account whose token a node's bootstrap kubeconfig
 // carries, in the operator's namespace.
@@ -104,6 +115,9 @@ func seed(ctx context.Context, client kubernetes.Interface) error {
 		return err
 	}
 	if err := ensureNodeBootstrapper(ctx, client); err != nil {
+		return err
+	}
+	if err := ensureProjectDeployer(ctx, client); err != nil {
 		return err
 	}
 	return ensureNodeSelfApproval(ctx, client)
@@ -294,6 +308,71 @@ func ensureNodeBootstrapper(ctx context.Context, client kubernetes.Interface) er
 	_, err := client.RbacV1().ClusterRoleBindings().Create(ctx, binding, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("register %s cluster role binding: %w", nodeBootstrapperBinding, err)
+	}
+	return nil
+}
+
+// ensureProjectDeployer grants the default role bindings controller the
+// deployer role it binds in every new project, as the pair the
+// openshift-controller-manager-operator applies in real clusters: the
+// controller may only create role bindings referencing roles it holds,
+// so the role and the controller's binding to it are seeded together.
+// Copied verbatim from the operator's shipped assets.
+func ensureProjectDeployer(ctx context.Context, client kubernetes.Interface) error {
+	role := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: deployerRole},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{""},
+				Resources: []string{"replicationcontrollers"},
+				Verbs:     []string{"delete", "get", "list", "patch", "update", "watch"},
+			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"replicationcontrollers/scale"},
+				Verbs:     []string{"get", "update"},
+			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"pods"},
+				Verbs:     []string{"create", "get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"pods/log"},
+				Verbs:     []string{"get"},
+			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"events"},
+				Verbs:     []string{"create", "list"},
+			},
+			{
+				APIGroups: []string{"", "image.openshift.io"},
+				Resources: []string{"imagestreamtags", "imagetags"},
+				Verbs:     []string{"create", "update"},
+			},
+		},
+	}
+	if _, err := client.RbacV1().ClusterRoles().Create(ctx, role, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("register %s cluster role: %w", deployerRole, err)
+	}
+	binding := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: deployerRole},
+		Subjects: []rbacv1.Subject{{
+			Kind:      rbacv1.ServiceAccountKind,
+			Name:      defaultRoleBindingPrefix,
+			Namespace: infraNamespace,
+		}},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     deployerRole,
+		},
+	}
+	_, err := client.RbacV1().ClusterRoleBindings().Create(ctx, binding, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("register %s cluster role binding: %w", deployerRole, err)
 	}
 	return nil
 }
