@@ -256,8 +256,7 @@ jobs:
             if [ -z "$suite_status" ]; then
               while IFS= read -r test; do
                 grep -F -- "$test" "$tests_log" | grep -q '^passed:' \
-                  || suite_missing="$suite_missing
-$test"
+                  || suite_missing+="$test"$'\n'
               done < "$selection"
             fi
             # Five minutes: a component can die a while after the control

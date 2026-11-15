@@ -22,6 +22,8 @@ lint:
 	else \
 		go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run; \
 	fi
+	@python3 -c "import glob, yaml, sys; [yaml.safe_load(open(f)) for f in glob.glob('.github/workflows/*.yml')]" || \
+		{ echo 'workflow yaml failed to parse'; exit 1; }
 
 test:
 	go test ./...
